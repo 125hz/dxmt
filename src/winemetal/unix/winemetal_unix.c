@@ -46,6 +46,11 @@ typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
 #define STATUS_UNSUCCESSFUL 0xC0000001
 #define STATUS_NOT_IMPLEMENTED 0xC0000002
+/* MADEIRA (WOW64_DESIGN.md section 7.4, rule 4: no fake success): the 32-bit
+ * variants below fail the call when an argument block cannot be converted, so
+ * they need the two NT status values for that. */
+#define STATUS_INVALID_PARAMETER 0xC000000D
+#define STATUS_INVALID_ADDRESS 0xC0000141
 
 /* ml762: remote backend. Included after the NTSTATUS/STATUS_* defines it uses
  * and before the first routed handler; the packer's include sits much further
@@ -2900,9 +2905,106 @@ thunk_SM50GetArgumentsInfo(void *args) {
   return STATUS_SUCCESS;
 }
 
+/* DXSO (D3D9 shader model 1.x-3.x) compilation, slots 145-149.  Like the
+ * SM50 family this is a CPU-only translator: it takes and returns plain
+ * memory and touches no Metal object, so it stays on whichever machine runs
+ * the guest and is deliberately not remote-guarded. */
+
+static NTSTATUS
+thunk_DXSOInitialize(void *args) {
+  struct dxso_initialize_params *params = args;
+
+  params->ret = DXSOInitialize(params->bytecode, params->bytecode_size, params->shader);
+
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk_DXSODestroy(void *args) {
+  struct dxso_destroy_params *params = args;
+
+  DXSODestroy(params->shader);
+
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk_DXSOCompile(void *args) {
+  struct dxso_compile_params *params = args;
+
+  params->ret = DXSOCompile(params->shader, params->args, params->func_name, params->bitcode);
+
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk_DXSOGetCompiledBitcode(void *args) {
+  struct dxso_get_compiled_bitcode_params *params = args;
+
+  DXSOGetCompiledBitcode(params->bitcode, params->data_out);
+
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk_DXSODestroyBitcode(void *args) {
+  struct dxso_destroy_bitcode_params *params = args;
+
+  DXSODestroyBitcode(params->bitcode);
+
+  return STATUS_SUCCESS;
+}
+
+/* MADEIRA, WOW64_DESIGN.md sections 2 and 7 ("shifted guest window").
+ *
+ * On iOS a 32-bit pseudo-process cannot own the low 4 GB: XNU forces a 4 GB
+ * __PAGEZERO, so nothing is ever mapped below 4 GB.  Instead each 32-bit
+ * pseudo-process gets a guest window -- one reserved host range [B, B+4G) --
+ * and guest address `a` (what the x86 code sees, always < 4 GB) lives at host
+ * address B + a.
+ *
+ * An entry of __wine_unix_call_wow64_funcs receives its OUTER `args` pointer
+ * already converted by the WoW64 CPU module, but every pointer EMBEDDED in
+ * that 32-bit block is still a GUEST address.  Upstream's UInt32ToPtr is a
+ * bare zero-extension, which is correct only under the classic WoW64 identity
+ * guest == host.  Here it would produce a sub-4 GB address that is not mapped
+ * at all, so the base has to be added.  That makes this function the DXMT
+ * counterpart of ios_wow_host_ptr() in build/ntdll-unix/ios_wow.h, and it is
+ * the single conversion point for all 22 of its call sites in the thunk32_*
+ * handlers below.
+ *
+ * ios_wow_base() is defined in ntdll's unix side (build/ntdll-unix/
+ * virtual_ios.c, declared in ios_wow.h).  DXMT's unix half is statically
+ * linked into the very same binary -- libdxmt_combined.a inside Madeira.app --
+ * so the symbol resolves at link time with no new dependency.  It returns 0
+ * for a process that has no guest window, which collapses this back to the
+ * plain zero-extension: a 64-bit caller reaching here, and every non-iOS
+ * build, behave exactly as before.  NULL is preserved in both directions. */
+#if TARGET_OS_IOS
+extern unsigned long ios_wow_base(void);
+#endif
+
 static inline void *
 UInt32ToPtr(uint32_t v) {
+#if TARGET_OS_IOS
+  return v ? (void *)(ios_wow_base() + (uint64_t)v) : NULL;
+#else
   return (void *)(uint64_t)v;
+#endif
+}
+
+/* The reverse direction: a host pointer written back into a field that a
+ * 32-bit caller will read.  The field is a WMTMemoryPointer (8 bytes on both
+ * sides: `void *ptr` plus a `uint32_t high_part` that the i386 side forces to
+ * 0), so storing the guest address as a pointer value leaves the high half
+ * zero, which is what the i386 accessor asserts on. */
+static inline void *
+PtrToUInt32Ptr(void *host) {
+#if TARGET_OS_IOS
+  return host ? (void *)(uint64_t)(uint32_t)((unsigned long)host - ios_wow_base()) : NULL;
+#else
+  return (void *)(uint64_t)(uint32_t)(uintptr_t)host;
+#endif
 }
 
 #ifndef DXMT_NATIVE
@@ -3203,6 +3305,273 @@ thunk32_SM50GetArgumentsInfo(void *args) {
 
   return STATUS_SUCCESS;
 }
+/* MADEIRA (WOW64_DESIGN.md section 7): imported from dacevedo12/dxmt
+ * tag v0.4-d3d9 (LGPL-2.1-or-later, see research/dxmt/LICENSE-MADEIRA.md).
+ * Unchanged except that UInt32ToPtr above is the guest-window conversion
+ * (+B) on iOS rather than a bare zero-extension, which is what makes the
+ * embedded `elements` / `next` / bytecode pointers usable here. */
+/* DXSO compilation argument chain: same shape as SM50's 32-bit
+   chain conversion (sm50_compilation_argument32_convert). DXSO has
+   its own enum + struct family so the d3d9 caller picks the right
+   types at compile time, but the wire-form is byte-identical to
+   SM50's so we reuse the same UInt32ToPtr unpack pattern. The IA
+   layout's `elements` pointer points at app-side memory: already
+   in the wow64 32-bit address space: so it round-trips through
+   UInt32ToPtr without further translation. */
+struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+};
+
+struct DXSO_SHADER_IA_INPUT_LAYOUT_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  enum DXSO_INDEX_BUFFER_FORMAT index_buffer_format;
+  uint32_t slot_mask;
+  uint32_t num_elements;
+  uint32_t elements;
+  uint32_t position_transformed;
+  uint32_t vs_float_const_count;
+};
+
+struct DXSO_SHADER_PSO_PIXEL_SHADER_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint32_t alpha_test_func;
+  uint32_t dual_source_blending;
+  uint32_t flat_shading;
+  uint32_t emit_sample_mask;
+  uint32_t unorm_output_reg_mask;
+};
+
+struct DXSO_SHADER_PS_SAMPLER_LAYOUT_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint8_t kinds[16];
+};
+
+struct DXSO_SHADER_PS_POINT_SPRITE_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+};
+
+struct DXSO_SHADER_PS_FOG_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint32_t mode;
+  uint32_t coord_is_w;
+};
+
+struct DXSO_SHADER_FFP_KEY_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint32_t kind;
+  uint32_t has_diffuse;
+  uint32_t has_texcoord0;
+  uint32_t has_specular;
+  uint32_t tex0_mode;
+  uint32_t stages[8][3];
+  uint32_t point_size;
+  uint32_t point_sprite;
+  uint32_t point_scale;
+  uint32_t texcoord_mask;
+  uint32_t texcoord_transform_key;
+  uint32_t lighting_key;
+  uint32_t fog_vertex_mode;
+  uint32_t vertex_blend;
+  uint32_t texgen_key;
+  uint32_t texcoord_index_key;
+  uint32_t sampler_kind_key;
+  uint32_t flat_shading;
+  uint32_t point_size_per_vertex;
+  uint32_t decl_has_diffuse;
+  uint32_t range_fog;
+  uint32_t emit_sample_mask;
+};
+
+struct DXSO_SHADER_VS_POINT_SIZE_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+};
+
+
+
+void
+dxso_compilation_argument32_convert(
+    struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA *first_arg, struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA32 *args32
+) {
+  struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA *last_arg = first_arg;
+
+  first_arg->type = DXSO_SHADER_ARGUMENT_TYPE_MAX;
+  first_arg->next = NULL;
+
+  while (args32) {
+    /* Make an unhandled arg type a hard error, not a silent drop: a new
+       DXSO_SHADER_* value added to the enum and the 64-bit caller but not to
+       this 32-bit converter would otherwise vanish on WoW64 only (the exact
+       shape of the historical alpha-test arg-drop). -Wswitch already flags it;
+       promote just this switch to an error so the build catches it. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic error "-Wswitch"
+    switch (args32->type) {
+    case DXSO_SHADER_IA_INPUT_LAYOUT: {
+      struct DXSO_SHADER_IA_INPUT_LAYOUT_DATA32 *src = (void *)args32;
+      struct DXSO_SHADER_IA_INPUT_LAYOUT_DATA *data = malloc(sizeof(struct DXSO_SHADER_IA_INPUT_LAYOUT_DATA));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      last_arg->next = NULL;
+      data->type = src->type;
+      data->index_buffer_format = src->index_buffer_format;
+      data->slot_mask = src->slot_mask;
+      data->num_elements = src->num_elements;
+      data->elements = UInt32ToPtr(src->elements);
+      data->position_transformed = src->position_transformed;
+      data->vs_float_const_count = src->vs_float_const_count;
+      break;
+    }
+    case DXSO_SHADER_PSO_PIXEL_SHADER: {
+      struct DXSO_SHADER_PSO_PIXEL_SHADER_DATA32 *src = (void *)args32;
+      struct DXSO_SHADER_PSO_PIXEL_SHADER_DATA *data = malloc(sizeof(struct DXSO_SHADER_PSO_PIXEL_SHADER_DATA));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      last_arg->next = NULL;
+      data->type = src->type;
+      data->alpha_test_func = src->alpha_test_func;
+      data->dual_source_blending = src->dual_source_blending;
+      data->flat_shading = src->flat_shading;
+      data->emit_sample_mask = src->emit_sample_mask;
+      data->unorm_output_reg_mask = src->unorm_output_reg_mask;
+      break;
+    }
+    case DXSO_SHADER_PS_SAMPLER_LAYOUT: {
+      struct DXSO_SHADER_PS_SAMPLER_LAYOUT_DATA32 *src = (void *)args32;
+      struct DXSO_SHADER_PS_SAMPLER_LAYOUT_DATA *data = malloc(sizeof(struct DXSO_SHADER_PS_SAMPLER_LAYOUT_DATA));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      last_arg->next = NULL;
+      data->type = src->type;
+      memcpy(data->kinds, src->kinds, sizeof(data->kinds));
+      break;
+    }
+    case DXSO_SHADER_PS_POINT_SPRITE: {
+      struct DXSO_SHADER_PS_POINT_SPRITE_DATA *data = malloc(sizeof(struct DXSO_SHADER_PS_POINT_SPRITE_DATA));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      last_arg->next = NULL;
+      data->type = DXSO_SHADER_PS_POINT_SPRITE;
+      break;
+    }
+    case DXSO_SHADER_FFP_KEY: {
+      struct DXSO_SHADER_FFP_KEY_DATA32 *src = (void *)args32;
+      struct DXSO_SHADER_FFP_KEY_DATA *data = malloc(sizeof(struct DXSO_SHADER_FFP_KEY_DATA));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      last_arg->next = NULL;
+      data->type = DXSO_SHADER_FFP_KEY;
+      data->kind = src->kind;
+      data->has_diffuse = src->has_diffuse;
+      data->has_texcoord0 = src->has_texcoord0;
+      data->has_specular = src->has_specular;
+      data->tex0_mode = src->tex0_mode;
+      memcpy(data->stages, src->stages, sizeof(data->stages));
+      data->point_size = src->point_size;
+      data->point_sprite = src->point_sprite;
+      data->point_scale = src->point_scale;
+      data->texcoord_mask = src->texcoord_mask;
+      data->texcoord_transform_key = src->texcoord_transform_key;
+      data->lighting_key = src->lighting_key;
+      data->fog_vertex_mode = src->fog_vertex_mode;
+      data->vertex_blend = src->vertex_blend;
+      data->texgen_key = src->texgen_key;
+      data->texcoord_index_key = src->texcoord_index_key;
+      data->sampler_kind_key = src->sampler_kind_key;
+      data->flat_shading = src->flat_shading;
+      data->point_size_per_vertex = src->point_size_per_vertex;
+      data->decl_has_diffuse = src->decl_has_diffuse;
+      data->range_fog = src->range_fog;
+      data->emit_sample_mask = src->emit_sample_mask;
+      break;
+    }
+    case DXSO_SHADER_VS_POINT_SIZE: {
+      struct DXSO_SHADER_VS_POINT_SIZE_DATA32 *src = (void *)args32;
+      struct DXSO_SHADER_VS_POINT_SIZE_DATA *data = malloc(sizeof(struct DXSO_SHADER_VS_POINT_SIZE_DATA));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      last_arg->next = NULL;
+      data->type = DXSO_SHADER_VS_POINT_SIZE;
+      (void)src;
+      break;
+    }
+    case DXSO_SHADER_PS_BUMP_ENV:
+      /* Reserved: bump-env now rides the shared PS uniform tail, so the
+         host never emits this arg. Skip it if an older caller does. */
+      break;
+    case DXSO_SHADER_PS_FOG: {
+      struct DXSO_SHADER_PS_FOG_DATA32 *src = (void *)args32;
+      struct DXSO_SHADER_PS_FOG_DATA *data = malloc(sizeof(struct DXSO_SHADER_PS_FOG_DATA));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      last_arg->next = NULL;
+      data->type = DXSO_SHADER_PS_FOG;
+      data->mode = src->mode;
+      data->coord_is_w = src->coord_is_w;
+      break;
+    }
+    case DXSO_SHADER_ARGUMENT_TYPE_MAX:
+      break;
+    }
+#pragma GCC diagnostic pop
+    args32 = UInt32ToPtr(args32->next);
+  }
+}
+
+void
+dxso_compilation_argument32_free(struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA *first_arg) {
+  struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA *arg = first_arg->next;
+
+  while (arg) {
+    struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA *next = arg->next;
+    free(arg);
+    arg = next;
+  }
+}
+
+static NTSTATUS
+thunk32_DXSOInitialize(void *args) {
+  struct dxso_initialize_params32 *params = args;
+
+  params->ret = DXSOInitialize(
+      UInt32ToPtr(params->bytecode), params->bytecode_size, UInt32ToPtr(params->shader)
+  );
+
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk32_DXSOGetCompiledBitcode(void *args) {
+  struct dxso_get_compiled_bitcode_params32 *params = args;
+
+  DXSOGetCompiledBitcode(params->bitcode, UInt32ToPtr(params->data_out));
+
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk32_DXSOCompile(void *args) {
+  struct dxso_compile_params32 *params = args;
+  struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA first_arg;
+  struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA32 *args32 = UInt32ToPtr(params->args);
+  dxso_compilation_argument32_convert(&first_arg, args32);
+
+  params->ret = DXSOCompile(
+      params->shader, &first_arg, UInt32ToPtr(params->func_name), UInt32ToPtr(params->bitcode)
+  );
+
+  dxso_compilation_argument32_free(&first_arg);
+
+  return STATUS_SUCCESS;
+}
+
 #endif /* DXMT_NATIVE */
 
 static NTSTATUS
@@ -3920,12 +4289,696 @@ NTSTATUS _CacheWriter_alloc_init(void *obj);
 NTSTATUS _CacheWriter_set(void *obj);
 NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
 
+#ifndef DXMT_NATIVE
+/* ------------------------------------------------------------------------
+ * MADEIRA (WOW64_DESIGN.md section 7.4): 32-bit variants for every slot whose
+ * argument block carries an EMBEDDED pointer.
+ *
+ * The outer `args` pointer is converted for us by the WoW64 CPU module; every
+ * pointer inside the block is still a GUEST address, and under the shifted
+ * guest window (section 2) a guest address is NOT a host address.  Before
+ * this, these slots were shared verbatim between the two tables, so a 32-bit
+ * caller had its guest pointers dereferenced as host pointers.
+ *
+ * Why the 64-bit struct is reused instead of a `*_params32` mirror: DXMT wraps
+ * every embedded pointer in WMTMemoryPointer / WMTConstMemoryPointer, which is
+ * 8 bytes on both sides (`void *ptr` plus an i386-only `uint32_t high_part`
+ * the 32-bit side forces to 0).  The blocks are therefore layout-identical and
+ * the only thing that differs is the VALUE of the pointer fields, so each
+ * variant converts them in place, calls the 64-bit handler, and puts the guest
+ * values back.  Restoring matters: the block is the guest's own memory and it
+ * reads its own fields again (DXMT reuses the WMTBufferInfo it passed in).
+ *
+ * Rules followed here (section 7.4): every embedded pointer is converted at
+ * every level of nesting before any dereference; NULL stays NULL; an OUT
+ * pointer field written back for the guest is converted the other way with
+ * PtrToUInt32Ptr; handles, sizes, flags and gpu_address are never touched.
+ * ------------------------------------------------------------------------ */
+
+/* Guest -> host for a pointer field an i386 caller wrote.  It stored 4 bytes
+ * of guest address and a zero high half, so the 64-bit read of the field is
+ * the zero-extended guest address; UInt32ToPtr adds the window base and
+ * preserves NULL. */
+static inline void *
+wow_in(const void *field) {
+  return UInt32ToPtr((uint32_t)(uintptr_t)field);
+}
+
+/* Host -> guest, for a field the guest will read back. */
+static inline void *
+wow_out(const void *host) {
+  return PtrToUInt32Ptr((void *)host);
+}
+
+static NTSTATUS
+_NSString_getCString32(void *obj) {
+  struct unixcall_nsstring_getcstring *params = obj;
+  uint64_t guest = params->buffer_ptr;
+  NTSTATUS status;
+
+  /* OUT buffer; the POINTER is IN. */
+  params->buffer_ptr = (uint64_t)(uintptr_t)wow_in((void *)(uintptr_t)guest);
+  status = _NSString_getCString(obj);
+  params->buffer_ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MTLDevice_newBuffer32(void *obj) {
+  struct unixcall_mtldevice_newbuffer *params = obj;
+  void *guest_info = params->info.ptr;
+  struct WMTBufferInfo *info = wow_in(guest_info);
+  void *guest_memory;
+  uint64_t storage_mode;
+  NTSTATUS status;
+
+  if (!info) {
+    params->ret = 0;
+    return STATUS_INVALID_PARAMETER;
+  }
+
+  /* MADEIRA (WOW64_DESIGN.md section 7.5).  Two paths exist here:
+   *
+   *  - caller-supplied memory (info->memory.ptr non-NULL) is DXMT's normal
+   *    path -- the ring bump allocator hands in its own PE-side heap block and
+   *    keeps writing argument-buffer contents through that same pointer.  For
+   *    a 32-bit caller that block came from a VirtualAlloc inside the guest
+   *    window, so adding B gives a host address that names the same bytes and
+   *    the app can keep using its 32-bit pointer.  This works.
+   *
+   *  - Metal-allocated memory (info->memory.ptr NULL on a CPU-visible buffer)
+   *    makes the handler write [buffer contents] back into the field.  That is
+   *    a pointer into Metal's own heap, which is NOT in the guest window, so
+   *    there is no 32-bit address that names it: truncating it would hand the
+   *    guest a pointer to something else entirely.  Refuse loudly instead.
+   *    Private and memoryless buffers are exempt: the CPU never maps them and
+   *    the handler leaves the field NULL. */
+  storage_mode = (uint64_t)info->options & 0x30;
+  if (!info->memory.ptr && storage_mode != WMTResourceStorageModePrivate &&
+      storage_mode != (uint64_t)WMTResourceStorageModeMemoryless) {
+    fprintf(
+        stderr,
+        "winemetal: MTLDevice_newBuffer from a 32-bit caller with no caller-supplied memory "
+        "(length %llu, options 0x%llx): [buffer contents] has no guest address, refusing. "
+        "Route the allocation through the ring allocator (WOW64_DESIGN.md section 7.5).\n",
+        (unsigned long long)info->length, (unsigned long long)info->options
+    );
+    params->ret = 0;
+    return STATUS_INVALID_ADDRESS;
+  }
+
+  guest_memory = info->memory.ptr;
+  info->memory.ptr = wow_in(guest_memory);
+  params->info.ptr = info;
+
+  status = _MTLDevice_newBuffer(obj);
+
+  /* gpu_address is a Metal GPU virtual address, never a CPU one -- untouched.
+   * memory.ptr goes back to the guest value the caller gave us (the handler
+   * leaves it alone on this path, except for private/memoryless buffers where
+   * it writes NULL, which is representable). */
+  info->memory.ptr = info->memory.ptr ? guest_memory : NULL;
+  params->info.ptr = guest_info;
+  return status;
+}
+
+static NTSTATUS
+_MTLDevice_newSamplerState32(void *obj) {
+  struct unixcall_mtldevice_newsamplerstate *params = obj;
+  void *guest = params->info.ptr;
+  NTSTATUS status;
+
+  params->info.ptr = wow_in(guest);
+  status = _MTLDevice_newSamplerState(obj);
+  params->info.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MTLDevice_newDepthStencilState32(void *obj) {
+  struct unixcall_mtldevice_newdepthstencilstate *params = obj;
+  const void *guest = params->info.ptr;
+  NTSTATUS status;
+
+  params->info.ptr = wow_in(guest);
+  status = _MTLDevice_newDepthStencilState(obj);
+  params->info.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MTLDevice_newTexture32(void *obj) {
+  struct unixcall_mtldevice_newtexture *params = obj;
+  void *guest = params->info.ptr;
+  NTSTATUS status;
+
+  params->info.ptr = wow_in(guest);
+  status = _MTLDevice_newTexture(obj);
+  params->info.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MTLDevice_newSharedTexture32(void *obj) {
+  struct unixcall_mtldevice_newtexture *params = obj;
+  void *guest = params->info.ptr;
+  NTSTATUS status;
+
+  params->info.ptr = wow_in(guest);
+  status = _MTLDevice_newSharedTexture(obj);
+  params->info.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MTLBuffer_newTexture32(void *obj) {
+  struct unixcall_mtlbuffer_newtexture *params = obj;
+  void *guest = params->info.ptr;
+  NTSTATUS status;
+
+  params->info.ptr = wow_in(guest);
+  status = _MTLBuffer_newTexture(obj);
+  params->info.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MTLLibrary_newFunction32(void *obj) {
+  struct unixcall_generic_obj_uint64_obj_ret *params = obj;
+  uint64_t guest = params->arg;
+  NTSTATUS status;
+
+  /* `arg` is a guest pointer to the function name (a C string), not a value. */
+  params->arg = (uint64_t)(uintptr_t)wow_in((void *)(uintptr_t)guest);
+  status = _MTLLibrary_newFunction(obj);
+  params->arg = guest;
+  return status;
+}
+
+static NTSTATUS
+_MTLDevice_newComputePipelineState32(void *obj) {
+  struct unixcall_mtldevice_newcomputepso *params = obj;
+  const void *guest_info = params->info.ptr;
+  struct WMTComputePipelineInfo *info = wow_in(guest_info);
+  const void *guest_archives = NULL;
+  NTSTATUS status;
+
+  if (!info) {
+    params->ret_pso = 0;
+    params->ret_error = 0;
+    return STATUS_INVALID_PARAMETER;
+  }
+  /* Second level: an array of binary-archive HANDLES, reached through a guest
+   * pointer.  The handles themselves are host handles and are not converted. */
+  guest_archives = info->binary_archives_for_lookup.ptr;
+  info->binary_archives_for_lookup.ptr = wow_in(guest_archives);
+  params->info.ptr = info;
+
+  status = _MTLDevice_newComputePipelineState(obj);
+
+  info->binary_archives_for_lookup.ptr = guest_archives;
+  params->info.ptr = guest_info;
+  return status;
+}
+
+static NTSTATUS
+_MTLDevice_newRenderPipelineState32(void *obj) {
+  struct unixcall_mtldevice_newrenderpso *params = obj;
+  const void *guest_info = params->info.ptr;
+  struct WMTRenderPipelineInfo *info = wow_in(guest_info);
+  const void *guest_archives = NULL;
+  NTSTATUS status;
+
+  if (!info) {
+    params->ret_pso = 0;
+    params->ret_error = 0;
+    return STATUS_INVALID_PARAMETER;
+  }
+  guest_archives = info->binary_archives_for_lookup.ptr;
+  info->binary_archives_for_lookup.ptr = wow_in(guest_archives);
+  params->info.ptr = info;
+
+  status = _MTLDevice_newRenderPipelineState(obj);
+
+  info->binary_archives_for_lookup.ptr = guest_archives;
+  params->info.ptr = guest_info;
+  return status;
+}
+
+static NTSTATUS
+_MTLDevice_newMeshRenderPipelineState32(void *obj) {
+  struct unixcall_mtldevice_newmeshrenderpso *params = obj;
+  const void *guest_info = params->info.ptr;
+  struct WMTMeshRenderPipelineInfo *info = wow_in(guest_info);
+  const void *guest_archives = NULL;
+  NTSTATUS status;
+
+  if (!info) {
+    params->ret_pso = 0;
+    params->ret_error = 0;
+    return STATUS_INVALID_PARAMETER;
+  }
+  guest_archives = info->binary_archives_for_lookup.ptr;
+  info->binary_archives_for_lookup.ptr = wow_in(guest_archives);
+  params->info.ptr = info;
+
+  status = _MTLDevice_newMeshRenderPipelineState(obj);
+
+  info->binary_archives_for_lookup.ptr = guest_archives;
+  params->info.ptr = guest_info;
+  return status;
+}
+
+static NTSTATUS
+_MTLCommandBuffer_renderCommandEncoder32(void *obj) {
+  struct unixcall_generic_obj_uint64_obj_ret *params = obj;
+  uint64_t guest = params->arg;
+  NTSTATUS status;
+
+  /* `arg` is a guest pointer to a WMTRenderPassInfo.  Everything inside it is
+   * handles and scalars, so one level is enough. */
+  params->arg = (uint64_t)(uintptr_t)wow_in((void *)(uintptr_t)guest);
+  status = _MTLCommandBuffer_renderCommandEncoder(obj);
+  params->arg = guest;
+  return status;
+}
+
+/* The three encodeCommands slots are the hard ones: each walks a
+ * caller-allocated singly linked list of wmtcmd_* records whose every `next`
+ * is a guest pointer, so the conversion happens at EVERY hop, not once.  Four
+ * command kinds also carry a payload pointer.  The chain is converted in
+ * place, the handler runs, and the chain is converted back -- the nodes live
+ * in the guest's own command heap and it reuses them. */
+enum wow_cmd_kind {
+  WOW_CMD_BLIT,
+  WOW_CMD_COMPUTE,
+  WOW_CMD_RENDER,
+};
+
+/* Convert one node's payload pointer, if its type carries one. */
+static void
+wow_cmd_payload(struct wmtcmd_base *node, enum wow_cmd_kind kind, int to_host) {
+  struct WMTMemoryPointer *payload = NULL;
+
+  switch (kind) {
+  case WOW_CMD_RENDER:
+    if (node->type == WMTRenderCommandSetFragmentBytes)
+      payload = &((struct wmtcmd_render_setbytes *)node)->bytes;
+    else if (node->type == WMTRenderCommandSetViewports)
+      payload = &((struct wmtcmd_render_setviewports *)node)->viewports;
+    else if (node->type == WMTRenderCommandSetScissorRects)
+      payload = &((struct wmtcmd_render_setscissorrects *)node)->scissor_rects;
+    break;
+  case WOW_CMD_COMPUTE:
+    if (node->type == WMTComputeCommandSetBytes)
+      payload = &((struct wmtcmd_compute_setbytes *)node)->bytes;
+    break;
+  case WOW_CMD_BLIT:
+    /* No blit command carries a CPU pointer. */
+    break;
+  }
+  if (payload)
+    payload->ptr = to_host ? wow_in(payload->ptr) : wow_out(payload->ptr);
+}
+
+/* `head` must already be a host pointer. */
+static void
+wow_cmd_chain(struct wmtcmd_base *head, enum wow_cmd_kind kind, int to_host) {
+  struct wmtcmd_base *node = head;
+
+  while (node) {
+    struct wmtcmd_base *next;
+
+    wow_cmd_payload(node, kind, to_host);
+    if (to_host) {
+      node->next.ptr = wow_in(node->next.ptr);
+      next = node->next.ptr;
+    } else {
+      next = node->next.ptr; /* still a host pointer at this point */
+      node->next.ptr = wow_out(node->next.ptr);
+    }
+    node = next;
+  }
+}
+
+static NTSTATUS
+_encodeCommands32(void *obj, enum wow_cmd_kind kind, NTSTATUS (*handler)(void *)) {
+  struct unixcall_generic_obj_cmd_noret *params = obj;
+  const void *guest_head = params->cmd_head.ptr;
+  struct wmtcmd_base *head = wow_in(guest_head);
+  NTSTATUS status;
+
+  params->cmd_head.ptr = head;
+  wow_cmd_chain(head, kind, 1);
+
+  status = handler(obj);
+
+  wow_cmd_chain(head, kind, 0);
+  params->cmd_head.ptr = guest_head;
+  return status;
+}
+
+static NTSTATUS
+_MTLBlitCommandEncoder_encodeCommands32(void *obj) {
+  return _encodeCommands32(obj, WOW_CMD_BLIT, _MTLBlitCommandEncoder_encodeCommands);
+}
+
+static NTSTATUS
+_MTLComputeCommandEncoder_encodeCommands32(void *obj) {
+  return _encodeCommands32(obj, WOW_CMD_COMPUTE, _MTLComputeCommandEncoder_encodeCommands);
+}
+
+static NTSTATUS
+_MTLRenderCommandEncoder_encodeCommands32(void *obj) {
+  return _encodeCommands32(obj, WOW_CMD_RENDER, _MTLRenderCommandEncoder_encodeCommands);
+}
+
+static NTSTATUS
+_MTLTexture_replaceRegion32(void *obj) {
+  struct unixcall_mtltexture_replaceregion *params = obj;
+  void *guest = params->data.ptr;
+  NTSTATUS status;
+
+  params->data.ptr = wow_in(guest);
+  status = _MTLTexture_replaceRegion(obj);
+  params->data.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MTLCaptureManager_startCapture32(void *obj) {
+  struct unixcall_mtlcapturemanager_startcapture *params = obj;
+  void *guest_info = params->info.ptr;
+  struct WMTCaptureInfo *info = wow_in(guest_info);
+  const void *guest_url = NULL;
+  NTSTATUS status;
+
+  if (!info) {
+    params->ret = 0;
+    return STATUS_INVALID_PARAMETER;
+  }
+  guest_url = info->output_url.ptr;
+  info->output_url.ptr = wow_in(guest_url);
+  params->info.ptr = info;
+
+  status = _MTLCaptureManager_startCapture(obj);
+
+  info->output_url.ptr = guest_url;
+  params->info.ptr = guest_info;
+  return status;
+}
+
+static NTSTATUS
+_MTLDevice_newTemporalScaler32(void *obj) {
+  struct unixcall_mtldevice_newfxtemporalscaler *params = obj;
+  const void *guest = params->info.ptr;
+  NTSTATUS status;
+
+  params->info.ptr = wow_in(guest);
+  status = _MTLDevice_newTemporalScaler(obj);
+  params->info.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MTLDevice_newSpatialScaler32(void *obj) {
+  struct unixcall_mtldevice_newfxspatialscaler *params = obj;
+  const void *guest = params->info.ptr;
+  NTSTATUS status;
+
+  params->info.ptr = wow_in(guest);
+  status = _MTLDevice_newSpatialScaler(obj);
+  params->info.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MTLCommandBuffer_encodeTemporalScale32(void *obj) {
+  struct unixcall_mtlcommandbuffer_temporal_scale *params = obj;
+  const void *guest = params->props.ptr;
+  NTSTATUS status;
+
+  params->props.ptr = wow_in(guest);
+  status = _MTLCommandBuffer_encodeTemporalScale(obj);
+  params->props.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_NSString_string32(void *obj) {
+  struct unixcall_nsstring_string *params = obj;
+  const void *guest = params->buffer_ptr.ptr;
+  NTSTATUS status;
+
+  params->buffer_ptr.ptr = wow_in(guest);
+  status = _NSString_string(obj);
+  params->buffer_ptr.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_NSString_alloc_init32(void *obj) {
+  struct unixcall_nsstring_string *params = obj;
+  const void *guest = params->buffer_ptr.ptr;
+  NTSTATUS status;
+
+  params->buffer_ptr.ptr = wow_in(guest);
+  status = _NSString_alloc_init(obj);
+  params->buffer_ptr.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MetalLayer_setProps32(void *obj) {
+  struct unixcall_generic_obj_constptr_noret *params = obj;
+  const void *guest = params->arg.ptr;
+  NTSTATUS status;
+
+  params->arg.ptr = wow_in(guest);
+  status = _MetalLayer_setProps(obj);
+  params->arg.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MetalLayer_getProps32(void *obj) {
+  struct unixcall_generic_obj_ptr_noret *params = obj;
+  void *guest = params->arg.ptr;
+  NTSTATUS status;
+
+  /* INOUT: the handler reads the requested drawable size and writes the
+   * granted one back into the same block, which stays guest memory. */
+  params->arg.ptr = wow_in(guest);
+  status = _MetalLayer_getProps(obj);
+  params->arg.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MTLLogContainer_enumerate32(void *obj) {
+  struct unixcall_enumerate *params = obj;
+  void *guest = params->buffer.ptr;
+  NTSTATUS status;
+
+  /* OUT array of handles; the ARRAY pointer is what needs converting. */
+  params->buffer.ptr = wow_in(guest);
+  status = _MTLLogContainer_enumerate(obj);
+  params->buffer.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_WMTGetDisplayDescription32(void *obj) {
+  struct unixcall_generic_obj_ptr_noret *params = obj;
+  void *guest = params->arg.ptr;
+  NTSTATUS status;
+
+  params->arg.ptr = wow_in(guest);
+  status = _WMTGetDisplayDescription(obj);
+  params->arg.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MetalLayer_getEDRValue32(void *obj) {
+  struct unixcall_generic_obj_ptr_noret *params = obj;
+  void *guest = params->arg.ptr;
+  NTSTATUS status;
+
+  params->arg.ptr = wow_in(guest);
+  status = _MetalLayer_getEDRValue(obj);
+  params->arg.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MTLLibrary_newFunctionWithConstants32(void *obj) {
+  struct unixcall_mtllibrary_newfunction_with_constants *params = obj;
+  const void *guest_name = params->name.ptr;
+  const void *guest_constants = params->constants.ptr;
+  struct WMTFunctionConstant *constants = wow_in(guest_constants);
+  uint64_t i;
+
+  NTSTATUS status;
+
+  params->name.ptr = wow_in(guest_name);
+  params->constants.ptr = constants;
+  /* Two levels: each constant's `data` is its own guest pointer. */
+  if (constants) {
+    for (i = 0; i < params->num_constants; i++)
+      constants[i].data.ptr = wow_in(constants[i].data.ptr);
+  }
+
+  status = _MTLLibrary_newFunctionWithConstants(obj);
+
+  if (constants) {
+    for (i = 0; i < params->num_constants; i++)
+      constants[i].data.ptr = wow_out(constants[i].data.ptr);
+  }
+  params->constants.ptr = guest_constants;
+  params->name.ptr = guest_name;
+  return status;
+}
+
+static NTSTATUS
+_WMTQueryDisplaySetting32(void *obj) {
+  struct unixcall_query_display_setting *params = obj;
+  void *guest = params->hdr_metadata.ptr;
+  NTSTATUS status;
+
+  params->hdr_metadata.ptr = wow_in(guest);
+  status = _WMTQueryDisplaySetting(obj);
+  params->hdr_metadata.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_WMTUpdateDisplaySetting32(void *obj) {
+  struct unixcall_update_display_setting *params = obj;
+  const void *guest = params->hdr_metadata.ptr;
+  NTSTATUS status;
+
+  params->hdr_metadata.ptr = wow_in(guest);
+  status = _WMTUpdateDisplaySetting(obj);
+  params->hdr_metadata.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_WMTQueryDisplaySettingForLayer32(void *obj) {
+  struct unixcall_query_display_setting_for_layer *params = obj;
+  void *guest = params->hdr_metadata.ptr;
+  NTSTATUS status;
+
+  params->hdr_metadata.ptr = wow_in(guest);
+  status = _WMTQueryDisplaySettingForLayer(obj);
+  params->hdr_metadata.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_MTLBuffer_updateContents32(void *obj) {
+  struct unixcall_mtlbuffer_updatecontents *params = obj;
+  const void *guest = params->data.ptr;
+  NTSTATUS status;
+
+  params->data.ptr = wow_in(guest);
+  status = _MTLBuffer_updateContents(obj);
+  params->data.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_DispatchData_alloc_init32(void *obj) {
+  struct unixcall_generic_obj_uint64_obj_ret *params = obj;
+  obj_handle_t guest = params->handle;
+  NTSTATUS status;
+
+  /* Despite the struct's name this slot's `handle` is the BYTES pointer
+   * (dispatch_data_create(ptr, length)) and `arg` is the length. */
+  params->handle = (obj_handle_t)(uintptr_t)wow_in((void *)(uintptr_t)guest);
+  status = _DispatchData_alloc_init(obj);
+  params->handle = guest;
+  return status;
+}
+
+static NTSTATUS
+_CacheReader_alloc_init32(void *obj) {
+  struct unixcall_cache_alloc_init *params = obj;
+  const void *guest = params->path.ptr;
+  NTSTATUS status;
+
+  params->path.ptr = wow_in(guest);
+  status = _CacheReader_alloc_init(obj);
+  params->path.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_CacheReader_get32(void *obj) {
+  struct unixcall_cache_get *params = obj;
+  const void *guest = params->key.ptr;
+  NTSTATUS status;
+
+  params->key.ptr = wow_in(guest);
+  status = _CacheReader_get(obj);
+  params->key.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_CacheWriter_alloc_init32(void *obj) {
+  struct unixcall_cache_alloc_init *params = obj;
+  const void *guest = params->path.ptr;
+  NTSTATUS status;
+
+  params->path.ptr = wow_in(guest);
+  status = _CacheWriter_alloc_init(obj);
+  params->path.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_CacheWriter_set32(void *obj) {
+  struct unixcall_cache_set *params = obj;
+  const void *guest = params->key.ptr;
+  NTSTATUS status;
+
+  params->key.ptr = wow_in(guest);
+  status = _CacheWriter_set(obj);
+  params->key.ptr = guest;
+  return status;
+}
+
+static NTSTATUS
+_WMTSetMetalShaderCachePath32(void *obj) {
+  struct unixcall_setmetalcachepath *params = obj;
+  const void *guest = params->path.ptr;
+  NTSTATUS status;
+
+  params->path.ptr = wow_in(guest);
+  status = _WMTSetMetalShaderCachePath(obj);
+  params->path.ptr = guest;
+  return status;
+}
+#endif /* DXMT_NATIVE */
+
 #if TARGET_OS_IOS
 /* On iOS we statically link DXMT's unix side into the host app (Madeira.app),
  * alongside ntdll's own __wine_unix_call_funcs. Rename ours so the linker
  * doesn't get a duplicate symbol; our ntdll's load_builtin_unixlib picks
  * it up by name when a DLL registers winemetal.so as its unix path.        */
 #define __wine_unix_call_funcs dxmt_winemetal_unix_call_funcs
+/* MADEIRA (WOW64_DESIGN.md section 7): same treatment for the 32-bit table,
+ * so the iOS ntdll has a name to bind to.  It matters because the static-link
+ * fallback in load_builtin_unixlib (build/ntdll-unix/virtual_ios.c, the
+ * `strstr(match, "winemetal")` branch) currently ignores its `wow` argument
+ * and hands every caller the 64-bit table -- see the hand-off note in
+ * WOW64_DESIGN.md section 7; that branch has to select this symbol when
+ * `wow` is set, exactly as get_unixlib_funcs() does for a real .so.  The
+ * naming also matches build/ntdll-unix/build.sh's compile_unixlib, which
+ * renames both tables to <prefix>_unix_call{,_wow64}_funcs. */
+#define __wine_unix_call_wow64_funcs dxmt_winemetal_unix_call_wow64_funcs
 #endif
 
 #include "wmt_remote_guard.h"
@@ -4058,6 +5111,41 @@ const void *__wine_unix_call_funcs[] = {
     &_rmg_MTLDevice_newSharedEventWithMachPort,
     &_MTLDevice_registryID,
     &_rmg_MTLSharedEvent_waitUntilSignaledValue,
+    /* MADEIRA (WOW64_DESIGN.md section 7.4, rule 5): slots 127-144 are the 18
+     * Metal calls the reference tree (dacevedo12/dxmt v0.4-d3d9) added between
+     * this tree's last entry and its DXSO block.  Nothing here implements or
+     * needs them -- src/d3d9 references none -- but the slot number IS the
+     * ABI, so they are left NULL rather than reused, which keeps a later
+     * cherry-pick from the reference landing on the same indices.  ntdll's
+     * __wine_unix_call returns STATUS_INVALID_PARAMETER for a NULL entry, so
+     * calling one fails loudly instead of dispatching to the wrong handler.
+     *
+     * One per line on purpose: gen_api_names.py and gen_remote_guard.py both
+     * read this table with a per-line regex, and several entries on one line
+     * would make the census misname every slot after them. */
+    NULL, /* 127 */
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL, /* 144 */
+    &thunk_DXSOInitialize,              /* 145 */
+    &thunk_DXSODestroy,
+    &thunk_DXSOCompile,
+    &thunk_DXSOGetCompiledBitcode,
+    &thunk_DXSODestroyBitcode,          /* 149 */
 };
 
 #ifndef DXMT_NATIVE
@@ -4070,7 +5158,7 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_recommendedMaxWorkingSetSize,
     &_MTLDevice_currentAllocatedSize,
     &_MTLDevice_name,
-    &_NSString_getCString,
+    &_NSString_getCString32,
     &_MTLDevice_newCommandQueue,
     &_NSAutoreleasePool_alloc_init,
     &_MTLCommandQueue_commandBuffer,
@@ -4080,34 +5168,34 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_newSharedEvent,
     &_MTLSharedEvent_signaledValue,
     &_MTLCommandBuffer_encodeSignalEvent,
-    &_MTLDevice_newBuffer,
-    &_MTLDevice_newSamplerState,
-    &_MTLDevice_newDepthStencilState,
-    &_MTLDevice_newTexture,
-    &_MTLBuffer_newTexture,
+    &_MTLDevice_newBuffer32,
+    &_MTLDevice_newSamplerState32,
+    &_MTLDevice_newDepthStencilState32,
+    &_MTLDevice_newTexture32,
+    &_MTLBuffer_newTexture32,
     &_MTLTexture_newTextureView,
     &_MTLDevice_minimumLinearTextureAlignmentForPixelFormat,
     &_MTLDevice_newLibrary,
-    &_MTLLibrary_newFunction,
+    &_MTLLibrary_newFunction32,
     &_NSString_lengthOfBytesUsingEncoding,
     &_rmg_NSObject_description,
-    &_MTLDevice_newComputePipelineState,
+    &_MTLDevice_newComputePipelineState32,
     &_MTLCommandBuffer_blitCommandEncoder,
     &_rmg_MTLCommandBuffer_computeCommandEncoder,
-    &_MTLCommandBuffer_renderCommandEncoder,
+    &_MTLCommandBuffer_renderCommandEncoder32,
     &_MTLCommandEncoder_endEncoding,
-    &_MTLDevice_newRenderPipelineState,
-    &_rmg_MTLDevice_newMeshRenderPipelineState,
-    &_MTLBlitCommandEncoder_encodeCommands,
-    &_rmg_MTLComputeCommandEncoder_encodeCommands,
-    &_MTLRenderCommandEncoder_encodeCommands,
+    &_MTLDevice_newRenderPipelineState32,
+    &_rmg_MTLDevice_newMeshRenderPipelineState32,
+    &_MTLBlitCommandEncoder_encodeCommands32,
+    &_rmg_MTLComputeCommandEncoder_encodeCommands32,
+    &_MTLRenderCommandEncoder_encodeCommands32,
     &_rmg_MTLTexture_pixelFormat,
     &_MTLTexture_width,
     &_MTLTexture_height,
     &_rmg_MTLTexture_depth,
     &_rmg_MTLTexture_arrayLength,
     &_rmg_MTLTexture_mipmapLevelCount,
-    &_MTLTexture_replaceRegion,
+    &_MTLTexture_replaceRegion32,
     &_rmg_MTLBuffer_didModifyRange,
     &_MTLCommandBuffer_presentDrawable,
     &_rmg_MTLCommandBuffer_presentDrawableAfterMinimumDuration,
@@ -4116,14 +5204,14 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_supportsTextureSampleCount,
     &_MTLDevice_hasUnifiedMemory,
     &_rmg_MTLCaptureManager_sharedCaptureManager,
-    &_rmg_MTLCaptureManager_startCapture,
+    &_rmg_MTLCaptureManager_startCapture32,
     &_rmg_MTLCaptureManager_stopCapture,
-    &_rmg_MTLDevice_newTemporalScaler,
-    &_rmg_MTLDevice_newSpatialScaler,
-    &_rmg_MTLCommandBuffer_encodeTemporalScale,
+    &_rmg_MTLDevice_newTemporalScaler32,
+    &_rmg_MTLDevice_newSpatialScaler32,
+    &_rmg_MTLCommandBuffer_encodeTemporalScale32,
     &_rmg_MTLCommandBuffer_encodeSpatialScale,
-    &_NSString_string,
-    &_NSString_alloc_init,
+    &_NSString_string32,
+    &_NSString_alloc_init32,
     &_DeveloperHUDProperties_instance,
     &_DeveloperHUDProperties_addLabel,
     &_DeveloperHUDProperties_updateLabel,
@@ -4132,8 +5220,8 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MetalLayer_nextDrawable,
     &_rmg_MTLDevice_supportsFXSpatialScaler,
     &_rmg_MTLDevice_supportsFXTemporalScaler,
-    &_MetalLayer_setProps,
-    &_MetalLayer_getProps,
+    &_MetalLayer_setProps32,
+    &_MetalLayer_getProps32,
     &_CreateMetalViewFromHWND,
     &_ReleaseMetalView,
     &thunk32_SM50Initialize,
@@ -4153,41 +5241,67 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &thunk32_SM50GetArgumentsInfo,
     &_rmg_MTLCommandBuffer_error,
     &_rmg_MTLCommandBuffer_logs,
-    &_rmg_MTLLogContainer_enumerate,
+    &_rmg_MTLLogContainer_enumerate32,
     &_rmg_CGColorSpace_checkColorSpaceSupported,
     &_rmg_MetalLayer_setColorSpace,
     &_WMTGetPrimaryDisplayId,
     &_rmg_WMTGetSecondaryDisplayId,
-    &_WMTGetDisplayDescription,
-    &_MetalLayer_getEDRValue,
-    &_MTLLibrary_newFunctionWithConstants,
-    &_rmg_WMTQueryDisplaySetting,
-    &_rmg_WMTUpdateDisplaySetting,
-    &_WMTQueryDisplaySettingForLayer,
+    &_WMTGetDisplayDescription32,
+    &_MetalLayer_getEDRValue32,
+    &_MTLLibrary_newFunctionWithConstants32,
+    &_rmg_WMTQueryDisplaySetting32,
+    &_rmg_WMTUpdateDisplaySetting32,
+    &_WMTQueryDisplaySettingForLayer32,
     &_MTLCommandBuffer_encodeWaitForEvent,
     &_rmg_MTLSharedEvent_signalValue,
     &_rmg_MTLSharedEvent_setWin32EventAtValue,
     &_rmg_MTLDevice_newFence,
     &_rmg_MTLDevice_newEvent,
-    &_MTLBuffer_updateContents,
+    &_MTLBuffer_updateContents32,
     &_SharedEventListener_create,
     &_SharedEventListener_start,
     &_SharedEventListener_destroy,
     &_WMTGetOSVersion,
     &_rmg_MTLDevice_newBinaryArchive,
     &_rmg_MTLBinaryArchive_serialize,
-    &_DispatchData_alloc_init,
-    &_CacheReader_alloc_init,
-    &_CacheReader_get,
-    &_CacheWriter_alloc_init,
-    &_CacheWriter_set,
-    &_WMTSetMetalShaderCachePath,
-    &_rmg_MTLDevice_newSharedTexture,
+    &_DispatchData_alloc_init32,
+    &_CacheReader_alloc_init32,
+    &_CacheReader_get32,
+    &_CacheWriter_alloc_init32,
+    &_CacheWriter_set32,
+    &_WMTSetMetalShaderCachePath32,
+    &_rmg_MTLDevice_newSharedTexture32,
     &_rmg_WMTBootstrapRegister,
     &_rmg_WMTBootstrapLookUp,
     &_rmg_MTLSharedEvent_createMachPort,
     &_rmg_MTLDevice_newSharedEventWithMachPort,
     &_MTLDevice_registryID,
     &_rmg_MTLSharedEvent_waitUntilSignaledValue,
+    /* 127-144: see the comment on the 64-bit table.  Both tables must stay the
+     * same length and a 32-bit variant must sit at the same index as its
+     * 64-bit twin (WOW64_DESIGN.md section 7.4, rule 3). */
+    NULL, /* 127 */
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL, /* 144 */
+    &thunk32_DXSOInitialize,            /* 145 */
+    &thunk_DXSODestroy,                 /* handle only, no conversion needed */
+    &thunk32_DXSOCompile,
+    &thunk32_DXSOGetCompiledBitcode,
+    &thunk_DXSODestroyBitcode,          /* handle only */
 };
 #endif

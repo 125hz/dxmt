@@ -8,3 +8,9 @@ option('wine_builtin_dll', type : 'boolean', value : false)
 option('enable_tests', type : 'boolean', value : false)
 option('enable_nvapi', type : 'boolean', value : false)
 option('enable_nvngx', type : 'boolean', value : false)
+# MADEIRA-TEMP (WOW64_DESIGN.md section 7, stage 4): the Direct3D 9 frontend is
+# imported but does not compile against this fork's older src/dxmt yet, so it
+# is off by default and the rest of the tree keeps building.  Flip it on with
+# -Denable_d3d9=true while closing the remaining API gaps; remove the option
+# (and build d3d9 unconditionally for Windows targets) once it compiles.
+option('enable_d3d9', type : 'boolean', value : false)
