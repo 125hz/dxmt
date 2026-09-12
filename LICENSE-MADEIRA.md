@@ -56,6 +56,29 @@ distributed under GPL-3.0-or-later as above):
 | `src/airconv/nt/air_builder.{hpp,cpp}` | `AIRBuilder::FPBinOp::pow` |
 | `src/winemetal/airconv_thunks.{h,c}` | the DXSO unix-call slot numbers, parameter structs (and their `*32` mirrors) and PE-side thunks |
 | `src/winemetal/unix/winemetal_unix.c` | the DXSO 32-bit argument-chain converter (`dxso_compilation_argument32_convert`/`_free`) and the `thunk_DXSO*` / `thunk32_DXSO*` handlers |
+| `src/dxmt/dxmt_command.metal` | the shader-resolve and stretch-blit shaders and their metadata structs: `resolve_data`, `DXMTResolveMetadata`, `vs_resolve_msaa`, `fs_resolve_msaa_average`, `resolve_depth_output`, `fs_resolve_msaa_depth`, `blit_data`, `DXMTStretchBlitMetadata`, `vs_blit_quad`, `fs_blit_quad` |
+| `src/dxmt/dxmt_command.{hpp,cpp}` | `ResolveTextureMode`, `ResolveTextureContext` and `StretchBlitContext` (declarations and definitions, including their PSO/sampler caches) |
+| `src/dxmt/dxmt_context.{hpp,cpp}` | `ArgumentEncodingContext::resolveDepthTexture`, `stretchBlit`, `copyTexture`, `optimizeTextureForGPUAccess`, `signalEventByHandle`, the `Rc<BufferAllocation>` overload of `access`, `StretchBlitEncoderData`, the extra `ResolveEncoderData` fields, and the `EncoderType::Resolve` depth/shader branches and `EncoderType::StretchBlit` encode body |
+| `src/dxmt/dxmt_command_queue.{hpp,cpp}` | `GpuCompletionStatus`, `GpuCompletionTarget`, `CommandChunk::addCompletionTarget` and the finish-thread completion dispatch, `CommandQueue::HasDeviceError`/`MarkDeviceError`/`FrameLatencySignaled`/`WaitFrameLatency` |
+| `src/dxmt/dxmt_ring_bump_allocator.hpp` | `RingBumpState::preallocate`, `seal_latest`, the `single_writer` constructor argument and its `note_single_writer` assertion, and the `__i386__` `kStagingBlockSize` |
+| `src/dxmt/dxmt_format.hpp` | `Recall_sRGB_ForRenderTarget` |
+| `src/dxmt/dxmt_shader_cache.{hpp,cpp}` | `GetDXMTShaderCacheDirectory` |
+| `src/dxmt/dxmt_buffer.hpp` | `BufferAllocation::length` |
+| `src/dxmt/dxmt_texture.{hpp,cpp}` | `TextureAllocation::buffer`, `TextureViewDescriptor::swizzle`, `Texture::miplevelCount`, `checkViewUseSwizzle`, `checkViewUseMipRange` |
+| `src/dxmt/dxmt_dynamic.{hpp,cpp}` | the `out_minted_fresh` argument of `DynamicBuffer::allocate` |
+| `src/dxmt/dxmt_presenter.{hpp,cpp}` | `Presenter::setDisplaySyncEnabled` |
+| `src/util/wsi_window.hpp`, `wsi_window_win32.cpp`, `wsi_window_headless.cpp` | `wsi::foregroundWindow` |
+| `src/winemetal/winemetal.h` | `wmtcmd_render_setsamplerstate`, `wmtcmd_blit_optimize_contents`, and the appended `WMTRenderCommandSetBlendFactor` / `SetFragmentSamplerState` / `SetVertexTexture` / `SetVertexSamplerState` and `WMTBlitCommandOptimizeContentsForGPUAccess` enumerators |
+
+The guest-window fix in `src/dxmt/dxmt_buffer.cpp` (`Buffer::allocate`'s
+`#ifdef __i386__` `CpuPlaced`) is Madeira's own work: the reference has no
+equivalent, because it does not have a shifted guest window to satisfy.
+
+The `Reserved*` enumerators alongside those appended command types, the
+`_MTLRenderCommandEncoder_encodeCommands` / `_MTLBlitCommandEncoder_encodeCommands`
+cases that decode them, and `Texture::fullView`'s mapping onto this fork's view-0
+model are Madeira's own work: the reference expresses them differently (a wider
+command set, and a `TextureViewKey` carrying a descriptor rather than an index).
 
 Everything else in the D3D9 path — the guest-window pointer conversions, the
 32-bit dispatch-table variants, the iOS build stages — is Madeira's own work

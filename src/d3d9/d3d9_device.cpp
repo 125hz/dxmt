@@ -7603,7 +7603,7 @@ StartRenderPassForBatch_d9(
     if (!res.resolved_rt_dxmt[i])
       continue;
     color.attachment =
-        ctx.access<PipelineStage::Pixel>(res.resolved_rt_dxmt[i], res.resolved_rt_view[i], ResourceAccess::ReadWrite);
+        ctx.access<false>(res.resolved_rt_dxmt[i], res.resolved_rt_view[i], DXMT_ENCODER_RESOURCE_ACESS_READWRITE);
     color.level = res.resolved_rt_level[i];
     color.slice = res.resolved_rt_slice[i];
     color.depth_plane = 0;
@@ -7621,10 +7621,10 @@ StartRenderPassForBatch_d9(
     // access keeps the dependency tracker from ordering it as a write, and
     // DontCare leaves the texture genuinely unwritten so the in-pass sample is
     // hazard-free. Device memory keeps the prior depth for later passes.
-    auto ds_access = res.resolved_ds_readonly ? ResourceAccess::Read : ResourceAccess::ReadWrite;
+    auto ds_access = res.resolved_ds_readonly ? DXMT_ENCODER_RESOURCE_ACESS_READ : DXMT_ENCODER_RESOURCE_ACESS_READWRITE;
     auto ds_store = res.resolved_ds_readonly ? WMTStoreActionDontCare : WMTStoreActionStore;
     auto &depth = info->depth;
-    depth.attachment = ctx.access<PipelineStage::Pixel>(res.resolved_ds_dxmt, res.resolved_ds_view, ds_access);
+    depth.attachment = ctx.access<false>(res.resolved_ds_dxmt, res.resolved_ds_view, ds_access);
     depth.level = res.resolved_ds_level;
     depth.slice = res.resolved_ds_slice;
     depth.depth_plane = 0;
@@ -7635,7 +7635,7 @@ StartRenderPassForBatch_d9(
     depth.store_action = ds_store;
     if (res.resolved_ds_has_stencil) {
       auto &stencil = info->stencil;
-      stencil.attachment = ctx.access<PipelineStage::Pixel>(res.resolved_ds_dxmt, res.resolved_ds_view, ds_access);
+      stencil.attachment = ctx.access<false>(res.resolved_ds_dxmt, res.resolved_ds_view, ds_access);
       stencil.level = res.resolved_ds_level;
       stencil.slice = res.resolved_ds_slice;
       stencil.depth_plane = 0;
@@ -7712,8 +7712,8 @@ EmitCommonRenderSetup_d9(
     // the chunk. Runs before the resident dedup so a new encoder after a copy
     // re-establishes the dependency.
     if (auto *vb_alloc = res.resolved_vb_dxmt[slot].ptr())
-      ctx.access<PipelineStage::Vertex>(
-          res.resolved_vb_dxmt[slot], 0, static_cast<unsigned>(vb_alloc->length()), ResourceAccess::Read
+      ctx.access<true>(
+          res.resolved_vb_dxmt[slot], 0, static_cast<unsigned>(vb_alloc->length()), DXMT_ENCODER_RESOURCE_ACESS_READ
       );
     if (s.vs_resident[slot] == h)
       continue;
@@ -7726,8 +7726,8 @@ EmitCommonRenderSetup_d9(
   }
   // Same Vertex-stage read dependency for the index buffer (either map mode).
   if (auto *ib_alloc = res.resolved_ib_dxmt.ptr())
-    ctx.access<PipelineStage::Vertex>(
-        res.resolved_ib_dxmt, 0, static_cast<unsigned>(ib_alloc->length()), ResourceAccess::Read
+    ctx.access<true>(
+        res.resolved_ib_dxmt, 0, static_cast<unsigned>(ib_alloc->length()), DXMT_ENCODER_RESOURCE_ACESS_READ
     );
 
   // PSO bind.
@@ -7895,7 +7895,7 @@ EmitCommonRenderSetup_d9(
       // Re-access on SetLOD / sRGB-toggle / swizzle change.
       uint64_t vkey = res.resolved_frag_view[stage];
       if (rc_ptr != s.frag_tex_access[stage] || vkey != s.frag_view[stage]) {
-        auto &view = ctx.access<PipelineStage::Pixel>(rc, vkey, ResourceAccess::Read);
+        auto &view = ctx.access<false>(rc, vkey, DXMT_ENCODER_RESOURCE_ACESS_READ);
         s.frag_tex_access[stage] = rc_ptr;
         s.frag_view[stage] = vkey;
         mt = view.texture.handle;
@@ -7946,7 +7946,7 @@ EmitCommonRenderSetup_d9(
     const auto &rc = res.resolved_vert_texture_dxmt[vslot];
     obj_handle_t mt;
     if (rc.ptr()) {
-      auto &view = ctx.access<PipelineStage::Vertex>(rc, res.resolved_vert_view[vslot], ResourceAccess::Read);
+      auto &view = ctx.access<true>(rc, res.resolved_vert_view[vslot], DXMT_ENCODER_RESOURCE_ACESS_READ);
       mt = view.texture.handle;
     } else {
       // Device-owned dummy for a declared-but-unbound slot, or 0 when the VS
@@ -8022,8 +8022,8 @@ inline void
 EmitBlitOp_d9(ArgumentEncodingContext &ctx, MTLD3D9Device::PendingBlitOp &op) {
   // Register src/dst access for cross-encoder dependency tracking.
   // Without them, same-RT Render-merge folds across blit, executing blit before renders.
-  auto src_tex = ctx.access<PipelineStage::Compute>(op.src_tex, op.src_mip, op.src_slice, ResourceAccess::Read);
-  auto dst_tex = ctx.access<PipelineStage::Compute>(op.dst_tex, op.dst_mip, op.dst_slice, ResourceAccess::Write);
+  auto src_tex = ctx.access<false>(op.src_tex, op.src_mip, op.src_slice, DXMT_ENCODER_RESOURCE_ACESS_READ);
+  auto dst_tex = ctx.access<false>(op.dst_tex, op.dst_mip, op.dst_slice, DXMT_ENCODER_RESOURCE_ACESS_WRITE);
   auto &cmd = ctx.encodeBlitCommand<wmtcmd_blit_copy_from_texture_to_texture>();
   cmd.type = WMTBlitCommandCopyFromTextureToTexture;
   cmd.src = src_tex.handle;
@@ -8044,7 +8044,7 @@ EmitBlitOp_d9(ArgumentEncodingContext &ctx, MTLD3D9Device::PendingBlitOp &op) {
 // upload past a same-chunk render pass that reads the level (stale read).
 inline void
 EmitBufferToTextureOp_d9(ArgumentEncodingContext &ctx, MTLD3D9Device::PendingBlitOp &op) {
-  auto dst_tex = ctx.access<PipelineStage::Compute>(op.dst_tex, op.dst_mip, op.dst_slice, ResourceAccess::Write);
+  auto dst_tex = ctx.access<false>(op.dst_tex, op.dst_mip, op.dst_slice, DXMT_ENCODER_RESOURCE_ACESS_WRITE);
   auto &cmd = ctx.encodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture>();
   cmd.type = WMTBlitCommandCopyFromBufferToTexture;
   cmd.src = op.buf_src_handle;
@@ -8070,9 +8070,9 @@ EmitGenerateMipmapsOp_d9(ArgumentEncodingContext &ctx, MTLD3D9Device::PendingBli
   const uint32_t slices = op.dst_tex->arrayLength();
   obj_handle_t tex_handle = 0;
   for (uint32_t s = 0; s < slices; ++s) {
-    tex_handle = ctx.access<PipelineStage::Compute>(op.dst_tex, 0, s, ResourceAccess::Read).handle;
+    tex_handle = ctx.access<false>(op.dst_tex, 0, s, DXMT_ENCODER_RESOURCE_ACESS_READ).handle;
     for (uint32_t l = 1; l < mip_count; ++l)
-      ctx.access<PipelineStage::Compute>(op.dst_tex, l, s, ResourceAccess::Write);
+      ctx.access<false>(op.dst_tex, l, s, DXMT_ENCODER_RESOURCE_ACESS_WRITE);
   }
   auto &cmd = ctx.encodeBlitCommand<wmtcmd_blit_generate_mipmaps>();
   cmd.type = WMTBlitCommandGenerateMipmaps;

@@ -867,6 +867,16 @@ enum WMTBlitCommandType : uint16_t {
   WMTBlitCommandWaitForFence,
   WMTBlitCommandUpdateFence,
   WMTBlitCommandFillBuffer,
+  /* MADEIRA (WOW64_DESIGN.md section 7.11): appended for the Direct3D 9
+   * frontend's StretchRect scale path. The four Reserved slots keep the
+   * values aligned with the upstream v0.4-d3d9 tag (ResolveCounters,
+   * CopyFromBufferToTextureWithBlitOption, CopyFromTextureToBufferWithBlitOption
+   * and ResetCommandsInBuffer there); nothing emits or decodes them. */
+  WMTBlitCommandReserved9,
+  WMTBlitCommandReserved10,
+  WMTBlitCommandReserved11,
+  WMTBlitCommandReserved12,
+  WMTBlitCommandOptimizeContentsForGPUAccess,
 };
 
 struct wmtcmd_base {
@@ -959,6 +969,15 @@ struct wmtcmd_blit_fillbuffer {
   uint64_t offset;
   uint64_t length;
   uint8_t value;
+};
+
+struct wmtcmd_blit_optimize_contents {
+  enum WMTBlitCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  obj_handle_t texture;
+  uint32_t slice;
+  uint32_t level;
 };
 
 WINEMETAL_API void MTLBlitCommandEncoder_encodeCommands(obj_handle_t encoder, const struct wmtcmd_base *cmd_head);
@@ -1106,6 +1125,25 @@ enum WMTRenderCommandType : uint16_t {
   WMTRenderCommandDXMTTessellationMeshDrawIndexed,
   WMTRenderCommandDXMTTessellationMeshDrawIndirect,
   WMTRenderCommandDXMTTessellationMeshDrawIndexedIndirect,
+  /* MADEIRA (WOW64_DESIGN.md section 7.11): appended for the Direct3D 9
+   * frontend, which binds textures and samplers through Metal's argument
+   * TABLE rather than an argument buffer -- something d3d11 never needed.
+   * Appended, never inserted: the value is the wire format between this
+   * module's PE and unix halves.
+   *
+   * The three Reserved slots keep the values aligned with the upstream
+   * v0.4-d3d9 tag (DispatchThreadsPerTile, ExecuteCommandsInBuffer and
+   * SetStencilRef there), so a later cherry-pick of those families lands on
+   * the same numbers, the same reasoning as the NULL unix-call slots in
+   * section 7.4 rule 5. Nothing emits or decodes them; an encoder that meets
+   * one falls through to the loud unknown-command path. */
+  WMTRenderCommandReserved41,
+  WMTRenderCommandReserved42,
+  WMTRenderCommandSetBlendFactor,
+  WMTRenderCommandReserved44,
+  WMTRenderCommandSetFragmentSamplerState,
+  WMTRenderCommandSetVertexTexture,
+  WMTRenderCommandSetVertexSamplerState,
 };
 
 struct wmtcmd_render_nop {
@@ -1154,6 +1192,14 @@ struct wmtcmd_render_settexture {
   uint16_t reserved[3];
   struct WMTMemoryPointer next;
   obj_handle_t texture;
+  uint8_t index;
+};
+
+struct wmtcmd_render_setsamplerstate {
+  enum WMTRenderCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  obj_handle_t sampler;
   uint8_t index;
 };
 

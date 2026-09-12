@@ -177,8 +177,10 @@ CommandQueue::WaitForFinishThread() {
     if (chunk.attached_cmdbuf.status() <= WMTCommandBufferStatusScheduled) {
       chunk.attached_cmdbuf.waitUntilCompleted();
     }
-    if (chunk.attached_cmdbuf.status() == WMTCommandBufferStatusError) {
+    const bool device_error = chunk.attached_cmdbuf.status() == WMTCommandBufferStatusError;
+    if (device_error) {
       ERR("Device error at frame ", chunk.frame_, ": ", chunk.attached_cmdbuf.error().description().getUTF8String());
+      MarkDeviceError();
     }
     if (auto logs = chunk.attached_cmdbuf.logs()) {
       for (auto &log : logs.elements()) {
@@ -188,6 +190,9 @@ CommandQueue::WaitForFinishThread() {
 
     if (chunk.signal_frame_latency_fence_ != ~0ull)
       frame_latency_fence_.signal(chunk.signal_frame_latency_fence_);
+
+    for (const auto &target : chunk.completion_targets)
+      target->CompleteGpuWork(device_error ? GpuCompletionStatus::Failed : GpuCompletionStatus::Complete);
 
     chunk.reset();
     cpu_coherent.signal(internal_seq);
@@ -213,5 +218,10 @@ void CommandQueue::Retain(uint64_t seq, Allocation* allocaiton) {
     tracker.addStorage(temp_buffer.ptr, block_size);
   }
 };
+
+void
+CommandQueue::MarkDeviceError() {
+  device_error_.store(true, std::memory_order_release);
+}
 
 } // namespace dxmt
