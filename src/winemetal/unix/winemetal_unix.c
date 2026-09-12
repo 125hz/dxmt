@@ -4369,14 +4369,43 @@ wow_out(const void *host) {
   return PtrToUInt32Ptr((void *)host);
 }
 
+/* MADEIRA (WOW64_DESIGN.md sections 3 and 7.5).  Guest -> host for a pointer
+ * carried in a field that is 64 bits WIDE on both sides -- a raw uint64_t /
+ * obj_handle_t, not a WMTMemoryPointer.  Such a field can hold EITHER
+ * namespace and the two must be told apart before anything is added to it:
+ *
+ *  - a GUEST address, which the i386 caller wrote from one of its own 32-bit
+ *    pointers.  It is always < 4 GB and needs the window base.
+ *  - a HOST address the unix side produced earlier and handed back through a
+ *    deliberately 64-bit-wide field, so that it crosses the boundary intact.
+ *    airconv's sm50_ptr64_t exists for exactly this (it is `void *` on LP64 and
+ *    a `uint64_t` box on i386), and SM50_COMPILED_BITCODE::Data -- the compiled
+ *    AIR blob from SM50GetCompiledBitcode / DXSOGetCompiledBitcode -- is one.
+ *    Such a value must be passed through UNTOUCHED.  Adding the window base to
+ *    it truncates the top half first (UInt32ToPtr takes a uint32_t), which
+ *    lands on an unrelated, usually unmapped, address inside the window.
+ *
+ * The test is EXACT, not a heuristic: XNU reserves a 4 GB __PAGEZERO for every
+ * arm64 binary (section 1), so no host mapping can ever exist below 4 GB, and a
+ * guest address is below 4 GB by construction (invariant 1).  This is the same
+ * discrimination ios_wow_fixup_peb64_ptrs() makes in build/ntdll-unix/env_ios.c.
+ * Off iOS, and for a process with no guest window, ios_wow_base() is 0 and both
+ * arms collapse to the classic identity. */
+static inline uint64_t
+wow_in_wide(uint64_t field) {
+  if (field >= 0x100000000ull)
+    return field; /* already a host address; never rebase it */
+  return (uint64_t)(uintptr_t)UInt32ToPtr((uint32_t)field);
+}
+
 static NTSTATUS
 _NSString_getCString32(void *obj) {
   struct unixcall_nsstring_getcstring *params = obj;
   uint64_t guest = params->buffer_ptr;
   NTSTATUS status;
 
-  /* OUT buffer; the POINTER is IN. */
-  params->buffer_ptr = (uint64_t)(uintptr_t)wow_in((void *)(uintptr_t)guest);
+  /* OUT buffer; the POINTER is IN.  64-bit-wide field, so wow_in_wide. */
+  params->buffer_ptr = wow_in_wide(guest);
   status = _NSString_getCString(obj);
   params->buffer_ptr = guest;
   return status;
@@ -4508,7 +4537,7 @@ _MTLLibrary_newFunction32(void *obj) {
   NTSTATUS status;
 
   /* `arg` is a guest pointer to the function name (a C string), not a value. */
-  params->arg = (uint64_t)(uintptr_t)wow_in((void *)(uintptr_t)guest);
+  params->arg = wow_in_wide(guest);
   status = _MTLLibrary_newFunction(obj);
   params->arg = guest;
   return status;
@@ -4596,7 +4625,7 @@ _MTLCommandBuffer_renderCommandEncoder32(void *obj) {
 
   /* `arg` is a guest pointer to a WMTRenderPassInfo.  Everything inside it is
    * handles and scalars, so one level is enough. */
-  params->arg = (uint64_t)(uintptr_t)wow_in((void *)(uintptr_t)guest);
+  params->arg = wow_in_wide(guest);
   status = _MTLCommandBuffer_renderCommandEncoder(obj);
   params->arg = guest;
   return status;
@@ -4940,8 +4969,25 @@ _DispatchData_alloc_init32(void *obj) {
   NTSTATUS status;
 
   /* Despite the struct's name this slot's `handle` is the BYTES pointer
-   * (dispatch_data_create(ptr, length)) and `arg` is the length. */
-  params->handle = (obj_handle_t)(uintptr_t)wow_in((void *)(uintptr_t)guest);
+   * (dispatch_data_create(ptr, length)) and `arg` is the length.
+   *
+   * MADEIRA (WOW64_DESIGN.md section 7.5): the field is 64 bits wide on both
+   * sides and both namespaces genuinely reach it, so it must be discriminated
+   * rather than rebased unconditionally:
+   *
+   *  - WMT::Device::newLibrary(const void *bytecode, ...) passes PE-side bytes
+   *    (the internal library blob compiled into the module, dxmt_command.cpp) --
+   *    a guest address, which needs the window base.
+   *  - WMT::Device::newLibraryFromNativeBuffer() and WMT::MakeDispatchData()
+   *    pass the unix side's own SM50_COMPILED_BITCODE::Data, the AIR blob that
+   *    SM50GetCompiledBitcode / DXSOGetCompiledBitcode allocated in the host
+   *    heap.  It is a host address that crossed intact through a 64-bit field
+   *    and must NOT be rebased.
+   *
+   * Rebasing it unconditionally is what produced the d3d9 shader-compile crash:
+   * a host bitcode pointer was truncated to 32 bits and then offset by B, so
+   * dispatch_data_create() memmove'd from unallocated window space. */
+  params->handle = (obj_handle_t)wow_in_wide(guest);
   status = _DispatchData_alloc_init(obj);
   params->handle = guest;
   return status;
