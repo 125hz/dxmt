@@ -8,6 +8,8 @@
 #include <chrono>
 #include <cstring>
 
+#include "d3d9_census.hpp"
+
 namespace dxmt {
 
 MTLD3D9Query::MTLD3D9Query(MTLD3D9Device *device, D3DQUERYTYPE type) : m_device(device), m_type(type) {
@@ -32,6 +34,7 @@ MTLD3D9Query::endOcclusionIfActive() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9Query::AddRef() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_AddRef);
   ULONG ref = ComObject::AddRef();
   if (ref == 1)
     m_device->AddRef();
@@ -40,6 +43,7 @@ MTLD3D9Query::AddRef() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9Query::Release() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_Release);
   // D3D9 Release-at-0 clamp: handed out at public 0 while self-pinned / bound
   // (DXVK clamps every device child); guard the underflow before the decrement.
   if (m_refCount.load() == 0)
@@ -71,6 +75,7 @@ MTLD3D9Query::Release() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Query::QueryInterface(REFIID riid, void **ppvObject) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_QueryInterface);
   if (!ppvObject)
     return E_POINTER;
   *ppvObject = nullptr;
@@ -85,6 +90,7 @@ MTLD3D9Query::QueryInterface(REFIID riid, void **ppvObject) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Query::GetDevice(IDirect3DDevice9 **ppDevice) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_GetDevice);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppDevice)
     return D3DERR_INVALIDCALL;
@@ -94,12 +100,14 @@ MTLD3D9Query::GetDevice(IDirect3DDevice9 **ppDevice) {
 
 D3DQUERYTYPE STDMETHODCALLTYPE
 MTLD3D9Query::GetType() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_GetType);
   D9DeviceLock lock = m_device->LockDevice();
   return m_type;
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Query::GetDataSize() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_GetDataSize);
   D9DeviceLock lock = m_device->LockDevice();
   // Pure per-type table. Getting these wrong
   // corrupts memory when the app passes a buffer sized to the documented type.
@@ -108,6 +116,7 @@ MTLD3D9Query::GetDataSize() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Query::Issue(DWORD dwIssueFlags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_Issue);
   D9DeviceLock lock = m_device->LockDevice();
   // D3DISSUE_BEGIN starts a query (only OCCLUSION uses BEGIN; EVENT
   // and TIMESTAMP are END-only). D3DISSUE_END signals the GPU to
@@ -180,6 +189,7 @@ MTLD3D9Query::Issue(DWORD dwIssueFlags) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Query::GetData(void *pData, DWORD dwSize, DWORD dwGetDataFlags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_GetData);
   D9DeviceLock lock = m_device->LockDevice();
   return getDataImpl(pData, dwSize, dwGetDataFlags);
 }

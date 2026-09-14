@@ -3,6 +3,11 @@ d3d9_res = wrc_generator.process('version.rc')
 d3d9_src = [
   'd3d9.cpp',
   'd3d9_buffer.cpp',
+  # MADEIRA (WOW64_DESIGN.md section 8.4): [d3d9-census] counters/report.
+  # Its call sites and d3d9_census_names.h are both emitted by
+  # gen_d3d9_census.py; run `gen_d3d9_census.py --check` after touching any
+  # STDMETHODCALLTYPE definition in this directory.
+  'd3d9_census.cpp',
   'd3d9_clear_quad.cpp',
   'd3d9_cube_texture.cpp',
   'd3d9_device.cpp',

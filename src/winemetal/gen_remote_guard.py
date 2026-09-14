@@ -104,11 +104,17 @@ ROUTED = {
 # a version that changes at random makes DXMT reconfigure presentation
 # repeatedly. Their layer dereferences are all inside `#if !TARGET_OS_IOS`, so
 # running them locally never touches a host handle.
+#
+# MADEIRA (WOW64_DESIGN.md section 8.4): d3d9_nop is the empty slot the
+# unix-call benchmark times. It has no handle to dereference and no output to
+# leave uninitialised, so the ⛔ rule below is satisfied trivially; guarding it
+# would mean the benchmark measured the guard rather than the crossing.
 LOCAL_OK = re.compile(r'^(thunk_SM50|thunk_DXSO|CacheReader_|CacheWriter_|DispatchData_|'
                       r'NSAutoreleasePool_|SharedEventListener_|NSString_|'
                       r'WMTSetMetalShaderCachePath|WMTQueryDisplaySettingForLayer|'
                       r'MetalLayer_getEDRValue|DeveloperHUDProperties_|'
-                      r'WMTGetPrimaryDisplayId|WMTGetDisplayDescription)')
+                      r'WMTGetPrimaryDisplayId|WMTGetDisplayDescription|'
+                      r'd3d9_nop$)')
 #
 # ⛔ A call may only be listed above if it NEVER DEREFERENCES ITS HANDLE on iOS.
 # In remote mode every handle is a host pointer, so running such a call locally

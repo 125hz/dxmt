@@ -7,6 +7,8 @@
 #include "d3d9_resource_priority.hpp"
 
 #include <algorithm>
+#include "d3d9_census.hpp"
+
 namespace dxmt {
 
 MTLD3D9VolumeTexture::MTLD3D9VolumeTexture(
@@ -108,6 +110,7 @@ MTLD3D9VolumeTexture::markLosable() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::AddRef() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_AddRef);
   ULONG ref = ComObject::AddRef();
   if (ref == 1)
     m_device->AddRef();
@@ -116,6 +119,7 @@ MTLD3D9VolumeTexture::AddRef() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::Release() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_Release);
   // D3D9 Release-at-0 clamp (hand-folded: multiply-inherits, so
   // ComObjectClamp cannot wrap it). Also bounds a volume's delegated Release
   // against the shared counter.
@@ -143,6 +147,7 @@ MTLD3D9VolumeTexture::Release() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::QueryInterface(REFIID riid, void **ppvObject) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_QueryInterface);
   if (!ppvObject)
     return E_POINTER;
   *ppvObject = nullptr;
@@ -157,6 +162,7 @@ MTLD3D9VolumeTexture::QueryInterface(REFIID riid, void **ppvObject) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::GetDevice(IDirect3DDevice9 **ppDevice) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_GetDevice);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppDevice)
     return D3DERR_INVALIDCALL;
@@ -166,47 +172,55 @@ MTLD3D9VolumeTexture::GetDevice(IDirect3DDevice9 **ppDevice) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::SetPrivateData(REFGUID refguid, const void *pData, DWORD SizeOfData, DWORD Flags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_SetPrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9SetPrivateData(m_privateData, refguid, pData, SizeOfData, Flags);
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::GetPrivateData(REFGUID refguid, void *pData, DWORD *pSizeOfData) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_GetPrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9GetPrivateData(m_privateData, refguid, pData, pSizeOfData);
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::FreePrivateData(REFGUID refguid) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_FreePrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9FreePrivateData(m_privateData, refguid);
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::SetPriority(DWORD PriorityNew) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_SetPriority);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9SetResourcePriority(m_pool, m_priority, PriorityNew);
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::GetPriority() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_GetPriority);
   D9DeviceLock lock = m_device->LockDevice();
   return m_priority;
 }
 
 void STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::PreLoad() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_PreLoad);
   D9DeviceLock lock = m_device->LockDevice();
 }
 
 D3DRESOURCETYPE STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::GetType() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_GetType);
   D9DeviceLock lock = m_device->LockDevice();
   return D3DRTYPE_VOLUMETEXTURE;
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::SetLOD(DWORD LODNew) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_SetLOD);
   D9DeviceLock lock = m_device->LockDevice();
   // Volume textures: LOD applies just like 2D; clamped by spec to
   // [0, level_count-1]. The bind path reads m_lod; FX stage / sampler
@@ -220,18 +234,21 @@ MTLD3D9VolumeTexture::SetLOD(DWORD LODNew) {
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::GetLOD() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_GetLOD);
   D9DeviceLock lock = m_device->LockDevice();
   return m_lod.load(std::memory_order_relaxed);
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::GetLevelCount() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_GetLevelCount);
   D9DeviceLock lock = m_device->LockDevice();
   return m_level_count;
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::SetAutoGenFilterType(D3DTEXTUREFILTERTYPE FilterType) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_SetAutoGenFilterType);
   D9DeviceLock lock = m_device->LockDevice();
   // wined3d texture.c d3d9_texture_3d_SetAutoGenFilterType: reject
   // D3DTEXF_NONE.
@@ -243,12 +260,14 @@ MTLD3D9VolumeTexture::SetAutoGenFilterType(D3DTEXTUREFILTERTYPE FilterType) {
 
 D3DTEXTUREFILTERTYPE STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::GetAutoGenFilterType() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_GetAutoGenFilterType);
   D9DeviceLock lock = m_device->LockDevice();
   return m_autoGenFilter;
 }
 
 void STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::GenerateMipSubLevels() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_GenerateMipSubLevels);
   D9DeviceLock lock = m_device->LockDevice();
   // A volume texture can never carry AUTOGENMIPMAP: CreateVolumeTexture rejects
   // the usage (validate_texture_create), matching both refs, so no auto-generated
@@ -259,6 +278,7 @@ MTLD3D9VolumeTexture::GenerateMipSubLevels() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::GetLevelDesc(UINT Level, D3DVOLUME_DESC *pDesc) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_GetLevelDesc);
   D9DeviceLock lock = m_device->LockDevice();
   if (!pDesc)
     return D3DERR_INVALIDCALL;
@@ -269,6 +289,7 @@ MTLD3D9VolumeTexture::GetLevelDesc(UINT Level, D3DVOLUME_DESC *pDesc) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::GetVolumeLevel(UINT Level, IDirect3DVolume9 **ppVolumeLevel) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_GetVolumeLevel);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppVolumeLevel)
     return D3DERR_INVALIDCALL;
@@ -281,6 +302,7 @@ MTLD3D9VolumeTexture::GetVolumeLevel(UINT Level, IDirect3DVolume9 **ppVolumeLeve
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::LockBox(UINT Level, D3DLOCKED_BOX *pLockedVolume, const D3DBOX *pBox, DWORD Flags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_LockBox);
   D9DeviceLock lock = m_device->LockDevice();
   if (Level >= m_levels.size())
     return D3DERR_INVALIDCALL;
@@ -289,6 +311,7 @@ MTLD3D9VolumeTexture::LockBox(UINT Level, D3DLOCKED_BOX *pLockedVolume, const D3
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::UnlockBox(UINT Level) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_UnlockBox);
   D9DeviceLock lock = m_device->LockDevice();
   if (Level >= m_levels.size())
     return D3DERR_INVALIDCALL;
@@ -332,6 +355,7 @@ MTLD3D9VolumeTexture::flushLevelOnUnlock(uint32_t level, const MTLD3D9Volume *vo
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VolumeTexture::AddDirtyBox(const D3DBOX *pDirtyBox) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VolumeTexture_AddDirtyBox);
   D9DeviceLock lock = m_device->LockDevice();
   // wined3d validates the dirty box against the level-0 extent
   // (check_box_dimensions: OOB / inverted / block-misaligned -> INVALIDCALL); a

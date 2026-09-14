@@ -16,6 +16,8 @@
 #include <tuple>
 #include <vector>
 
+#include "d3d9_census.hpp"
+
 namespace dxmt {
 
 // Pin Metal's own shader and pipeline cache to the per-executable
@@ -130,6 +132,7 @@ MTLD3D9Interface::~MTLD3D9Interface() = default;
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Interface::QueryInterface(REFIID riid, void **ppvObject) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_QueryInterface);
   if (!ppvObject)
     return E_POINTER;
   *ppvObject = nullptr;
@@ -149,6 +152,7 @@ MTLD3D9Interface::QueryInterface(REFIID riid, void **ppvObject) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Interface::RegisterSoftwareDevice(void *pInitializeFunction) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_RegisterSoftwareDevice);
   if (!pInitializeFunction)
     return D3DERR_INVALIDCALL;
   return D3DERR_NOTAVAILABLE;
@@ -156,6 +160,7 @@ MTLD3D9Interface::RegisterSoftwareDevice(void *pInitializeFunction) {
 
 UINT STDMETHODCALLTYPE
 MTLD3D9Interface::GetAdapterCount() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_GetAdapterCount);
   return m_adapterCount;
 }
 
@@ -168,6 +173,7 @@ static const GUID kD3DDeviceD3DUID = {0xaeb2cdd4, 0x6e41, 0x43ea, {0x94, 0x1c, 0
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Interface::GetAdapterIdentifier(UINT Adapter, DWORD Flags, D3DADAPTER_IDENTIFIER9 *pIdentifier) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_GetAdapterIdentifier);
   if (!pIdentifier)
     return D3DERR_INVALIDCALL;
 
@@ -202,6 +208,7 @@ MTLD3D9Interface::GetAdapterIdentifier(UINT Adapter, DWORD Flags, D3DADAPTER_IDE
 
 UINT STDMETHODCALLTYPE
 MTLD3D9Interface::GetAdapterModeCount(UINT Adapter, D3DFORMAT Format) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_GetAdapterModeCount);
   if (Adapter >= m_adapterCount)
     return 0;
   // wined3d filters: D3D9 only enumerates X8R8G8B8 / R5G6B5 here, and
@@ -214,6 +221,7 @@ MTLD3D9Interface::GetAdapterModeCount(UINT Adapter, D3DFORMAT Format) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Interface::EnumAdapterModes(UINT Adapter, D3DFORMAT Format, UINT Mode, D3DDISPLAYMODE *pMode) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_EnumAdapterModes);
   if (!pMode || Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
   if (Format != D3DFMT_X8R8G8B8)
@@ -232,6 +240,7 @@ MTLD3D9Interface::EnumAdapterModes(UINT Adapter, D3DFORMAT Format, UINT Mode, D3
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Interface::GetAdapterDisplayMode(UINT Adapter, D3DDISPLAYMODE *pMode) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_GetAdapterDisplayMode);
   if (!pMode || Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
 
@@ -254,6 +263,7 @@ HRESULT STDMETHODCALLTYPE
 MTLD3D9Interface::CheckDeviceType(
     UINT Adapter, D3DDEVTYPE DevType, D3DFORMAT DisplayFormat, D3DFORMAT BackBufferFormat, BOOL bWindowed
 ) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_CheckDeviceType);
   if (Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
   if (DevType != D3DDEVTYPE_HAL)
@@ -347,6 +357,7 @@ MTLD3D9Interface::CheckDeviceFormat(
     UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT AdapterFormat, DWORD Usage, D3DRESOURCETYPE RType,
     D3DFORMAT CheckFormat
 ) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_CheckDeviceFormat);
   if (Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
 
@@ -547,6 +558,7 @@ MTLD3D9Interface::CheckDeviceMultiSampleType(
     UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT SurfaceFormat, BOOL, D3DMULTISAMPLE_TYPE MultiSampleType,
     DWORD *pQualityLevels
 ) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_CheckDeviceMultiSampleType);
   if (Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
   if (DeviceType != D3DDEVTYPE_HAL)
@@ -622,6 +634,7 @@ MTLD3D9Interface::CheckDepthStencilMatch(
     UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT AdapterFormat, D3DFORMAT RenderTargetFormat,
     D3DFORMAT DepthStencilFormat
 ) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_CheckDepthStencilMatch);
   if (Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
   if (DeviceType != D3DDEVTYPE_HAL)
@@ -645,6 +658,7 @@ HRESULT STDMETHODCALLTYPE
 MTLD3D9Interface::CheckDeviceFormatConversion(
     UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT SourceFormat, D3DFORMAT TargetFormat
 ) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_CheckDeviceFormatConversion);
   if (Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
   if (DeviceType != D3DDEVTYPE_HAL)
@@ -672,6 +686,7 @@ MTLD3D9Interface::CheckDeviceFormatConversion(
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Interface::GetDeviceCaps(UINT Adapter, D3DDEVTYPE DeviceType, D3DCAPS9 *pCaps) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_GetDeviceCaps);
   if (!pCaps)
     return D3DERR_INVALIDCALL;
 
@@ -932,6 +947,7 @@ MTLD3D9Interface::GetDeviceCaps(UINT Adapter, D3DDEVTYPE DeviceType, D3DCAPS9 *p
 
 HMONITOR STDMETHODCALLTYPE
 MTLD3D9Interface::GetAdapterMonitor(UINT Adapter) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_GetAdapterMonitor);
   if (Adapter >= m_adapterCount)
     return nullptr;
   return wsi::enumMonitors(Adapter);
@@ -1024,6 +1040,7 @@ MTLD3D9Interface::CreateDevice(
     UINT Adapter, D3DDEVTYPE DeviceType, HWND hFocusWindow, DWORD BehaviorFlags,
     D3DPRESENT_PARAMETERS *pPresentationParameters, IDirect3DDevice9 **ppReturnedDeviceInterface
 ) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_CreateDevice);
   if (!ppReturnedDeviceInterface)
     return D3DERR_INVALIDCALL;
   *ppReturnedDeviceInterface = nullptr;
@@ -1068,6 +1085,7 @@ MTLD3D9Interface::CreateDevice(
 
 UINT STDMETHODCALLTYPE
 MTLD3D9Interface::GetAdapterModeCountEx(UINT Adapter, const D3DDISPLAYMODEFILTER *pFilter) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_GetAdapterModeCountEx);
   if (!pFilter || Adapter >= m_adapterCount)
     return 0;
   if (pFilter->Format != D3DFMT_X8R8G8B8)
@@ -1081,6 +1099,7 @@ HRESULT STDMETHODCALLTYPE
 MTLD3D9Interface::EnumAdapterModesEx(
     UINT Adapter, const D3DDISPLAYMODEFILTER *pFilter, UINT Mode, D3DDISPLAYMODEEX *pMode
 ) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_EnumAdapterModesEx);
   if (!pFilter || !pMode || Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
   if (pFilter->Format != D3DFMT_X8R8G8B8)
@@ -1103,6 +1122,7 @@ MTLD3D9Interface::EnumAdapterModesEx(
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Interface::GetAdapterDisplayModeEx(UINT Adapter, D3DDISPLAYMODEEX *pMode, D3DDISPLAYROTATION *pRotation) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_GetAdapterDisplayModeEx);
   if (!pMode || Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
   if (pMode->Size != sizeof(*pMode))
@@ -1129,6 +1149,7 @@ MTLD3D9Interface::CreateDeviceEx(
     D3DPRESENT_PARAMETERS *pPresentationParameters, D3DDISPLAYMODEEX *pFullscreenDisplayMode,
     IDirect3DDevice9Ex **ppDevice
 ) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_CreateDeviceEx);
   if (!ppDevice)
     return D3DERR_INVALIDCALL;
   *ppDevice = nullptr;
@@ -1176,6 +1197,7 @@ MTLD3D9Interface::CreateDeviceEx(
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Interface::GetAdapterLUID(UINT Adapter, LUID *pLUID) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_GetAdapterLUID);
   if (!pLUID)
     return D3DERR_INVALIDCALL;
   if (Adapter >= m_adapterCount)

@@ -43,6 +43,8 @@
 #define S_PRESENT_MODE_CHANGED ((HRESULT)0x08760877L)
 #endif
 
+#include "d3d9_census.hpp"
+
 namespace dxmt {
 
 // Releases a Metal view once the chunk it was registered on retires. The view
@@ -684,6 +686,7 @@ MTLD3D9SwapChain::~MTLD3D9SwapChain() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9SwapChain::AddRef() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9SwapChain_AddRef);
   ULONG ref = ComObject::AddRef();
   if (ref == 1) {
     m_device->AddRef();
@@ -699,6 +702,7 @@ MTLD3D9SwapChain::AddRef() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9SwapChain::Release() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9SwapChain_Release);
   // Capture the device before the base Release. An app-owned additional
   // chain has no device-held private ref, so ComObject::Release drops the
   // last reference and deletes `this`; reading m_device afterward would be
@@ -728,6 +732,7 @@ MTLD3D9SwapChain::Release() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9SwapChain::QueryInterface(REFIID riid, void **ppvObject) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9SwapChain_QueryInterface);
   if (!ppvObject)
     return E_POINTER;
   *ppvObject = nullptr;
@@ -749,6 +754,7 @@ HRESULT STDMETHODCALLTYPE
 MTLD3D9SwapChain::Present(
     const RECT *pSourceRect, const RECT *pDestRect, HWND hDestWindowOverride, const RGNDATA *pDirtyRegion, DWORD dwFlags
 ) {
+  D3D9_CENSUS_FRAME(D3D9_CENSUS_MTLD3D9SwapChain_Present);
   D9DeviceLock lock = m_device->LockDevice();
   (void)pDirtyRegion; // hint only, spec-permitted to ignore
   // Lost-device gate: presentStateGate returns S_PRESENT_OCCLUDED (Ex) or
@@ -1120,6 +1126,7 @@ MTLD3D9SwapChain::Present(
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9SwapChain::GetFrontBufferData(IDirect3DSurface9 *pDestSurface) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9SwapChain_GetFrontBufferData);
   D9DeviceLock lock = m_device->LockDevice();
   // A lost non-Ex device fails the readback with DEVICELOST (DXVK
   // d3d9_swapchain.cpp GetFrontBufferData); Ex devices never enter Lost.
@@ -1136,6 +1143,7 @@ MTLD3D9SwapChain::GetFrontBufferData(IDirect3DSurface9 *pDestSurface) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9SwapChain::GetBackBuffer(UINT iBackBuffer, D3DBACKBUFFER_TYPE Type, IDirect3DSurface9 **ppBackBuffer) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9SwapChain_GetBackBuffer);
   D9DeviceLock lock = m_device->LockDevice();
   // Type is ignored by native (wine dlls/d3d9 swapchain.c: "backbuffer_type is
   // ignored by native"). LEFT/RIGHT exist in the spec for stereo but no
@@ -1161,6 +1169,7 @@ MTLD3D9SwapChain::GetBackBuffer(UINT iBackBuffer, D3DBACKBUFFER_TYPE Type, IDire
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9SwapChain::GetRasterStatus(D3DRASTER_STATUS *pRasterStatus) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9SwapChain_GetRasterStatus);
   D9DeviceLock lock = m_device->LockDevice();
   if (!pRasterStatus)
     return D3DERR_INVALIDCALL;
@@ -1195,6 +1204,7 @@ MTLD3D9SwapChain::GetRasterStatus(D3DRASTER_STATUS *pRasterStatus) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9SwapChain::GetDisplayMode(D3DDISPLAYMODE *pMode) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9SwapChain_GetDisplayMode);
   D9DeviceLock lock = m_device->LockDevice();
   // wined3d (swapchain.c -> wined3d_output_get_display_mode) and DXVK
   // (d3d9_swapchain.cpp) both report the monitor's current mode, windowed and
@@ -1206,6 +1216,7 @@ MTLD3D9SwapChain::GetDisplayMode(D3DDISPLAYMODE *pMode) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9SwapChain::GetDevice(IDirect3DDevice9 **ppDevice) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9SwapChain_GetDevice);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppDevice)
     return D3DERR_INVALIDCALL;
@@ -1215,6 +1226,7 @@ MTLD3D9SwapChain::GetDevice(IDirect3DDevice9 **ppDevice) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9SwapChain::GetPresentParameters(D3DPRESENT_PARAMETERS *pParameters) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9SwapChain_GetPresentParameters);
   D9DeviceLock lock = m_device->LockDevice();
   if (!pParameters)
     return D3DERR_INVALIDCALL;
@@ -1224,6 +1236,7 @@ MTLD3D9SwapChain::GetPresentParameters(D3DPRESENT_PARAMETERS *pParameters) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9SwapChain::GetLastPresentCount(UINT *pLastPresentCount) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9SwapChain_GetLastPresentCount);
   D9DeviceLock lock = m_device->LockDevice();
   // Reject a null out-pointer with INVALIDCALL (the native contract). DXVK is
   // lenient here (returns D3D_OK and writes nothing); the strict form lets
@@ -1237,6 +1250,7 @@ MTLD3D9SwapChain::GetLastPresentCount(UINT *pLastPresentCount) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9SwapChain::GetPresentStats(D3DPRESENTSTATS *pPresentationStatistics) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9SwapChain_GetPresentStats);
   D9DeviceLock lock = m_device->LockDevice();
   // Same null-pointer rejection as GetLastPresentCount (native contract; DXVK
   // is lenient and returns D3D_OK).
@@ -1248,6 +1262,7 @@ MTLD3D9SwapChain::GetPresentStats(D3DPRESENTSTATS *pPresentationStatistics) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9SwapChain::GetDisplayModeEx(D3DDISPLAYMODEEX *pMode, D3DDISPLAYROTATION *pRotation) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9SwapChain_GetDisplayModeEx);
   D9DeviceLock lock = m_device->LockDevice();
   return m_device->GetDisplayModeEx(0, pMode, pRotation);
 }

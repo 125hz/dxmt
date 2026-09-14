@@ -14,6 +14,8 @@
 #include "wsi_platform.hpp"
 #include <cstring>
 
+#include "d3d9_census.hpp"
+
 namespace dxmt {
 
 #ifdef _WIN32
@@ -153,6 +155,7 @@ MTLD3D9Surface::resetLockableMirror(void *cpuPtr, uint32_t pitch, void *ownedBac
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9Surface::AddRef() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_AddRef);
   // Texture / cube mip-level surface: share the parent texture's public
   // counter so get_refcount(level) == get_refcount(parent), per the D3D9
   // sub-resource contract (DXVK D3D9Subresource). The parent owns this level,
@@ -178,6 +181,7 @@ MTLD3D9Surface::AddRef() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9Surface::Release() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_Release);
   // Sub-resource: delegate the whole public Release to the parent texture.
   // The parent can destruct synchronously inside this call (its m_levels
   // clears and deletes `this`), so the result must come from the delegated
@@ -223,6 +227,7 @@ MTLD3D9Surface::Release() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::QueryInterface(REFIID riid, void **ppvObject) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_QueryInterface);
   if (!ppvObject)
     return E_POINTER;
   *ppvObject = nullptr;
@@ -237,6 +242,7 @@ MTLD3D9Surface::QueryInterface(REFIID riid, void **ppvObject) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::GetDevice(IDirect3DDevice9 **ppDevice) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_GetDevice);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppDevice)
     return D3DERR_INVALIDCALL;
@@ -246,24 +252,28 @@ MTLD3D9Surface::GetDevice(IDirect3DDevice9 **ppDevice) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::SetPrivateData(REFGUID refguid, const void *pData, DWORD SizeOfData, DWORD Flags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_SetPrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9SetPrivateData(m_privateData, refguid, pData, SizeOfData, Flags);
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::GetPrivateData(REFGUID refguid, void *pData, DWORD *pSizeOfData) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_GetPrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9GetPrivateData(m_privateData, refguid, pData, pSizeOfData);
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::FreePrivateData(REFGUID refguid) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_FreePrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9FreePrivateData(m_privateData, refguid);
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Surface::SetPriority(DWORD) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_SetPriority);
   D9DeviceLock lock = m_device->LockDevice();
   // d3d9_surface_SetPriority ignores priority unconditionally: a surface is
   // either a texture sub-resource (priority lives on the container) or a
@@ -273,12 +283,14 @@ MTLD3D9Surface::SetPriority(DWORD) {
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Surface::GetPriority() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_GetPriority);
   D9DeviceLock lock = m_device->LockDevice();
   return 0;
 }
 
 void STDMETHODCALLTYPE
 MTLD3D9Surface::PreLoad() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_PreLoad);
   D9DeviceLock lock = m_device->LockDevice();
   // Hint to upload MANAGED contents to VRAM ahead of the next draw.
   // Apple Silicon's unified memory makes this a no-op; the texture
@@ -287,12 +299,14 @@ MTLD3D9Surface::PreLoad() {
 
 D3DRESOURCETYPE STDMETHODCALLTYPE
 MTLD3D9Surface::GetType() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_GetType);
   D9DeviceLock lock = m_device->LockDevice();
   return D3DRTYPE_SURFACE;
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::GetContainer(REFIID riid, void **ppContainer) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_GetContainer);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppContainer)
     return D3DERR_INVALIDCALL;
@@ -357,6 +371,7 @@ MTLD3D9Surface::flagContainerDirtyRegion(const RECT *rect) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::GetDesc(D3DSURFACE_DESC *pDesc) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_GetDesc);
   D9DeviceLock lock = m_device->LockDevice();
   if (!pDesc)
     return D3DERR_INVALIDCALL;
@@ -373,6 +388,7 @@ MTLD3D9Surface::GetDesc(D3DSURFACE_DESC *pDesc) {
 // cpu_ptr and correctly falls out at the null check below.
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::LockRect(D3DLOCKED_RECT *pLockedRect, const RECT *pRect, DWORD Flags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_LockRect);
   D9DeviceLock lock = m_device->LockDevice();
   if (!pLockedRect)
     return D3DERR_INVALIDCALL;
@@ -565,6 +581,7 @@ MTLD3D9Surface::LockRect(D3DLOCKED_RECT *pLockedRect, const RECT *pRect, DWORD F
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::UnlockRect() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_UnlockRect);
   D9DeviceLock lock = m_device->LockDevice();
   // Unlock of a surface that is not currently mapped. DXVK and wined3d forgive
   // it for a D3DRTYPE_TEXTURE container (m_is_texture_mip) and reject it with
@@ -668,6 +685,7 @@ MTLD3D9Surface::UnlockRect() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::GetDC(HDC *phdc) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_GetDC);
   D9DeviceLock lock = m_device->LockDevice();
   // Which surfaces a title paints through GDI decides which lock sub-path runs,
   // and the sub-paths differ in kind: a DEFAULT-pool surface is GPU-authoritative
@@ -758,6 +776,7 @@ MTLD3D9Surface::GetDC(HDC *phdc) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::ReleaseDC(HDC hdc) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_ReleaseDC);
   D9DeviceLock lock = m_device->LockDevice();
 #ifdef _WIN32
   if (m_gdi_dc == nullptr || hdc != m_gdi_dc)

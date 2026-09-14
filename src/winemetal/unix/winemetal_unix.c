@@ -5054,6 +5054,28 @@ _WMTSetMetalShaderCachePath32(void *obj) {
 }
 #endif /* DXMT_NATIVE */
 
+/* MADEIRA (WOW64_DESIGN.md section 8.4, measurement 2): the empty unix call.
+ *
+ * Deliberately the shortest possible handler. Section 8.4's whole point is
+ * that the cost of ONE crossing decides the architecture of section 8.5, and
+ * that the 150-400 ns estimate must not be built on -- so what this measures
+ * has to be the crossing and nothing else. It touches no Metal object and
+ * dereferences nothing, which is also why it is listed in gen_remote_guard.py's
+ * LOCAL_OK set: there is no handle here that could belong to another machine,
+ * so guarding it in remote mode would only measure the guard.
+ *
+ * No `_d3d9_nop32`. Rule 1 of section 7.4 exists for argument blocks with an
+ * embedded pointer; this one has none, so a 32-bit caller's block is already
+ * correct and sharing the handler is the right answer rather than an
+ * oversight -- the same reason slots 66/67/47/72 share theirs (section 7.11).
+ *
+ * Named `_d3d9_nop` after the thing being costed, not after what it does. */
+static NTSTATUS
+_d3d9_nop(void *obj) {
+  (void)obj;
+  return STATUS_SUCCESS;
+}
+
 #if TARGET_OS_IOS
 /* On iOS we statically link DXMT's unix side into the host app (Madeira.app),
  * alongside ntdll's own __wine_unix_call_funcs. Rename ours so the linker
@@ -5237,6 +5259,10 @@ const void *__wine_unix_call_funcs[] = {
     &thunk_DXSOCompile,
     &thunk_DXSOGetCompiledBitcode,
     &thunk_DXSODestroyBitcode,          /* 149 */
+    /* MADEIRA (WOW64_DESIGN.md section 8.4, measurement 2): appended at the
+     * END of both tables, which is the only place a slot may be added --
+     * rules 3 and 4 of section 7.4. 150 in both. */
+    &_d3d9_nop,                         /* 150 */
 };
 
 #ifndef DXMT_NATIVE
@@ -5394,5 +5420,10 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &thunk32_DXSOCompile,
     &thunk32_DXSOGetCompiledBitcode,
     &thunk_DXSODestroyBitcode,          /* handle only */
+    /* 150: no `_d3d9_nop32`.  The block is two uint64_t with no embedded
+     * pointer, so there is nothing for a 32-bit variant to convert and
+     * sharing the 64-bit handler is correct, not a gap (section 7.11 says the
+     * same about slots 47, 66, 67 and 72). */
+    &_d3d9_nop,                         /* 150 */
 };
 #endif

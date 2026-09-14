@@ -74,6 +74,21 @@ The guest-window fix in `src/dxmt/dxmt_buffer.cpp` (`Buffer::allocate`'s
 `#ifdef __i386__` `CpuPlaced`) is Madeira's own work: the reference has no
 equivalent, because it does not have a shifted guest window to satisfy.
 
+The `[d3d9-census]` instrumentation (WOW64_DESIGN.md §8.4) is Madeira's own
+work under GPL-3.0-or-later, and the reference has no equivalent. New files:
+`src/d3d9/gen_d3d9_census.py`, `src/d3d9/d3d9_census.{hpp,cpp}` and the
+generated `src/d3d9/d3d9_census_names.h`. Added to files imported from the tag:
+
+| Path | What was added |
+|---|---|
+| `src/d3d9/d3d9_{buffer,cube_texture,device,interface,query,shader,state_block,surface,swapchain,texture,vertex_declaration,volume,volume_texture}.cpp` | one `#include "d3d9_census.hpp"` and one generated `D3D9_CENSUS(...)` / `D3D9_CENSUS_FRAME(...)` line at the top of each of the 317 `STDMETHODCALLTYPE` definitions, all emitted by `gen_d3d9_census.py`; plus three hand-placed histogram calls (`census::shaderConstF` in `d3d9_device.cpp`'s `Set{Vertex,Pixel}ShaderConstantF`, `census::lockBytes` in `d3d9_buffer.cpp`'s two `Lock`s) |
+| `src/d3d9/meson.build` | `d3d9_census.cpp` in `d3d9_src` |
+
+The empty unix-call slot the §8.4 benchmark times (`_d3d9_nop` at slot 150,
+`WMTNop`, `struct unixcall_d3d9_nop`, and the `gen_remote_guard.py` `LOCAL_OK`
+entry, in `src/winemetal/`) is likewise Madeira's own work; it exists only to
+be measured and has no upstream counterpart.
+
 The `Reserved*` enumerators alongside those appended command types, the
 `_MTLRenderCommandEncoder_encodeCommands` / `_MTLBlitCommandEncoder_encodeCommands`
 cases that decode them, and `Texture::fullView`'s mapping onto this fork's view-0

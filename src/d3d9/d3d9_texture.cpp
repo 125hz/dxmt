@@ -9,6 +9,8 @@
 
 #include <algorithm>
 
+#include "d3d9_census.hpp"
+
 namespace dxmt {
 
 // Shared per-level setup. The ctor stashes m_textureRaw +
@@ -536,6 +538,7 @@ MTLD3D9Texture::markLosable() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9Texture::AddRef() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_AddRef);
   ULONG ref = ComObject::AddRef();
   if (ref == 1)
     m_device->AddRef();
@@ -544,6 +547,7 @@ MTLD3D9Texture::AddRef() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9Texture::Release() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_Release);
   // D3D9 clamps Release-at-0 (a quirk apps rely on; com/com_object.hpp
   // ComObjectClamp). This class multiply-inherits (ComObject +
   // MTLD3D9CommonTexture) so ComObjectClamp cannot wrap it; fold the guard by
@@ -578,6 +582,7 @@ MTLD3D9Texture::Release() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::QueryInterface(REFIID riid, void **ppvObject) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_QueryInterface);
   if (!ppvObject)
     return E_POINTER;
   *ppvObject = nullptr;
@@ -593,6 +598,7 @@ MTLD3D9Texture::QueryInterface(REFIID riid, void **ppvObject) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::GetDevice(IDirect3DDevice9 **ppDevice) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetDevice);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppDevice)
     return D3DERR_INVALIDCALL;
@@ -602,48 +608,56 @@ MTLD3D9Texture::GetDevice(IDirect3DDevice9 **ppDevice) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::SetPrivateData(REFGUID refguid, const void *pData, DWORD SizeOfData, DWORD Flags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_SetPrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9SetPrivateData(m_privateData, refguid, pData, SizeOfData, Flags);
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::GetPrivateData(REFGUID refguid, void *pData, DWORD *pSizeOfData) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetPrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9GetPrivateData(m_privateData, refguid, pData, pSizeOfData);
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::FreePrivateData(REFGUID refguid) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_FreePrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9FreePrivateData(m_privateData, refguid);
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Texture::SetPriority(DWORD PriorityNew) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_SetPriority);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9SetResourcePriority(m_pool, m_priority, PriorityNew);
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Texture::GetPriority() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetPriority);
   D9DeviceLock lock = m_device->LockDevice();
   return m_priority;
 }
 
 void STDMETHODCALLTYPE
 MTLD3D9Texture::PreLoad() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_PreLoad);
   D9DeviceLock lock = m_device->LockDevice();
   // Apple Silicon's unified memory makes residency hints a no-op.
 }
 
 D3DRESOURCETYPE STDMETHODCALLTYPE
 MTLD3D9Texture::GetType() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetType);
   D9DeviceLock lock = m_device->LockDevice();
   return D3DRTYPE_TEXTURE;
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Texture::SetLOD(DWORD LODNew) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_SetLOD);
   D9DeviceLock lock = m_device->LockDevice();
   // Per D3D9: SetLOD only meaningful for D3DPOOL_MANAGED. For other
   // pools the runtime returns 0 and ignores the new value. wined3d
@@ -661,18 +675,21 @@ MTLD3D9Texture::SetLOD(DWORD LODNew) {
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Texture::GetLOD() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetLOD);
   D9DeviceLock lock = m_device->LockDevice();
   return m_lod.load(std::memory_order_relaxed);
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Texture::GetLevelCount() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetLevelCount);
   D9DeviceLock lock = m_device->LockDevice();
   return static_cast<DWORD>(m_levels.size());
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::SetAutoGenFilterType(D3DTEXTUREFILTERTYPE FilterType) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_SetAutoGenFilterType);
   D9DeviceLock lock = m_device->LockDevice();
   // wined3d texture.c d3d9_texture_2d_SetAutoGenFilterType: reject
   // D3DTEXF_NONE: the runtime requires a valid auto-gen filter, and
@@ -686,12 +703,14 @@ MTLD3D9Texture::SetAutoGenFilterType(D3DTEXTUREFILTERTYPE FilterType) {
 
 D3DTEXTUREFILTERTYPE STDMETHODCALLTYPE
 MTLD3D9Texture::GetAutoGenFilterType() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetAutoGenFilterType);
   D9DeviceLock lock = m_device->LockDevice();
   return m_autoGenFilter;
 }
 
 void STDMETHODCALLTYPE
 MTLD3D9Texture::GenerateMipSubLevels() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GenerateMipSubLevels);
   D9DeviceLock lock = m_device->LockDevice();
   // Only AUTOGENMIPMAP textures auto-regenerate: an explicit-mip texture fills
   // its levels by Lock/Unlock and must not have them overwritten by a downsample
@@ -715,6 +734,7 @@ MTLD3D9Texture::GenerateMipSubLevels() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::GetLevelDesc(UINT Level, D3DSURFACE_DESC *pDesc) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetLevelDesc);
   D9DeviceLock lock = m_device->LockDevice();
   if (!pDesc)
     return D3DERR_INVALIDCALL;
@@ -725,6 +745,7 @@ MTLD3D9Texture::GetLevelDesc(UINT Level, D3DSURFACE_DESC *pDesc) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::GetSurfaceLevel(UINT Level, IDirect3DSurface9 **ppSurfaceLevel) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetSurfaceLevel);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppSurfaceLevel)
     return D3DERR_INVALIDCALL;
@@ -740,6 +761,7 @@ MTLD3D9Texture::GetSurfaceLevel(UINT Level, IDirect3DSurface9 **ppSurfaceLevel) 
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::LockRect(UINT Level, D3DLOCKED_RECT *pLockedRect, const RECT *pRect, DWORD Flags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_LockRect);
   D9DeviceLock lock = m_device->LockDevice();
   if (Level >= m_levels.size())
     return D3DERR_INVALIDCALL;
@@ -750,6 +772,7 @@ MTLD3D9Texture::LockRect(UINT Level, D3DLOCKED_RECT *pLockedRect, const RECT *pR
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::UnlockRect(UINT Level) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_UnlockRect);
   D9DeviceLock lock = m_device->LockDevice();
   if (Level >= m_levels.size())
     return D3DERR_INVALIDCALL;
@@ -764,6 +787,7 @@ MTLD3D9Texture::UnlockRect(UINT Level) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::AddDirtyRect(const RECT *pDirtyRect) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_AddDirtyRect);
   D9DeviceLock lock = m_device->LockDevice();
   // wined3d wined3d_texture_add_dirty_region: rect==NULL marks the
   // whole sub-resource set dirty; otherwise it validates the region against the
