@@ -16,6 +16,11 @@
 
 #include "wsi_monitor.hpp"
 
+#ifdef DXMT_MADEIRA
+#include "wsi_window.hpp"
+#include "wsi_window_madeira.hpp"
+#endif
+
 namespace dxmt::wsi {
 
 /* Synthetic singleton monitor handle. Non-NULL so EnumOutputs sees a
@@ -30,12 +35,23 @@ static HMONITOR const kSyntheticMonitor = reinterpret_cast<HMONITOR>(1);
  * failing to reconcile the two. Ask user32 for the real screen size; the
  * Wine iOS win32u virtual monitor serves it in every regime (desktop and
  * game mode). Fall back to 1024x768 only if the call fails. */
+/* MADEIRA (WOW64_DESIGN.md section 8.2(d)): there is no user32 below the
+ * Win32 boundary, so the native build answers from the same per-HWND cache
+ * the shim fills.  A NULL window asks for its default entry, which is the
+ * virtual desktop size -- exactly what GetSystemMetrics(SM_CXSCREEN) meant
+ * here.  See research/dxmt/LICENSE-MADEIRA.md. */
+#ifdef DXMT_MADEIRA
+static void getScreenSize(uint32_t *w, uint32_t *h) {
+  dxmt::wsi::getWindowSize(nullptr, w, h);
+}
+#else
 static void getScreenSize(uint32_t *w, uint32_t *h) {
   int sw = ::GetSystemMetrics(SM_CXSCREEN);
   int sh = ::GetSystemMetrics(SM_CYSCREEN);
   *w = (sw > 0) ? (uint32_t)sw : 1024;
   *h = (sh > 0) ? (uint32_t)sh : 768;
 }
+#endif
 
 HMONITOR getDefaultMonitor() {
   return kSyntheticMonitor;

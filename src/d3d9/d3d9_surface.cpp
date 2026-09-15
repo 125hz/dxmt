@@ -1,4 +1,5 @@
 #include "d3d9_surface.hpp"
+#include "d3d9_guest_alloc.hpp"
 
 #include <mutex>
 #include <set>
@@ -109,7 +110,7 @@ MTLD3D9Surface::~MTLD3D9Surface() {
   m_texture = WMT::Reference<WMT::Texture>{};
   m_buffer = WMT::Reference<WMT::Buffer>{};
   if (m_owned_backing)
-    wsi::aligned_free(m_owned_backing);
+    guest_free(m_owned_backing);
   if (m_isLosable)
     m_device->onLosableResourceDestroyed(m_losableBytes);
 }
@@ -147,7 +148,7 @@ MTLD3D9Surface::ensureHostMirror() {
 void
 MTLD3D9Surface::resetLockableMirror(void *cpuPtr, uint32_t pitch, void *ownedBacking) {
   if (m_owned_backing)
-    wsi::aligned_free(m_owned_backing);
+    guest_free(m_owned_backing);
   m_owned_backing = ownedBacking;
   m_cpu_ptr = cpuPtr;
   m_pitch = pitch;

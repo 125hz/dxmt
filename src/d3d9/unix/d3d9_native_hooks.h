@@ -35,9 +35,35 @@
  * never a host pointer (invariant 4).  0 is "none". */
 typedef uint64_t d3d9_native_handle;
 
+/* What a handle points at.  The glue stores the CANONICAL interface pointer
+ * for the kind (the one named beside each value below) and every lookup is
+ * checked against it, so a handle of the wrong kind is D3DERR_INVALIDCALL
+ * rather than a wild cast.  0 is reserved: d3d9_native_handle_lookup() reads
+ * it as "any kind", which only the teardown sweep ever asks for. */
+enum d3d9_native_kind {
+    D3D9_NATIVE_KIND_NONE = 0,
+    D3D9_NATIVE_KIND_D3D9                  =  1, /* IDirect3D9Ex */
+    D3D9_NATIVE_KIND_DEVICE                =  2, /* IDirect3DDevice9Ex */
+    D3D9_NATIVE_KIND_SWAPCHAIN             =  3, /* IDirect3DSwapChain9Ex */
+    D3D9_NATIVE_KIND_SURFACE               =  4, /* IDirect3DSurface9 */
+    D3D9_NATIVE_KIND_TEXTURE               =  5, /* IDirect3DTexture9 */
+    D3D9_NATIVE_KIND_CUBETEXTURE           =  6, /* IDirect3DCubeTexture9 */
+    D3D9_NATIVE_KIND_VOLUMETEXTURE         =  7, /* IDirect3DVolumeTexture9 */
+    D3D9_NATIVE_KIND_VOLUME                =  8, /* IDirect3DVolume9 */
+    D3D9_NATIVE_KIND_VERTEXBUFFER          =  9, /* IDirect3DVertexBuffer9 */
+    D3D9_NATIVE_KIND_INDEXBUFFER           = 10, /* IDirect3DIndexBuffer9 */
+    D3D9_NATIVE_KIND_VERTEXDECL            = 11, /* IDirect3DVertexDeclaration9 */
+    D3D9_NATIVE_KIND_VERTEXSHADER          = 12, /* IDirect3DVertexShader9 */
+    D3D9_NATIVE_KIND_PIXELSHADER           = 13, /* IDirect3DPixelShader9 */
+    D3D9_NATIVE_KIND_STATEBLOCK            = 14, /* IDirect3DStateBlock9 */
+    D3D9_NATIVE_KIND_QUERY                 = 15, /* IDirect3DQuery9 */
+    D3D9_NATIVE_KIND_COUNT
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
 
 /* Called once, from _d3d9_init, after the hash handshake passes. */
 extern int d3d9_native_init(void);
@@ -122,7 +148,7 @@ extern void d3d9_native_Device9Ex_SetCursorPosition(d3d9_native_handle self, int
 extern WINBOOL d3d9_native_Device9Ex_ShowCursor(d3d9_native_handle self, WINBOOL show);
 /* IDirect3DDevice9Ex::CreateAdditionalSwapChain -- slot 13, sync */
 extern HRESULT d3d9_native_Device9Ex_CreateAdditionalSwapChain(d3d9_native_handle self, D3DPRESENT_PARAMETERS *parameters, d3d9_native_handle *swapchain);
-/* IDirect3DDevice9Ex::GetSwapChain -- slot 14, local */
+/* IDirect3DDevice9Ex::GetSwapChain -- slot 14, resolve */
 extern HRESULT d3d9_native_Device9Ex_GetSwapChain(d3d9_native_handle self, UINT swapchain_idx, d3d9_native_handle *swapchain);
 /* IDirect3DDevice9Ex::GetNumberOfSwapChains -- slot 15, sync */
 extern UINT d3d9_native_Device9Ex_GetNumberOfSwapChains(d3d9_native_handle self);
@@ -130,7 +156,7 @@ extern UINT d3d9_native_Device9Ex_GetNumberOfSwapChains(d3d9_native_handle self)
 extern HRESULT d3d9_native_Device9Ex_Reset(d3d9_native_handle self, D3DPRESENT_PARAMETERS *parameters);
 /* IDirect3DDevice9Ex::Present -- slot 17, sync */
 extern HRESULT d3d9_native_Device9Ex_Present(d3d9_native_handle self, const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override, const RGNDATA *dirty_region);
-/* IDirect3DDevice9Ex::GetBackBuffer -- slot 18, local */
+/* IDirect3DDevice9Ex::GetBackBuffer -- slot 18, resolve */
 extern HRESULT d3d9_native_Device9Ex_GetBackBuffer(d3d9_native_handle self, UINT swapchain_idx, UINT backbuffer_idx, D3DBACKBUFFER_TYPE backbuffer_type, d3d9_native_handle *backbuffer);
 /* IDirect3DDevice9Ex::GetRasterStatus -- slot 19, sync */
 extern HRESULT d3d9_native_Device9Ex_GetRasterStatus(d3d9_native_handle self, UINT swapchain_idx, D3DRASTER_STATUS *raster_status);
@@ -170,11 +196,11 @@ extern HRESULT d3d9_native_Device9Ex_ColorFill(d3d9_native_handle self, d3d9_nat
 extern HRESULT d3d9_native_Device9Ex_CreateOffscreenPlainSurface(d3d9_native_handle self, UINT width, UINT height, D3DFORMAT format, D3DPOOL pool, d3d9_native_handle *surface, HANDLE *shared_handle);
 /* IDirect3DDevice9Ex::SetRenderTarget -- slot 37, defer */
 extern HRESULT d3d9_native_Device9Ex_SetRenderTarget(d3d9_native_handle self, DWORD idx, d3d9_native_handle surface);
-/* IDirect3DDevice9Ex::GetRenderTarget -- slot 38, local */
+/* IDirect3DDevice9Ex::GetRenderTarget -- slot 38, resolve */
 extern HRESULT d3d9_native_Device9Ex_GetRenderTarget(d3d9_native_handle self, DWORD idx, d3d9_native_handle *surface);
 /* IDirect3DDevice9Ex::SetDepthStencilSurface -- slot 39, defer */
 extern HRESULT d3d9_native_Device9Ex_SetDepthStencilSurface(d3d9_native_handle self, d3d9_native_handle depth_stencil);
-/* IDirect3DDevice9Ex::GetDepthStencilSurface -- slot 40, local */
+/* IDirect3DDevice9Ex::GetDepthStencilSurface -- slot 40, resolve */
 extern HRESULT d3d9_native_Device9Ex_GetDepthStencilSurface(d3d9_native_handle self, d3d9_native_handle *depth_stencil);
 /* IDirect3DDevice9Ex::BeginScene -- slot 41, defer */
 extern HRESULT d3d9_native_Device9Ex_BeginScene(d3d9_native_handle self);
@@ -372,7 +398,7 @@ extern ULONG d3d9_native_SwapChain9Ex_Release(d3d9_native_handle self);
 extern HRESULT d3d9_native_SwapChain9Ex_Present(d3d9_native_handle self, const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override, const RGNDATA *dirty_region, DWORD flags);
 /* IDirect3DSwapChain9Ex::GetFrontBufferData -- slot 4, sync */
 extern HRESULT d3d9_native_SwapChain9Ex_GetFrontBufferData(d3d9_native_handle self, d3d9_native_handle dst_surface);
-/* IDirect3DSwapChain9Ex::GetBackBuffer -- slot 5, local */
+/* IDirect3DSwapChain9Ex::GetBackBuffer -- slot 5, resolve */
 extern HRESULT d3d9_native_SwapChain9Ex_GetBackBuffer(d3d9_native_handle self, UINT backbuffer_idx, D3DBACKBUFFER_TYPE backbuffer_type, d3d9_native_handle *backbuffer);
 /* IDirect3DSwapChain9Ex::GetRasterStatus -- slot 6, sync */
 extern HRESULT d3d9_native_SwapChain9Ex_GetRasterStatus(d3d9_native_handle self, D3DRASTER_STATUS *raster_status);
@@ -458,7 +484,7 @@ extern D3DTEXTUREFILTERTYPE d3d9_native_Texture9_GetAutoGenFilterType(d3d9_nativ
 extern void d3d9_native_Texture9_GenerateMipSubLevels(d3d9_native_handle self);
 /* IDirect3DTexture9::GetLevelDesc -- slot 17, sync */
 extern HRESULT d3d9_native_Texture9_GetLevelDesc(d3d9_native_handle self, UINT Level, D3DSURFACE_DESC *pDesc);
-/* IDirect3DTexture9::GetSurfaceLevel -- slot 18, local */
+/* IDirect3DTexture9::GetSurfaceLevel -- slot 18, resolve */
 extern HRESULT d3d9_native_Texture9_GetSurfaceLevel(d3d9_native_handle self, UINT Level, d3d9_native_handle *ppSurfaceLevel);
 /* IDirect3DTexture9::LockRect -- slot 19, sync */
 extern HRESULT d3d9_native_Texture9_LockRect(d3d9_native_handle self, UINT level, D3DLOCKED_RECT *locked_rect, const RECT *rect, DWORD flags);
@@ -502,7 +528,7 @@ extern D3DTEXTUREFILTERTYPE d3d9_native_CubeTexture9_GetAutoGenFilterType(d3d9_n
 extern void d3d9_native_CubeTexture9_GenerateMipSubLevels(d3d9_native_handle self);
 /* IDirect3DCubeTexture9::GetLevelDesc -- slot 17, sync */
 extern HRESULT d3d9_native_CubeTexture9_GetLevelDesc(d3d9_native_handle self, UINT Level, D3DSURFACE_DESC *pDesc);
-/* IDirect3DCubeTexture9::GetCubeMapSurface -- slot 18, local */
+/* IDirect3DCubeTexture9::GetCubeMapSurface -- slot 18, resolve */
 extern HRESULT d3d9_native_CubeTexture9_GetCubeMapSurface(d3d9_native_handle self, D3DCUBEMAP_FACES FaceType, UINT Level, d3d9_native_handle *ppCubeMapSurface);
 /* IDirect3DCubeTexture9::LockRect -- slot 19, sync */
 extern HRESULT d3d9_native_CubeTexture9_LockRect(d3d9_native_handle self, D3DCUBEMAP_FACES face, UINT level, D3DLOCKED_RECT *locked_rect, const RECT *rect, DWORD flags);
@@ -546,7 +572,7 @@ extern D3DTEXTUREFILTERTYPE d3d9_native_VolumeTexture9_GetAutoGenFilterType(d3d9
 extern void d3d9_native_VolumeTexture9_GenerateMipSubLevels(d3d9_native_handle self);
 /* IDirect3DVolumeTexture9::GetLevelDesc -- slot 17, sync */
 extern HRESULT d3d9_native_VolumeTexture9_GetLevelDesc(d3d9_native_handle self, UINT Level, D3DVOLUME_DESC *pDesc);
-/* IDirect3DVolumeTexture9::GetVolumeLevel -- slot 18, local */
+/* IDirect3DVolumeTexture9::GetVolumeLevel -- slot 18, resolve */
 extern HRESULT d3d9_native_VolumeTexture9_GetVolumeLevel(d3d9_native_handle self, UINT Level, d3d9_native_handle *ppVolumeLevel);
 /* IDirect3DVolumeTexture9::LockBox -- slot 19, sync */
 extern HRESULT d3d9_native_VolumeTexture9_LockBox(d3d9_native_handle self, UINT level, D3DLOCKED_BOX *locked_box, const D3DBOX *box, DWORD flags);
@@ -599,7 +625,7 @@ extern void d3d9_native_VertexBuffer9_PreLoad(d3d9_native_handle self);
 /* IDirect3DVertexBuffer9::GetType -- slot 10, local */
 extern D3DRESOURCETYPE d3d9_native_VertexBuffer9_GetType(d3d9_native_handle self);
 /* IDirect3DVertexBuffer9::Lock -- slot 11, sync */
-extern HRESULT d3d9_native_VertexBuffer9_Lock(d3d9_native_handle self, UINT OffsetToLock, UINT SizeToLock, d3d9_native_handle *ppbData, DWORD Flags);
+extern HRESULT d3d9_native_VertexBuffer9_Lock(d3d9_native_handle self, UINT OffsetToLock, UINT SizeToLock, void **ppbData, DWORD Flags);
 /* IDirect3DVertexBuffer9::Unlock -- slot 12, sync */
 extern HRESULT d3d9_native_VertexBuffer9_Unlock(d3d9_native_handle self);
 /* IDirect3DVertexBuffer9::GetDesc -- slot 13, sync */
@@ -627,7 +653,7 @@ extern void d3d9_native_IndexBuffer9_PreLoad(d3d9_native_handle self);
 /* IDirect3DIndexBuffer9::GetType -- slot 10, local */
 extern D3DRESOURCETYPE d3d9_native_IndexBuffer9_GetType(d3d9_native_handle self);
 /* IDirect3DIndexBuffer9::Lock -- slot 11, sync */
-extern HRESULT d3d9_native_IndexBuffer9_Lock(d3d9_native_handle self, UINT OffsetToLock, UINT SizeToLock, d3d9_native_handle *ppbData, DWORD Flags);
+extern HRESULT d3d9_native_IndexBuffer9_Lock(d3d9_native_handle self, UINT OffsetToLock, UINT SizeToLock, void **ppbData, DWORD Flags);
 /* IDirect3DIndexBuffer9::Unlock -- slot 12, sync */
 extern HRESULT d3d9_native_IndexBuffer9_Unlock(d3d9_native_handle self);
 /* IDirect3DIndexBuffer9::GetDesc -- slot 13, sync */
@@ -690,6 +716,17 @@ extern DWORD d3d9_native_Query9_GetDataSize(d3d9_native_handle self);
 extern HRESULT d3d9_native_Query9_Issue(d3d9_native_handle self, DWORD dwIssueFlags);
 /* IDirect3DQuery9::GetData -- slot 7, sync */
 extern HRESULT d3d9_native_Query9_GetData(d3d9_native_handle self, BYTE *pData, DWORD dwSize, DWORD dwGetDataFlags);
+
+/* The three TRANSPORT hooks.  Not vtable methods -- the guest arena
+ * registration (8.2(c)), the per-HWND state cache (8.2(d)) and the creation
+ * of the IDirect3D9(Ex) every other call self descends from, which is a DLL
+ * export rather than a slot. */
+/* transport slot 321 -- 0 on success */
+extern int d3d9_native_arena_register(uint32_t guest_base, uint64_t size);
+/* transport slot 322 -- an HRESULT */
+extern HRESULT d3d9_native_window_state(HWND hwnd, uint32_t width, uint32_t height, uint32_t flags);
+/* transport slot 323 -- an HRESULT */
+extern HRESULT d3d9_native_create_interface(d3d9_native_handle *iface, uint32_t sdk_version, uint32_t is_ex);
 
 #ifdef __cplusplus
 }

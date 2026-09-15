@@ -1,4 +1,5 @@
 #include "d3d9_cube_texture.hpp"
+#include "d3d9_guest_alloc.hpp"
 
 #include "d3d9_device.hpp"
 #include "d3d9_format.hpp"
@@ -159,7 +160,7 @@ MTLD3D9CubeTexture::ensureMirror() {
   uint64_t mirror_gpu_addr = 0;
   void *mirror_host = nullptr;
   if (!m_device->acquireBufferBacking(total_bytes, m_mirrorBuffer, mirror_gpu_addr, mirror_host, m_mirrorBacking)) {
-    m_mirrorBacking = wsi::aligned_malloc(total_bytes, DXMT_PAGE_SIZE);
+    m_mirrorBacking = guest_alloc(total_bytes, DXMT_PAGE_SIZE);
     if (!m_mirrorBacking)
       return;
     std::memset(m_mirrorBacking, 0, total_bytes);
@@ -170,7 +171,7 @@ MTLD3D9CubeTexture::ensureMirror() {
     binfo.memory.set(m_mirrorBacking);
     m_mirrorBuffer = m_device->metalDevice().newBuffer(binfo);
     if (m_mirrorBuffer == nullptr) {
-      wsi::aligned_free(m_mirrorBacking);
+      guest_free(m_mirrorBacking);
       m_mirrorBacking = nullptr;
       return;
     }

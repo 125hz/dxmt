@@ -316,6 +316,26 @@ public:
     cpu_coherent.wait(seq);
   };
 
+  // MADEIRA: bounded, cooperative counterpart of WaitCPUFence, for a caller
+  // that is NOT allowed to block. D3D9's IDirect3DQuery9::GetData is the
+  // motivating one: its contract is "report, never stall", so it has to come
+  // back with S_FALSE while the GPU is still running -- but an application
+  // that builds a GPU fence out of
+  // `while (GetData(..., D3DGETDATA_FLUSH) == S_FALSE) {}` then spins its
+  // render thread at full speed for a whole frame. Parking that thread here
+  // for a capped slice turns tens of thousands of no-op polls per frame into
+  // a few hundred and observes the completion within microseconds of it
+  // happening, instead of whenever the caller next happens to ask.
+  //
+  // Never waits longer than timeout_ns, so it cannot turn a non-blocking API
+  // into a blocking one. Two phases, the same shape D9RecursiveSpinlock uses:
+  // a short load-spin catches a completion that is already microseconds away
+  // without paying for a context switch, then the core is handed to whoever
+  // else is runnable -- which is exactly the encode and finish threads, the
+  // only threads that can move this watermark at all. Returns true iff the
+  // watermark reached seq before the deadline.
+  bool WaitCPUFenceBounded(uint64_t seq, uint64_t timeout_ns);
+
   std::tuple<WMT::Buffer, uint64_t>
   AllocateStagingBuffer(size_t size, size_t alignment) {
     auto [block, offset] = staging_allocator.allocate(ready_for_encode, cpu_coherent.signaledValue(), size, alignment);

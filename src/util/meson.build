@@ -23,7 +23,18 @@ util_src = files([
   'sha1/sha1_util.cpp',
 ])
 
-if dxmt_native
+# MADEIRA (WOW64_DESIGN.md section 8.2(d)): the Madeira native build has no
+# user32 at all -- wsi_window_headless.cpp still calls ::GetClientRect and
+# ::GetSystemMetrics, which do not exist below the Win32 boundary. The client
+# size comes from a per-HWND cache the shim fills instead. Checked BEFORE the
+# dxmt_native arm because dxmt_madeira_native implies dxmt_native.
+if dxmt_madeira
+  util_src += files([
+    'wsi_monitor_headless.cpp',
+    'wsi_window_madeira.cpp',
+    'wsi_platform_madeira.cpp',
+  ])
+elif dxmt_native
   util_src += files([
     'wsi_monitor_headless.cpp',
     'wsi_window_headless.cpp',

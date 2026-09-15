@@ -1,4 +1,6 @@
 #include "d3d9_device.hpp"
+#include "d3d9_guest_alloc.hpp"
+#include "d3d9_madeira_window.hpp"
 
 #include "airconv_public.h"
 #include "d3d9_buffer.hpp"
@@ -804,7 +806,7 @@ MTLD3D9Device::releaseBufferBacking(
     // below; we free the wsi backing here.
     buffer = WMT::Reference<WMT::Buffer>{};
     if (owned)
-      wsi::aligned_free(owned);
+      guest_free(owned);
     return;
   }
   BufferBackingPoolEntry entry;
@@ -899,7 +901,7 @@ MTLD3D9Device::~MTLD3D9Device() {
       std::lock_guard<dxmt::mutex> lock(m_bufferBackingPoolMutex);
       for (auto &entry : m_bufferBackingPool) {
         if (entry.owned_backing)
-          wsi::aligned_free(entry.owned_backing);
+          guest_free(entry.owned_backing);
       }
       m_bufferBackingPool.clear();
       m_bufferBackingPoolBytes = 0;
@@ -928,7 +930,7 @@ MTLD3D9Device::~MTLD3D9Device() {
   // MTLD3D9Texture's dtor.
   m_fanListIB = WMT::Reference<WMT::Buffer>{};
   if (m_fanListIBBacking) {
-    wsi::aligned_free(m_fanListIBBacking);
+    guest_free(m_fanListIBBacking);
     m_fanListIBBacking = nullptr;
   }
 #ifdef _WIN32
@@ -1619,7 +1621,31 @@ MTLD3D9Device::QueryInterface(REFIID riid, void **ppvObject) {
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Device::TestCooperativeLevel() {
   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Device_TestCooperativeLevel);
-  D9DeviceLock lock = LockDevice();
+  // MADEIRA: constant time, and deliberately lock-free -- the same treatment,
+  // and for the same reason, as MTLD3D9Query::GetDataSize. Log 41 measured 809
+  // of these per frame, second only to GetData/GetDataSize: a poll loop calls
+  // it between every frame's present and its next Clear. Everything it reads
+  // is either written once or an atomic:
+  //
+  //   m_isEx             const, set in the initialiser list;
+  //   m_implicitSwapChain  assigned once in the constructor and cleared only
+  //                      in the destructor (:598, :925) -- Reset resets the
+  //                      chain IN PLACE (ResetForDeviceReset, :2439) rather
+  //                      than replacing the pointer;
+  //   windowed(), m_deviceState, m_fullscreenOccluded, m_lastForegroundSample
+  //                      relaxed atomics or a plain bool read, which is what
+  //                      updateNonExLostState() already treats them as.
+  //
+  // Under D3DCREATE_MULTITHREADED the lock this used to take was a recursive
+  // spinlock acquire/release -- a CAS plus a release store -- guarding a value
+  // no other API call can change while it runs. DXVK's D3D9DeviceEx::
+  // TestCooperativeLevel takes no lock either.
+  //
+  // It stays defined here rather than moving to the header: gen_d3d9_census.py
+  // scans the .cpp files and the census code IS the index into
+  // d3d9_census_names[], so lifting one definition out would renumber every
+  // method after it.
+  //
   // D3D9Ex spec: always returns S_OK; apps probe device loss via
   // CheckDeviceState on the Ex interface. wined3d device.c d3d9_device_
   // TestCooperativeLevel and DXVK both match this.
@@ -1967,6 +1993,18 @@ MTLD3D9Device::enterFullscreenWindow(HWND window, UINT width, UINT height) {
   if (m_creationParams.BehaviorFlags & D3DCREATE_NOWINDOWCHANGES)
     return;
   FilteredWindowMessages filtered(m_focusMessagesFiltered);
+#ifdef DXMT_MADEIRA
+  // MADEIRA (WOW64_DESIGN.md section 8.2(d)): the restyle below is user32
+  // work that delivers WM_WINDOWPOSCHANGED / WM_SIZE to the application
+  // synchronously, so it has to run on the guest's own thread -- the shim's.
+  // The saved style/rect bookkeeping goes with it: the shim is the only side
+  // that can read a style back. m_fullscreenWindow is still tracked here
+  // because Reset and the swapchain read it.
+  m_fullscreenWindow = window;
+  m_fullscreenMonitor.store(wsi::getWindowMonitor(window), std::memory_order_relaxed);
+  madeira_window_enter_fullscreen(window, width, height);
+  return;
+#else
 
   // Fullscreen rect: the window's monitor origin plus the backbuffer extent.
   // Single-monitor desktops sit at (0, 0); a read-only MonitorFromWindow keeps
@@ -2001,6 +2039,7 @@ MTLD3D9Device::enterFullscreenWindow(HWND window, UINT width, UINT height) {
       window, HWND_TOPMOST, x, y, static_cast<int>(width), static_cast<int>(height),
       SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW
   );
+#endif /* DXMT_MADEIRA */
 }
 
 // Port of wined3d_swapchain_state_restore_from_fullscreen. Restores the saved
@@ -2015,6 +2054,14 @@ MTLD3D9Device::leaveFullscreenWindow() {
     return;
   m_fullscreenWindow = nullptr;
   FilteredWindowMessages filtered(m_focusMessagesFiltered);
+#ifdef DXMT_MADEIRA
+  // MADEIRA (WOW64_DESIGN.md section 8.2(d)): the shim owns the saved style
+  // and rect, so it owns the restore too. `m_isEx` still selects between the
+  // two wined3d behaviours -- only Ex restores the window rect.
+  madeira_window_leave_fullscreen(window, m_isEx);
+  m_fullscreenMonitor.store(nullptr, std::memory_order_relaxed);
+  return;
+#else
 
   LONG liveStyle = GetWindowLongW(window, GWL_STYLE);
   LONG liveExStyle = GetWindowLongW(window, GWL_EXSTYLE);
@@ -2037,8 +2084,10 @@ MTLD3D9Device::leaveFullscreenWindow() {
   m_savedWindowExStyle = 0;
   m_savedWindowRect = RECT{};
   m_fullscreenMonitor.store(nullptr, std::memory_order_relaxed);
+#endif /* DXMT_MADEIRA */
 }
 
+#ifndef DXMT_MADEIRA
 namespace {
 // Window properties held on the focus window while dxmt has it subclassed: the
 // application's original wndproc, and the device the transitions belong to. The
@@ -2093,6 +2142,7 @@ focusWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
                  : CallWindowProcA(orig, hwnd, message, wparam, lparam);
 }
 } // namespace
+#endif /* !DXMT_MADEIRA */
 
 // Port of wined3d_swapchain_activate (dlls/wined3d/swapchain.c). The two
 // directions are deliberately asymmetric, matching the reference: losing focus
@@ -2147,6 +2197,13 @@ MTLD3D9Device::onFocusActivation(bool activated) {
       m_deviceState.compare_exchange_strong(state, DeviceState::Lost, std::memory_order_relaxed);
     }
 
+#ifdef DXMT_MADEIRA
+    // MADEIRA (WOW64_DESIGN.md section 8.2(d)): ShowWindow runs on the
+    // guest's thread. Everything above it -- the mode restore, the Lost
+    // transition, the occlusion flag -- is device state and stays here.
+    if (may_touch_window && device_window && madeira_window_is_visible(device_window))
+      madeira_window_minimize(device_window);
+#else
     if (may_touch_window && device_window && IsWindowVisible(device_window)) {
       // Native minimizes with SW_SHOWMINIMIZED, and the conformance suite
       // records that as the reason it also sees WM_ACTIVATE on the device
@@ -2155,6 +2212,7 @@ MTLD3D9Device::onFocusActivation(bool activated) {
       // reactivation, and that is the environment this runs in.
       ShowWindow(device_window, SW_MINIMIZE);
     }
+#endif /* DXMT_MADEIRA */
   } else {
     // Plain D3D9 hands the app a device it must Reset; Ex recovers on its own.
     // dxmt never sets a display mode, so the mode re-apply wined3d does here
@@ -2167,6 +2225,14 @@ MTLD3D9Device::onFocusActivation(bool activated) {
     );
 
     if (may_touch_window && device_window) {
+#ifdef DXMT_MADEIRA
+      // MADEIRA (WOW64_DESIGN.md section 8.2(d)): same reason as the minimize
+      // above, and the monitor-origin lookup goes with it -- there is one
+      // Swift-owned layer for every HWND here (section 7.1), so the origin is
+      // always (0, 0) and MonitorFromWindow / GetMonitorInfoW have nothing to
+      // answer.
+      madeira_window_reposition(device_window, backbuffer_width, backbuffer_height);
+#else
       // Size from the backbuffer, origin from the monitor the device went
       // fullscreen on, and explicitly no activate and no Z-order change. The
       // monitor is the saved one because the window is normally still minimized
@@ -2188,6 +2254,7 @@ MTLD3D9Device::onFocusActivation(bool activated) {
           device_window, nullptr, x, y, static_cast<int>(backbuffer_width), static_cast<int>(backbuffer_height),
           SWP_NOACTIVATE | SWP_NOZORDER
       );
+#endif /* DXMT_MADEIRA */
     }
   }
 
@@ -2205,6 +2272,19 @@ MTLD3D9Device::hookFocusWindowProc(HWND fallbackWindow) {
   HWND focus = m_creationParams.hFocusWindow;
   if (!focus)
     focus = fallbackWindow;
+#ifdef DXMT_MADEIRA
+  // MADEIRA (WOW64_DESIGN.md section 8.2(d)): SetWindowLongPtr installs a
+  // function pointer the window manager will CALL, so the subclass can only
+  // live in the guest's own module; the activation reaches this device again
+  // through the shim, which then calls onFocusActivation. The dedup and the
+  // ANSI/Unicode flavour go with it, for the same reason.
+  if (!focus)
+    return;
+  madeira_window_hook_focus(focus, this);
+  m_focusWindow = focus;
+  m_focusProcHooked = true;
+  return;
+#else
   if (!focus || !IsWindow(focus))
     return;
   // A second device on the same focus window would save our own proc as the
@@ -2237,6 +2317,7 @@ MTLD3D9Device::hookFocusWindowProc(HWND fallbackWindow) {
   SetPropW(focus, kFocusDeviceProp, static_cast<HANDLE>(this));
   m_focusWindow = focus;
   m_focusProcHooked = true;
+#endif /* DXMT_MADEIRA */
 }
 
 void
@@ -2246,6 +2327,11 @@ MTLD3D9Device::unhookFocusWindowProc() {
   HWND focus = m_focusWindow;
   m_focusProcHooked = false;
   m_focusWindow = nullptr;
+#ifdef DXMT_MADEIRA
+  if (focus)
+    madeira_window_unhook_focus(focus, this);
+  return;
+#else
   if (!focus || !IsWindow(focus))
     return;
   // Drop the device property unconditionally, before anything can fail out
@@ -2273,6 +2359,7 @@ MTLD3D9Device::unhookFocusWindowProc() {
       SetWindowLongPtrA(focus, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(orig));
     RemovePropW(focus, kFocusProcProp);
   }
+#endif /* DXMT_MADEIRA */
 }
 
 HRESULT STDMETHODCALLTYPE
@@ -3237,7 +3324,7 @@ allocateD3D9BufferStorage(WMT::Device device, UINT length, Rc<dxmt::Buffer> &out
   if (allocation == nullptr || allocation->buffer().handle == 0)
     return false;
   buffer->rename(std::move(allocation));
-  void *mirror = wsi::aligned_malloc(length, DXMT_PAGE_SIZE);
+  void *mirror = guest_alloc(length, DXMT_PAGE_SIZE);
   if (!mirror)
     return false;
   std::memset(mirror, 0, length);
@@ -3522,7 +3609,7 @@ MTLD3D9Device::CreateRenderTarget(
     if (pitch == 0)
       return D3DERR_INVALIDCALL;
     const uint64_t mirror_bytes = static_cast<uint64_t>(pitch) * Height;
-    ownedBacking = wsi::aligned_malloc(mirror_bytes, DXMT_PAGE_SIZE);
+    ownedBacking = guest_alloc(mirror_bytes, DXMT_PAGE_SIZE);
     if (!ownedBacking)
       return D3DERR_OUTOFVIDEOMEMORY;
     std::memset(ownedBacking, 0, mirror_bytes);
@@ -3649,7 +3736,7 @@ MTLD3D9Device::CreateDepthStencilSurface(
     dsPitch = D3DFormatLockPitch(Format, Width);
     if (dsPitch != 0) {
       const uint64_t mirror_bytes = static_cast<uint64_t>(dsPitch) * Height;
-      dsOwnedBacking = wsi::aligned_malloc(mirror_bytes, DXMT_PAGE_SIZE);
+      dsOwnedBacking = guest_alloc(mirror_bytes, DXMT_PAGE_SIZE);
       if (!dsOwnedBacking)
         return D3DERR_OUTOFVIDEOMEMORY;
       std::memset(dsOwnedBacking, 0, mirror_bytes);
@@ -5401,7 +5488,7 @@ MTLD3D9Device::CreateOffscreenPlainSurface(
     const uint64_t mirror_bytes = static_cast<uint64_t>(depth_pitch) * D3DFormatRowCount(Format, Height);
     void *backing = user_memory;
     if (!backing) {
-      backing = wsi::aligned_malloc(mirror_bytes, DXMT_PAGE_SIZE);
+      backing = guest_alloc(mirror_bytes, DXMT_PAGE_SIZE);
       if (!backing)
         return D3DERR_OUTOFVIDEOMEMORY;
       std::memset(backing, 0, mirror_bytes);
@@ -5443,7 +5530,7 @@ MTLD3D9Device::CreateOffscreenPlainSurface(
     if (yuv_pitch == 0)
       return D3DERR_INVALIDCALL;
     const uint64_t mirror_bytes = static_cast<uint64_t>(yuv_pitch) * D3DFormatRowCount(Format, Height);
-    void *backing = wsi::aligned_malloc(mirror_bytes, DXMT_PAGE_SIZE);
+    void *backing = guest_alloc(mirror_bytes, DXMT_PAGE_SIZE);
     if (!backing)
       return D3DERR_OUTOFVIDEOMEMORY;
     std::memset(backing, 0, mirror_bytes);
@@ -5545,7 +5632,7 @@ MTLD3D9Device::CreateOffscreenPlainSurface(
     if (pitch == 0)
       return D3DERR_INVALIDCALL;
     const uint64_t mirror_bytes = static_cast<uint64_t>(pitch) * D3DFormatRowCount(Format, Height);
-    ownedBacking = wsi::aligned_malloc(mirror_bytes, DXMT_PAGE_SIZE);
+    ownedBacking = guest_alloc(mirror_bytes, DXMT_PAGE_SIZE);
     if (!ownedBacking)
       return D3DERR_OUTOFVIDEOMEMORY;
     std::memset(ownedBacking, 0, mirror_bytes);
@@ -5595,7 +5682,7 @@ MTLD3D9Device::CreateOffscreenPlainSurface(
     // hands back a 32-bit-addressable pointer, and pre-fault it. The device
     // constructor's ring preallocation records why first touch is expensive
     // under Rosetta.
-    ownedBacking = wsi::aligned_malloc(mirror_bytes, DXMT_PAGE_SIZE);
+    ownedBacking = guest_alloc(mirror_bytes, DXMT_PAGE_SIZE);
     if (!ownedBacking)
       return D3DERR_OUTOFVIDEOMEMORY;
     std::memset(ownedBacking, 0, mirror_bytes);
@@ -10583,7 +10670,7 @@ MTLD3D9Device::fanListIBForPrimCount(uint32_t prim_count) {
     return 0;
   if (m_fanListIB == nullptr) {
     const size_t bytes = static_cast<size_t>(kFanListPrimCap) * 3 * sizeof(uint32_t);
-    void *backing = wsi::aligned_malloc(bytes, DXMT_PAGE_SIZE);
+    void *backing = guest_alloc(bytes, DXMT_PAGE_SIZE);
     if (!backing)
       return 0;
     auto *idx = static_cast<uint32_t *>(backing);
@@ -10598,7 +10685,7 @@ MTLD3D9Device::fanListIBForPrimCount(uint32_t prim_count) {
     info.memory.set(backing);
     m_fanListIB = m_metalDevice.newBuffer(info);
     if (m_fanListIB == nullptr) {
-      wsi::aligned_free(backing);
+      guest_free(backing);
       return 0;
     }
     m_fanListIBBacking = backing;

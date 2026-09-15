@@ -1,4 +1,5 @@
 #include "d3d9_swapchain.hpp"
+#include "d3d9_guest_alloc.hpp"
 #include <version.h>
 
 #include <atomic>
@@ -97,7 +98,7 @@ allocLockableBackBufferMirror(
   if (p == 0)
     return;
   const uint64_t bytes = static_cast<uint64_t>(p) * D3DFormatRowCount(desc.Format, desc.Height);
-  void *mirror = wsi::aligned_malloc(bytes, DXMT_PAGE_SIZE);
+  void *mirror = guest_alloc(bytes, DXMT_PAGE_SIZE);
   if (!mirror)
     return;
   std::memset(mirror, 0, bytes);

@@ -1,4 +1,5 @@
 #include "d3d9_buffer.hpp"
+#include "d3d9_guest_alloc.hpp"
 
 #include "d3d9_device.hpp"
 #include "d3d9_private_data.hpp"
@@ -86,7 +87,7 @@ MTLD3D9VertexBuffer::~MTLD3D9VertexBuffer() {
   // host mirror was never registered with Metal and the GPU never reads it,
   // so free it directly.
   if (m_hostPtr)
-    wsi::aligned_free(m_hostPtr);
+    guest_free(m_hostPtr);
   if (m_isLosable)
     m_device->onLosableResourceDestroyed(m_size);
 }
@@ -365,7 +366,7 @@ MTLD3D9IndexBuffer::~MTLD3D9IndexBuffer() {
   // DynamicBuffer allocations release via m_dynamic (before m_dxmtBuffer);
   // only the host mirror is freed here.
   if (m_hostPtr)
-    wsi::aligned_free(m_hostPtr);
+    guest_free(m_hostPtr);
   if (m_isLosable)
     m_device->onLosableResourceDestroyed(m_size);
 }

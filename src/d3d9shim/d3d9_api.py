@@ -55,6 +55,15 @@ Vocabulary of argument shapes
   out_ptr:<T>              pointer to a single scalar OUT.
   locked_rect_out          D3DLOCKED_RECT* OUT -- mirrored, `pBits` converted.
   locked_box_out           D3DLOCKED_BOX* OUT  -- mirrored, `pBits` converted.
+  guest_ptr_out            void ** OUT whose target is a MAPPED-MEMORY guest
+                           pointer: the two buffer Lock()s.  It is NOT an
+                           interface -- it is D3DLOCKED_RECT::pBits with no
+                           struct around it, so the block field is the uint32
+                           guest address itself, written back by the unix
+                           entry with ios_wow_guest_ptr32() and stored into
+                           *ppbData by the shim body.  Nothing is packed on
+                           the way in; a NULL out-parameter is the shim's own
+                           D3DERR_INVALIDCALL.
   handle                   HMONITOR / HDC / HANDLE by value; crosses as
                            uint64_t and is NEVER offset (invariant 4).
   hwnd                     HWND by value; uint64_t, never offset.
@@ -78,6 +87,17 @@ have lost, respectively, the capacity and the write-back.
 Dispositions
 ------------
   local   answered entirely inside the shim; no unix call, ever.
+  resolve answered from the shim's identity cache, which is populated by ONE
+          synchronous call on this same slot the first time the child is
+          asked for.  The shim half is a `local` identity body -- it calls
+          `d3d9shim_<helper>()`, which returns a borrowed reference and, on a
+          cache miss, crosses on this opcode and adopts the native handle the
+          unix entry writes into the block's iface_out field.  The unix half
+          is therefore a REAL entry, not the STATUS_NOT_IMPLEMENTED stub a
+          `local` slot gets: a child's native handle is only ever produced by
+          the method that hands the child out, so without it the shim has no
+          way to learn the identity of an implicit swapchain, back buffer,
+          render target, depth stencil, mip level, cube face or volume level.
   sync    flush the ring, then make the unix call and wait.
   defer   append to the guest command ring and return `ret_const`, provided
           `pred` holds.  `pred` is a Python-syntax boolean expression over the
@@ -103,10 +123,11 @@ API_VERSION = 1
 SHAPE_TAGS = (
     "u32", "u64", "iface_in", "iface_out", "in_struct", "out_struct",
     "inout_struct", "in_array", "out_array", "out_ptr", "locked_rect_out",
-    "locked_box_out", "handle", "hwnd", "shared_handle_inout", "user_mem_in",
+    "locked_box_out", "guest_ptr_out", "handle", "hwnd",
+    "shared_handle_inout", "user_mem_in",
 )
 
-DISPOSITIONS = ("local", "sync", "defer")
+DISPOSITIONS = ("local", "resolve", "sync", "defer")
 
 
 def A(shape, ctype, name):
@@ -165,7 +186,7 @@ SHAPE_STORAGE = {
     "iface_in": "u64", "iface_out": "u64",
     "in_struct": "u32", "out_struct": "u32", "inout_struct": "u32",
     "in_array": "u32", "out_array": "u32", "out_ptr": "u32",
-    "locked_rect_out": "u32", "locked_box_out": "u32",
+    "locked_rect_out": "u32", "locked_box_out": "u32", "guest_ptr_out": "u32",
     "handle": "u64", "hwnd": "u64",
     "shared_handle_inout": "u32", "user_mem_in": "u32",
 }
@@ -182,6 +203,7 @@ RET_STORAGE = {
     "D3DRESOURCETYPE": "uint32_t",
     "D3DTEXTUREFILTERTYPE": "uint32_t",
     "D3DQUERYTYPE": "uint32_t",
+    "int": "int32_t",
     "void": None,
 }
 
@@ -328,7 +350,12 @@ LIMITS = {
     "D3D9SHIM_MAX_TEXTURE_SLOTS": 20,
     "D3D_MAX_SIMULTANEOUS_RENDERTARGETS": 4,
     "D3D9_MAX_VERTEX_STREAMS": 16,
-    "D3D9_MAX_TRANSFORMS": 10,
+    # d3d9_matrix.hpp:15 -- kTransformStateCount is 10 + 256, not 10: the ten
+    # named transforms plus D3DTS_WORLDMATRIX(0..255), which transform_index()
+    # compacts onto [10, 266).  At 10 the deferred SetTransform /
+    # MultiplyTransform predicate rejected every D3DTS_WORLD(MATRIX) with
+    # D3DERR_INVALIDCALL -- i.e. all fixed-function world matrices.
+    "D3D9_MAX_TRANSFORMS": 10 + 256,
     "D3D9_MAX_VS_CONST_I": 16,
     "D3D9_MAX_VS_CONST_B": 16,
     "D3D9_MAX_PS_CONST_F": 224,
@@ -422,10 +449,18 @@ OBJECT_STATE = {
 # `struct d3d9shim_object *` (NULL = not available); the generated body does
 # the AddRef and the store.  Declared in d3d9shim_objects_gen.h, implemented
 # in d3d9shim_object.c.
+#
+# A helper on a `resolve` slot carries one extra obligation: on a cache MISS
+# it makes the single synchronous crossing on that slot's own opcode and
+# adopts the native handle the unix entry returns, because nothing else in
+# the system can tell the shim what a child's handle is.
 IDENTITY_HELPERS = {
     "device_back_buffer": "(device, swapchain_idx, backbuffer_idx, backbuffer_type)",
     "device_texture": "(device, stage)  -- applies texture_stage_to_slot()",
     "device_stream_source": "(device, stream_idx, &offset, &stride)",
+    "device_swapchain": "(device, swapchain_idx)  -- resolves on a miss",
+    "device_render_target": "(device, idx)  -- resolves on a miss",
+    "device_depth_stencil": "(device)  -- resolves on a miss",
     "swapchain_back_buffer": "(swapchain, backbuffer_idx, backbuffer_type)",
     "texture_sublevel": "(texture, level)",
     "cube_surface": "(cube, face, level)",
@@ -458,6 +493,94 @@ DLL_EXPORTS = [
     ("D3DPERF_SetMarker", 27), ("D3DPERF_SetOptions", 28),
     ("D3DPERF_SetRegion", 29), ("DebugSetLevel", 30), ("DebugSetMute", 31),
     ("Direct3DShaderValidatorCreate9", 32),
+]
+
+# --------------------------------------------------------------------------
+# Transport slots.  Three things the boundary needs that are not vtable
+# methods, so nothing in INTERFACES can produce them.  They were hand-written
+# in d3d9shim_object.h and had NO unix table entry at all -- the table is
+# sized D3D9SHIM_OP_COUNT and they sat past its end, which is why the shim
+# logged "is the slot bound?" every time.  Absorbing them here keeps their
+# numbers (321, 322, 323 -- immediately after init plus the 320 vtable slots)
+# and their layouts byte for byte, and gets them entries in both tables.
+#
+# `fields` is (C type, name, role) in emission order and follows the same
+# rule as a vtable block: uint64_t first, then the 4-byte fields, then `ret`,
+# then padding to a multiple of 8.  Roles:
+# `slot` is the absolute opcode number, checked against the position the
+# generator actually puts it at.
+#   scalar:<ctype>      pass by value, cast to <ctype>
+#   hwnd32              a 32-bit HWND: widen, never offset (invariant 4)
+#   guest_ptr:<size>    a guest address IN, window-checked for <size> bytes
+#                       (a field name, or a number) and passed as void *
+#   handle_out          a d3d9_native_handle OUT, written back into the block
+# `ret` is the C type of the hook's result and `ret_zero_ok` says the hook
+# reports success as 0 (the arena registrar already does) rather than as an
+# HRESULT.
+TRANSPORT_SLOTS = [
+    {
+        "name": "arena_register",
+        "slot": 321,
+        "op": "D3D9SHIM_OP_arena_register",
+        "block": "d3d9_arena_register_params",
+        "hook": "d3d9_native_arena_register",
+        "size": 16,
+        "ret": "int", "ret_zero_ok": True,
+        "fields": [
+            ("uint32_t", "guest_base", "scalar:uint32_t"),
+            ("uint32_t", "size", "scalar:uint64_t"),
+        ],
+        "note": "hands the native sub-allocator one VirtualAlloc'd guest "
+                "arena chunk (WOW64_DESIGN.md 8.2(c)).  guest_base is a GUEST "
+                "address the window chokepoint has already placed inside "
+                "[B, B+4G); the native side owns the sub-allocation, so the "
+                "entry does NOT convert it.",
+    },
+    {
+        "name": "window_state",
+        "slot": 322,
+        "op": "D3D9SHIM_OP_window_state",
+        "block": "d3d9_window_state_params",
+        "hook": "d3d9_native_window_state",
+        "size": 24,
+        "ret": "HRESULT", "ret_zero_ok": False,
+        "fields": [
+            ("uint32_t", "hwnd", "hwnd32"),
+            ("uint32_t", "width", "scalar:uint32_t"),
+            ("uint32_t", "height", "scalar:uint32_t"),
+            ("uint32_t", "flags", "scalar:uint32_t"),
+        ],
+        "note": "the per-HWND client size, visibility and foreground state "
+                "wsi_window_madeira.cpp answers from (8.2(d)).  Pushed at "
+                "CreateDevice, Reset, Present and from the focus window proc.",
+    },
+    {
+        "name": "create_interface",
+        "slot": 323,
+        "op": "D3D9SHIM_OP_create_interface",
+        "block": "d3d9_create_interface_params",
+        "hook": "d3d9_native_create_interface",
+        "size": 24,
+        "ret": "HRESULT", "ret_zero_ok": False,
+        "fields": [
+            ("uint64_t", "iface", "handle_out"),
+            ("uint32_t", "sdk_version", "scalar:uint32_t"),
+            ("uint32_t", "is_ex", "scalar:uint32_t"),
+        ],
+        "note": "creates the native IDirect3D9(Ex) -- the handle every other "
+                "call's `self` descends from.  Direct3DCreate9(Ex) is a DLL "
+                "export rather than a vtable slot, so no method in INTERFACES "
+                "produces it and there is no iface_out anywhere for it.",
+    },
+]
+
+# The flags d3d9shim_window.c packs into d3d9_window_state_params::flags.
+# Emitted as #defines so the two halves cannot disagree about them.
+WINDOW_STATE_FLAGS = [
+    ("D3D9SHIM_WINDOW_VISIBLE", 0x1),
+    ("D3D9SHIM_WINDOW_FOREGROUND", 0x2),
+    ("D3D9SHIM_WINDOW_FULLSCREEN", 0x4),
+    ("D3D9SHIM_WINDOW_GONE", 0x8),      # destroyed; drop the entry
 ]
 
 INTERFACES = [
@@ -543,7 +666,7 @@ INTERFACES = [
             M(13, 'CreateAdditionalSwapChain', 'HRESULT', [A('inout_struct:D3DPRESENT_PARAMETERS', 'D3DPRESENT_PARAMETERS *', 'parameters'), A('iface_out:IDirect3DSwapChain9', 'IDirect3DSwapChain9 **', 'swapchain')],
                disp='sync', flush=True),
             M(14, 'GetSwapChain', 'HRESULT', [A('u32', 'UINT', 'swapchain_idx'), A('iface_out:IDirect3DSwapChain9', 'IDirect3DSwapChain9 **', 'swapchain')],
-               disp='local', local='identity:swapchains[swapchain_idx]', null_hr='D3DERR_INVALIDCALL'),
+               disp='resolve', local='identity:helper:device_swapchain', null_hr='D3DERR_INVALIDCALL'),
             M(15, 'GetNumberOfSwapChains', 'UINT', [],
                disp='sync', flush=True),
             M(16, 'Reset', 'HRESULT', [A('inout_struct:D3DPRESENT_PARAMETERS', 'D3DPRESENT_PARAMETERS *', 'parameters')],
@@ -551,7 +674,7 @@ INTERFACES = [
             M(17, 'Present', 'HRESULT', [A('in_struct:RECT', 'const RECT *', 'src_rect'), A('in_struct:RECT', 'const RECT *', 'dst_rect'), A('hwnd', 'HWND', 'dst_window_override'), A('in_struct:RGNDATA', 'const RGNDATA *', 'dirty_region')],
                disp='sync', flush=True, custom=True),
             M(18, 'GetBackBuffer', 'HRESULT', [A('u32', 'UINT', 'swapchain_idx'), A('u32', 'UINT', 'backbuffer_idx'), A('u32', 'D3DBACKBUFFER_TYPE', 'backbuffer_type'), A('iface_out:IDirect3DSurface9', 'IDirect3DSurface9 **', 'backbuffer')],
-               disp='local', local='identity:helper:device_back_buffer', null_hr='D3DERR_INVALIDCALL'),
+               disp='resolve', local='identity:helper:device_back_buffer', null_hr='D3DERR_INVALIDCALL'),
             M(19, 'GetRasterStatus', 'HRESULT', [A('u32', 'UINT', 'swapchain_idx'), A('out_struct:D3DRASTER_STATUS', 'D3DRASTER_STATUS *', 'raster_status')],
                disp='sync', flush=True),
             M(20, 'SetDialogBoxMode', 'HRESULT', [A('u32', 'WINBOOL', 'enable')],
@@ -592,12 +715,12 @@ INTERFACES = [
                disp='defer',
                pred='idx < D3D_MAX_SIMULTANEOUS_RENDERTARGETS and not (idx == 0 and is_null(surface)) and same_device(surface) and (is_null(surface) or has_usage(surface, D3DUSAGE_RENDERTARGET))', ret_const='D3D_OK'),
             M(38, 'GetRenderTarget', 'HRESULT', [A('u32', 'DWORD', 'idx'), A('iface_out:IDirect3DSurface9', 'IDirect3DSurface9 **', 'surface')],
-               disp='local', local='identity:render_targets[idx]', null_hr='D3DERR_NOTFOUND'),
+               disp='resolve', local='identity:helper:device_render_target', null_hr='D3DERR_NOTFOUND'),
             M(39, 'SetDepthStencilSurface', 'HRESULT', [A('iface_in:IDirect3DSurface9', 'IDirect3DSurface9 *', 'depth_stencil')],
                disp='defer',
                pred='same_device(depth_stencil) and (is_null(depth_stencil) or has_usage(depth_stencil, D3DUSAGE_DEPTHSTENCIL))', ret_const='D3D_OK'),
             M(40, 'GetDepthStencilSurface', 'HRESULT', [A('iface_out:IDirect3DSurface9', 'IDirect3DSurface9 **', 'depth_stencil')],
-               disp='local', local='identity:depth_stencil', null_hr='D3DERR_NOTFOUND'),
+               disp='resolve', local='identity:helper:device_depth_stencil', null_hr='D3DERR_NOTFOUND'),
             M(41, 'BeginScene', 'HRESULT', [],
                disp='defer',
                pred='not self.in_scene', ret_const='D3D_OK'),
@@ -835,7 +958,7 @@ INTERFACES = [
             M(4, 'GetFrontBufferData', 'HRESULT', [A('iface_in:IDirect3DSurface9', 'struct IDirect3DSurface9 *', 'dst_surface')],
                disp='sync', flush=True),
             M(5, 'GetBackBuffer', 'HRESULT', [A('u32', 'UINT', 'backbuffer_idx'), A('u32', 'D3DBACKBUFFER_TYPE', 'backbuffer_type'), A('iface_out:IDirect3DSurface9', 'struct IDirect3DSurface9 **', 'backbuffer')],
-               disp='local', local='identity:helper:swapchain_back_buffer', null_hr='D3DERR_INVALIDCALL'),
+               disp='resolve', local='identity:helper:swapchain_back_buffer', null_hr='D3DERR_INVALIDCALL'),
             M(6, 'GetRasterStatus', 'HRESULT', [A('out_struct:D3DRASTER_STATUS', 'D3DRASTER_STATUS *', 'raster_status')],
                disp='sync', flush=True),
             M(7, 'GetDisplayMode', 'HRESULT', [A('out_struct:D3DDISPLAYMODE', 'D3DDISPLAYMODE *', 'mode')],
@@ -937,7 +1060,7 @@ INTERFACES = [
             M(17, 'GetLevelDesc', 'HRESULT', [A('u32', 'UINT', 'Level'), A('out_struct:D3DSURFACE_DESC', 'D3DSURFACE_DESC*', 'pDesc')],
                disp='sync', flush=True),
             M(18, 'GetSurfaceLevel', 'HRESULT', [A('u32', 'UINT', 'Level'), A('iface_out:IDirect3DSurface9', 'IDirect3DSurface9**', 'ppSurfaceLevel')],
-               disp='local', local='identity:helper:texture_sublevel', null_hr='D3DERR_INVALIDCALL'),
+               disp='resolve', local='identity:helper:texture_sublevel', null_hr='D3DERR_INVALIDCALL'),
             M(19, 'LockRect', 'HRESULT', [A('u32', 'UINT', 'level'), A('locked_rect_out', 'D3DLOCKED_RECT *', 'locked_rect'), A('in_struct:RECT', 'const RECT *', 'rect'), A('u32', 'DWORD', 'flags')],
                disp='sync', flush=True),
             M(20, 'UnlockRect', 'HRESULT', [A('u32', 'UINT', 'Level')],
@@ -991,7 +1114,7 @@ INTERFACES = [
             M(17, 'GetLevelDesc', 'HRESULT', [A('u32', 'UINT', 'Level'), A('out_struct:D3DSURFACE_DESC', 'D3DSURFACE_DESC*', 'pDesc')],
                disp='sync', flush=True),
             M(18, 'GetCubeMapSurface', 'HRESULT', [A('u32', 'D3DCUBEMAP_FACES', 'FaceType'), A('u32', 'UINT', 'Level'), A('iface_out:IDirect3DSurface9', 'IDirect3DSurface9**', 'ppCubeMapSurface')],
-               disp='local', local='identity:helper:cube_surface', null_hr='D3DERR_INVALIDCALL'),
+               disp='resolve', local='identity:helper:cube_surface', null_hr='D3DERR_INVALIDCALL'),
             M(19, 'LockRect', 'HRESULT', [A('u32', 'D3DCUBEMAP_FACES', 'face'), A('u32', 'UINT', 'level'), A('locked_rect_out', 'D3DLOCKED_RECT *', 'locked_rect'), A('in_struct:RECT', 'const RECT *', 'rect'), A('u32', 'DWORD', 'flags')],
                disp='sync', flush=True),
             M(20, 'UnlockRect', 'HRESULT', [A('u32', 'D3DCUBEMAP_FACES', 'FaceType'), A('u32', 'UINT', 'Level')],
@@ -1045,7 +1168,7 @@ INTERFACES = [
             M(17, 'GetLevelDesc', 'HRESULT', [A('u32', 'UINT', 'Level'), A('out_struct:D3DVOLUME_DESC', 'D3DVOLUME_DESC *', 'pDesc')],
                disp='sync', flush=True),
             M(18, 'GetVolumeLevel', 'HRESULT', [A('u32', 'UINT', 'Level'), A('iface_out:IDirect3DVolume9', 'IDirect3DVolume9**', 'ppVolumeLevel')],
-               disp='local', local='identity:helper:texture_sublevel', null_hr='D3DERR_INVALIDCALL'),
+               disp='resolve', local='identity:helper:texture_sublevel', null_hr='D3DERR_INVALIDCALL'),
             M(19, 'LockBox', 'HRESULT', [A('u32', 'UINT', 'level'), A('locked_box_out', 'D3DLOCKED_BOX *', 'locked_box'), A('in_struct:D3DBOX', 'const D3DBOX *', 'box'), A('u32', 'DWORD', 'flags')],
                disp='sync', flush=True),
             M(20, 'UnlockBox', 'HRESULT', [A('u32', 'UINT', 'Level')],
@@ -1109,7 +1232,7 @@ INTERFACES = [
                pred='True'),
             M(10, 'GetType', 'D3DRESOURCETYPE', [],
                disp='local', local='gettype'),
-            M(11, 'Lock', 'HRESULT', [A('u32', 'UINT', 'OffsetToLock'), A('u32', 'UINT', 'SizeToLock'), A('iface_out:IUnknown', 'void**', 'ppbData'), A('u32', 'DWORD', 'Flags')],
+            M(11, 'Lock', 'HRESULT', [A('u32', 'UINT', 'OffsetToLock'), A('u32', 'UINT', 'SizeToLock'), A('guest_ptr_out', 'void**', 'ppbData'), A('u32', 'DWORD', 'Flags')],
                disp='sync', flush=True),
             M(12, 'Unlock', 'HRESULT', [],
                disp='sync', flush=True),
@@ -1144,7 +1267,7 @@ INTERFACES = [
                pred='True'),
             M(10, 'GetType', 'D3DRESOURCETYPE', [],
                disp='local', local='gettype'),
-            M(11, 'Lock', 'HRESULT', [A('u32', 'UINT', 'OffsetToLock'), A('u32', 'UINT', 'SizeToLock'), A('iface_out:IUnknown', 'void**', 'ppbData'), A('u32', 'DWORD', 'Flags')],
+            M(11, 'Lock', 'HRESULT', [A('u32', 'UINT', 'OffsetToLock'), A('u32', 'UINT', 'SizeToLock'), A('guest_ptr_out', 'void**', 'ppbData'), A('u32', 'DWORD', 'Flags')],
                disp='sync', flush=True),
             M(12, 'Unlock', 'HRESULT', [],
                disp='sync', flush=True),
@@ -1289,6 +1412,34 @@ def block_fields(m):
     return out
 
 
+def transport_fields(t):
+    """A transport block's fields, in emission order: the described ones (the
+    u64s already first), then `ret`, then nothing -- pad_words fills the rest.
+    Returns [(c_type, name, role)] with the same role vocabulary as
+    block_fields(): 'arg' or 'ret'."""
+    out = [(ctype, name, "arg") for ctype, name, _role in t["fields"]]
+    out.append((RET_STORAGE[t["ret"]], "ret", "ret"))
+    return out
+
+
+def _sizeof(fields):
+    off = 0
+    for ctype, _name, _role in fields:
+        width = 8 if ctype == "uint64_t" else 4
+        off = (off + width - 1) // width * width
+        off += width
+    return (off + 7) // 8 * 8, off
+
+
+def transport_size(t):
+    return _sizeof(transport_fields(t))[0]
+
+
+def transport_pad_words(t):
+    total, off = _sizeof(transport_fields(t))
+    return (total - off) // 4
+
+
 def block_size(m):
     """sizeof() of the emitted parameter block, identical on both ABIs."""
     fields = block_fields(m)
@@ -1345,7 +1496,7 @@ def _check_expr(where, what, expr, it, argnames):
     if not expr:
         return []
     bad = []
-    fields = {f[1].split("[")[0] for f in OBJECT_STATE[it["kind"]]}
+    fields = {f[1].split("[")[0] for f in OBJECT_STATE.get(it["kind"], ())}
     for m in re.finditer(r"(self\.)?(" + _IDENT.pattern + r")\s*(\()?", expr):
         qualified, name, call = m.group(1), m.group(2), m.group(3)
         if qualified:
@@ -1409,15 +1560,38 @@ def validate():
                 problems.append("%s: deferred with no validation predicate" % where)
             if m["disp"] == "defer" and m["ret"] != "void" and not m["ret_const"]:
                 problems.append("%s: deferred with no constant return" % where)
-            if m["disp"] == "local" and not m["local"]:
-                problems.append("%s: local with no local kind" % where)
-            if m["disp"] != "local" and m["local"]:
+            if m["disp"] in ("local", "resolve") and not m["local"]:
+                problems.append("%s: %s with no local kind" % (where, m["disp"]))
+            if m["disp"] not in ("local", "resolve") and m["local"]:
                 problems.append("%s: local kind on a non-local method" % where)
-            if m["disp"] == "local" and m["custom"]:
+            if m["disp"] in ("local", "resolve") and m["custom"]:
                 problems.append("%s: local and custom both set -- a local body "
                                 "already has a shim: hook if it needs one" % where)
             if m["disp"] == "sync" and not m["flush"]:
                 problems.append("%s: sync must flush the ring" % where)
+            # A resolve is a local body whose helper may CROSS on a cache
+            # miss, so the identity has to come from a helper (a plain field
+            # cannot resolve anything) and there has to be an iface_out for
+            # the unix entry to write the child's handle into.
+            if m["disp"] == "resolve":
+                if not (m["local"] or "").startswith("identity:helper:"):
+                    problems.append("%s: resolve without an identity helper -- "
+                                    "a plain field cannot resolve a miss" % where)
+                if not any(a["tag"] == "iface_out" for a in m["args"]):
+                    problems.append("%s: resolve with no iface_out argument "
+                                    "for the unix entry to answer into" % where)
+                if m["ret"] != "HRESULT":
+                    problems.append("%s: resolve must return HRESULT" % where)
+            # guest_ptr_out is the mapped-memory OUT pointer; the shim body
+            # refuses a NULL one itself, so the method has to have an HRESULT
+            # to refuse with, and two of them in one block would make
+            # "which pointer was written back" ambiguous.
+            gp = [a for a in m["args"] if a["tag"] == "guest_ptr_out"]
+            if gp and m["ret"] != "HRESULT":
+                problems.append("%s: guest_ptr_out needs an HRESULT return"
+                                % where)
+            if len(gp) > 1:
+                problems.append("%s: more than one guest_ptr_out" % where)
             if m["local"] and m["local"].startswith("identity:helper:"):
                 helper = m["local"].split(":", 2)[2]
                 if helper not in IDENTITY_HELPERS:
@@ -1440,7 +1614,9 @@ def validate():
                 if a["tag"] not in SHAPE_STORAGE:
                     problems.append("%s: shape %r has no storage class"
                                     % (where, a["shape"]))
-            if block_size(m) % 8:
+            # guarded: block_size() needs a known return storage class, and a
+            # bad one is already reported above.
+            if m["ret"] in RET_STORAGE and block_size(m) % 8:
                 problems.append("%s: block size %d is not a multiple of 8"
                                 % (where, block_size(m)))
 
@@ -1479,6 +1655,61 @@ def validate():
                             % (s["name"], s["size64"], s["size32"]))
         if s["size32"] % 4 or s["size64"] % 4:
             problems.append("%s: mirror size is not 4-byte aligned" % s["name"])
+
+    # Transport slots.  Their numbers and their layouts are an ABI the
+    # hand-written half already ships against, so both are asserted here and
+    # again in C; `size` is the number d3d9shim_object.h _Static_asserted.
+    TRANSPORT_ROLES = ("hwnd32", "handle_out")
+    t_names = [t["name"] for t in TRANSPORT_SLOTS]
+    if len(set(t_names)) != len(t_names):
+        problems.append("duplicate transport slot")
+    for i, t in enumerate(TRANSPORT_SLOTS):
+        where = "transport %s" % t["name"]
+        if t["slot"] != 1 + EXPECTED_TOTAL_SLOTS + i:
+            problems.append("%s: declared slot %d, but it lands at %d -- the "
+                            "transport numbers are an ABI the hand-written "
+                            "half already calls with"
+                            % (where, t["slot"], 1 + EXPECTED_TOTAL_SLOTS + i))
+        if t["op"] != "D3D9SHIM_OP_" + t["name"]:
+            problems.append("%s: opcode name %r does not match" % (where, t["op"]))
+        if t["ret"] not in RET_STORAGE or RET_STORAGE[t["ret"]] is None:
+            problems.append("%s: return type %r has no storage class"
+                            % (where, t["ret"]))
+        fnames = [f[1] for f in t["fields"]]
+        if len(set(fnames)) != len(fnames) or "ret" in fnames:
+            problems.append("%s: duplicate or reserved field name" % where)
+        seen_narrow = False
+        for ctype, name, role in t["fields"]:
+            if ctype not in ("uint32_t", "int32_t", "uint64_t"):
+                problems.append("%s.%s: field type %r is not fixed width"
+                                % (where, name, ctype))
+            if ctype == "uint64_t" and seen_narrow:
+                problems.append("%s.%s: uint64_t after a 4-byte field -- the "
+                                "block layout rule is 64-bit fields FIRST"
+                                % (where, name))
+            if ctype != "uint64_t":
+                seen_narrow = True
+            base = role.split(":", 1)[0]
+            if base not in TRANSPORT_ROLES and base not in ("scalar", "guest_ptr"):
+                problems.append("%s.%s: unknown role %r" % (where, name, role))
+            if base in ("scalar", "guest_ptr") and ":" not in role:
+                problems.append("%s.%s: role %r needs an argument"
+                                % (where, name, role))
+            if base == "guest_ptr":
+                size = role.split(":", 1)[1]
+                if not size.isdigit() and size not in fnames:
+                    problems.append("%s.%s: window size %r is neither a number "
+                                    "nor another field" % (where, name, size))
+            if base == "handle_out" and ctype != "uint64_t":
+                problems.append("%s.%s: a handle_out must be uint64_t"
+                                % (where, name))
+        if transport_size(t) != t["size"]:
+            problems.append("%s: computed block size %d, declared %d -- the "
+                            "hand-written _Static_assert says %d"
+                            % (where, transport_size(t), t["size"], t["size"]))
+        if t["size"] % 8:
+            problems.append("%s: block size %d is not a multiple of 8"
+                            % (where, t["size"]))
 
     names = [s["name"] for s in MIRROR_STRUCTS]
     if len(set(names)) != len(names):
@@ -1524,6 +1755,18 @@ def canonical_text():
     for name, size32, size64, offs in PADDING_ONLY_STRUCTS:
         out.append("P %s %d %d %s" % (name, size32, size64,
                                       ",".join("%s=%d" % o for o in offs)))
+    # The three transport slots are part of the wire format: their numbers
+    # follow the vtable range, so anything that moves them, renames them or
+    # re-lays-out one of their blocks has to fail the handshake too.
+    for i, t in enumerate(TRANSPORT_SLOTS):
+        out.append("T %d %d %s %s %s %s %d" % (i, t["slot"], t["name"], t["op"],
+                                               t["hook"], t["ret"], t["size"]))
+        for ctype, name, role in t["fields"]:
+            out.append("TF %s %s %s" % (ctype, name, role))
+        for ctype, name, role in transport_fields(t):
+            out.append("TL %s %s %s" % (ctype, name, role))
+    for name, value in WINDOW_STATE_FLAGS:
+        out.append("W %s %d" % (name, value))
     return "\n".join(out) + "\n"
 
 
@@ -1539,15 +1782,18 @@ def _main():
     problems = validate()
     print("d3d9_api.py -- %d interfaces" % len(INTERFACES))
     print()
-    print("%-32s %6s %6s %6s %6s" % ("interface", "slots", "local", "sync", "defer"))
+    print("%-32s %6s %6s %7s %6s %6s"
+          % ("interface", "slots", "local", "resolve", "sync", "defer"))
     total = Counter()
     for it in INTERFACES:
         c = Counter(m["disp"] for m in it["methods"])
         total.update(c)
-        print("%-32s %6d %6d %6d %6d" % (it["iface"], len(it["methods"]),
-                                         c["local"], c["sync"], c["defer"]))
-    print("%-32s %6d %6d %6d %6d" % ("TOTAL", sum(len(i["methods"]) for i in INTERFACES),
-                                     total["local"], total["sync"], total["defer"]))
+        print("%-32s %6d %6d %7d %6d %6d"
+              % (it["iface"], len(it["methods"]), c["local"], c["resolve"],
+                 c["sync"], c["defer"]))
+    print("%-32s %6d %6d %7d %6d %6d"
+          % ("TOTAL", sum(len(i["methods"]) for i in INTERFACES),
+             total["local"], total["resolve"], total["sync"], total["defer"]))
     print()
     print("dispositions")
     for k in DISPOSITIONS:
@@ -1568,6 +1814,11 @@ def _main():
     sizes = [block_size(m) for _, m in iter_methods()]
     print("parameter blocks: %d..%d bytes, %d bytes total"
           % (min(sizes), max(sizes), sum(sizes)))
+    print("transport slots: %d (%s), %d bytes of block"
+          % (len(TRANSPORT_SLOTS),
+             ", ".join("%s=%d" % (t["name"], 1 + EXPECTED_TOTAL_SLOTS + i)
+                       for i, t in enumerate(TRANSPORT_SLOTS)),
+             sum(transport_size(t) for t in TRANSPORT_SLOTS)))
     print("mirrors: %d, layout-identical: %d, padding-only: %d"
           % (len(MIRROR_STRUCTS), len(IDENTICAL_STRUCTS), len(PADDING_ONLY_STRUCTS)))
     print("flush on return: %d slots, custom shim body: %d slots"

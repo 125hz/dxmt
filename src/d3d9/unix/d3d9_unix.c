@@ -101,14 +101,7 @@ static void d3d9_mirror_out_D3DPRESENT_PARAMETERS(struct d3d9_D3DPRESENT_PARAMET
     dst->PresentationInterval = src->PresentationInterval;
 }
 
-static void d3d9_mirror_in_D3DDEVICE_CREATION_PARAMETERS(D3DDEVICE_CREATION_PARAMETERS *dst, const struct d3d9_D3DDEVICE_CREATION_PARAMETERS32 *src)
-{
-    memset(dst, 0, sizeof(*dst));
-    dst->AdapterOrdinal = src->AdapterOrdinal;
-    dst->DeviceType = src->DeviceType;
-    dst->hFocusWindow = (HWND)(ULONG_PTR)src->hFocusWindow;
-    dst->BehaviorFlags = src->BehaviorFlags;
-}
+/* D3DDEVICE_CREATION_PARAMETERS never crosses INWARD, so it has no d3d9_mirror_in_D3DDEVICE_CREATION_PARAMETERS(). */
 
 static void d3d9_mirror_out_D3DDEVICE_CREATION_PARAMETERS(struct d3d9_D3DDEVICE_CREATION_PARAMETERS32 *dst, const D3DDEVICE_CREATION_PARAMETERS *src)
 {
@@ -118,12 +111,7 @@ static void d3d9_mirror_out_D3DDEVICE_CREATION_PARAMETERS(struct d3d9_D3DDEVICE_
     dst->BehaviorFlags = src->BehaviorFlags;
 }
 
-static void d3d9_mirror_in_D3DLOCKED_RECT(D3DLOCKED_RECT *dst, const struct d3d9_D3DLOCKED_RECT32 *src)
-{
-    memset(dst, 0, sizeof(*dst));
-    dst->Pitch = src->Pitch;
-    dst->pBits = D3D9_HOST_PTR(src->pBits);
-}
+/* D3DLOCKED_RECT never crosses INWARD, so it has no d3d9_mirror_in_D3DLOCKED_RECT(). */
 
 static void d3d9_mirror_out_D3DLOCKED_RECT(struct d3d9_D3DLOCKED_RECT32 *dst, const D3DLOCKED_RECT *src)
 {
@@ -131,13 +119,7 @@ static void d3d9_mirror_out_D3DLOCKED_RECT(struct d3d9_D3DLOCKED_RECT32 *dst, co
     dst->pBits = D3D9_GUEST_PTR32(src->pBits);
 }
 
-static void d3d9_mirror_in_D3DLOCKED_BOX(D3DLOCKED_BOX *dst, const struct d3d9_D3DLOCKED_BOX32 *src)
-{
-    memset(dst, 0, sizeof(*dst));
-    dst->RowPitch = src->RowPitch;
-    dst->SlicePitch = src->SlicePitch;
-    dst->pBits = D3D9_HOST_PTR(src->pBits);
-}
+/* D3DLOCKED_BOX never crosses INWARD, so it has no d3d9_mirror_in_D3DLOCKED_BOX(). */
 
 static void d3d9_mirror_out_D3DLOCKED_BOX(struct d3d9_D3DLOCKED_BOX32 *dst, const D3DLOCKED_BOX *src)
 {
@@ -146,17 +128,7 @@ static void d3d9_mirror_out_D3DLOCKED_BOX(struct d3d9_D3DLOCKED_BOX32 *dst, cons
     dst->pBits = D3D9_GUEST_PTR32(src->pBits);
 }
 
-static void d3d9_mirror_in_D3DPRESENTSTATS(D3DPRESENTSTATS *dst, const struct d3d9_D3DPRESENTSTATS32 *src)
-{
-    memset(dst, 0, sizeof(*dst));
-    dst->PresentCount = src->PresentCount;
-    dst->PresentRefreshCount = src->PresentRefreshCount;
-    dst->SyncRefreshCount = src->SyncRefreshCount;
-    dst->SyncQPCTime.LowPart = src->SyncQPCTime_lo;
-    dst->SyncQPCTime.HighPart = (LONG)src->SyncQPCTime_hi;
-    dst->SyncGPUTime.LowPart = src->SyncGPUTime_lo;
-    dst->SyncGPUTime.HighPart = (LONG)src->SyncGPUTime_hi;
-}
+/* D3DPRESENTSTATS never crosses INWARD, so it has no d3d9_mirror_in_D3DPRESENTSTATS(). */
 
 static void d3d9_mirror_out_D3DPRESENTSTATS(struct d3d9_D3DPRESENTSTATS32 *dst, const D3DPRESENTSTATS *src)
 {
@@ -772,14 +744,21 @@ NTSTATUS _d3d9_Device9Ex_CreateAdditionalSwapChain(void *args)
     return STATUS_SUCCESS;
 }
 
-/* IDirect3DDevice9Ex::GetSwapChain -- slot 14, local */
+/* IDirect3DDevice9Ex::GetSwapChain -- slot 14, resolve */
+/* Answers the identity cache in the shim on a miss; the handle it
+ * writes into the block is what the guest wrapper is built from. */
+static void d3d9_call_Device9Ex_GetSwapChain(struct d3d9_Device9Ex_GetSwapChain_params *_p)
+{
+    d3d9_native_handle _swapchain = 0;
+
+    _p->ret = d3d9_native_Device9Ex_GetSwapChain(_p->self, (UINT)_p->swapchain_idx, &_swapchain);
+    _p->swapchain = _swapchain;
+}
+
 NTSTATUS _d3d9_Device9Ex_GetSwapChain(void *args)
 {
-    /* answered in the shim (identity:swapchains[swapchain_idx]); reaching the unix side means the
-     * two halves disagree about the description. */
-    (void)args;
-    D3D9_LOG("d3d9: IDirect3DDevice9Ex::GetSwapChain crossed but is local");
-    return STATUS_NOT_IMPLEMENTED;
+    d3d9_call_Device9Ex_GetSwapChain(args);
+    return STATUS_SUCCESS;
 }
 
 /* IDirect3DDevice9Ex::GetNumberOfSwapChains -- slot 15, sync */
@@ -851,14 +830,21 @@ NTSTATUS _d3d9_Device9Ex_Present(void *args)
     return STATUS_SUCCESS;
 }
 
-/* IDirect3DDevice9Ex::GetBackBuffer -- slot 18, local */
+/* IDirect3DDevice9Ex::GetBackBuffer -- slot 18, resolve */
+/* Answers the identity cache in the shim on a miss; the handle it
+ * writes into the block is what the guest wrapper is built from. */
+static void d3d9_call_Device9Ex_GetBackBuffer(struct d3d9_Device9Ex_GetBackBuffer_params *_p)
+{
+    d3d9_native_handle _backbuffer = 0;
+
+    _p->ret = d3d9_native_Device9Ex_GetBackBuffer(_p->self, (UINT)_p->swapchain_idx, (UINT)_p->backbuffer_idx, (D3DBACKBUFFER_TYPE)_p->backbuffer_type, &_backbuffer);
+    _p->backbuffer = _backbuffer;
+}
+
 NTSTATUS _d3d9_Device9Ex_GetBackBuffer(void *args)
 {
-    /* answered in the shim (identity:helper:device_back_buffer); reaching the unix side means the
-     * two halves disagree about the description. */
-    (void)args;
-    D3D9_LOG("d3d9: IDirect3DDevice9Ex::GetBackBuffer crossed but is local");
-    return STATUS_NOT_IMPLEMENTED;
+    d3d9_call_Device9Ex_GetBackBuffer(args);
+    return STATUS_SUCCESS;
 }
 
 /* IDirect3DDevice9Ex::GetRasterStatus -- slot 19, sync */
@@ -1261,14 +1247,21 @@ NTSTATUS _d3d9_Device9Ex_SetRenderTarget(void *args)
     return STATUS_SUCCESS;
 }
 
-/* IDirect3DDevice9Ex::GetRenderTarget -- slot 38, local */
+/* IDirect3DDevice9Ex::GetRenderTarget -- slot 38, resolve */
+/* Answers the identity cache in the shim on a miss; the handle it
+ * writes into the block is what the guest wrapper is built from. */
+static void d3d9_call_Device9Ex_GetRenderTarget(struct d3d9_Device9Ex_GetRenderTarget_params *_p)
+{
+    d3d9_native_handle _surface = 0;
+
+    _p->ret = d3d9_native_Device9Ex_GetRenderTarget(_p->self, (DWORD)_p->idx, &_surface);
+    _p->surface = _surface;
+}
+
 NTSTATUS _d3d9_Device9Ex_GetRenderTarget(void *args)
 {
-    /* answered in the shim (identity:render_targets[idx]); reaching the unix side means the
-     * two halves disagree about the description. */
-    (void)args;
-    D3D9_LOG("d3d9: IDirect3DDevice9Ex::GetRenderTarget crossed but is local");
-    return STATUS_NOT_IMPLEMENTED;
+    d3d9_call_Device9Ex_GetRenderTarget(args);
+    return STATUS_SUCCESS;
 }
 
 /* IDirect3DDevice9Ex::SetDepthStencilSurface -- slot 39, defer */
@@ -1283,14 +1276,21 @@ NTSTATUS _d3d9_Device9Ex_SetDepthStencilSurface(void *args)
     return STATUS_SUCCESS;
 }
 
-/* IDirect3DDevice9Ex::GetDepthStencilSurface -- slot 40, local */
+/* IDirect3DDevice9Ex::GetDepthStencilSurface -- slot 40, resolve */
+/* Answers the identity cache in the shim on a miss; the handle it
+ * writes into the block is what the guest wrapper is built from. */
+static void d3d9_call_Device9Ex_GetDepthStencilSurface(struct d3d9_Device9Ex_GetDepthStencilSurface_params *_p)
+{
+    d3d9_native_handle _depth_stencil = 0;
+
+    _p->ret = d3d9_native_Device9Ex_GetDepthStencilSurface(_p->self, &_depth_stencil);
+    _p->depth_stencil = _depth_stencil;
+}
+
 NTSTATUS _d3d9_Device9Ex_GetDepthStencilSurface(void *args)
 {
-    /* answered in the shim (identity:depth_stencil); reaching the unix side means the
-     * two halves disagree about the description. */
-    (void)args;
-    D3D9_LOG("d3d9: IDirect3DDevice9Ex::GetDepthStencilSurface crossed but is local");
-    return STATUS_NOT_IMPLEMENTED;
+    d3d9_call_Device9Ex_GetDepthStencilSurface(args);
+    return STATUS_SUCCESS;
 }
 
 /* IDirect3DDevice9Ex::BeginScene -- slot 41, defer */
@@ -2951,14 +2951,21 @@ NTSTATUS _d3d9_SwapChain9Ex_GetFrontBufferData(void *args)
     return STATUS_SUCCESS;
 }
 
-/* IDirect3DSwapChain9Ex::GetBackBuffer -- slot 5, local */
+/* IDirect3DSwapChain9Ex::GetBackBuffer -- slot 5, resolve */
+/* Answers the identity cache in the shim on a miss; the handle it
+ * writes into the block is what the guest wrapper is built from. */
+static void d3d9_call_SwapChain9Ex_GetBackBuffer(struct d3d9_SwapChain9Ex_GetBackBuffer_params *_p)
+{
+    d3d9_native_handle _backbuffer = 0;
+
+    _p->ret = d3d9_native_SwapChain9Ex_GetBackBuffer(_p->self, (UINT)_p->backbuffer_idx, (D3DBACKBUFFER_TYPE)_p->backbuffer_type, &_backbuffer);
+    _p->backbuffer = _backbuffer;
+}
+
 NTSTATUS _d3d9_SwapChain9Ex_GetBackBuffer(void *args)
 {
-    /* answered in the shim (identity:helper:swapchain_back_buffer); reaching the unix side means the
-     * two halves disagree about the description. */
-    (void)args;
-    D3D9_LOG("d3d9: IDirect3DSwapChain9Ex::GetBackBuffer crossed but is local");
-    return STATUS_NOT_IMPLEMENTED;
+    d3d9_call_SwapChain9Ex_GetBackBuffer(args);
+    return STATUS_SUCCESS;
 }
 
 /* IDirect3DSwapChain9Ex::GetRasterStatus -- slot 6, sync */
@@ -3614,14 +3621,21 @@ NTSTATUS _d3d9_Texture9_GetLevelDesc(void *args)
     return STATUS_SUCCESS;
 }
 
-/* IDirect3DTexture9::GetSurfaceLevel -- slot 18, local */
+/* IDirect3DTexture9::GetSurfaceLevel -- slot 18, resolve */
+/* Answers the identity cache in the shim on a miss; the handle it
+ * writes into the block is what the guest wrapper is built from. */
+static void d3d9_call_Texture9_GetSurfaceLevel(struct d3d9_Texture9_GetSurfaceLevel_params *_p)
+{
+    d3d9_native_handle _ppSurfaceLevel = 0;
+
+    _p->ret = d3d9_native_Texture9_GetSurfaceLevel(_p->self, (UINT)_p->Level, &_ppSurfaceLevel);
+    _p->ppSurfaceLevel = _ppSurfaceLevel;
+}
+
 NTSTATUS _d3d9_Texture9_GetSurfaceLevel(void *args)
 {
-    /* answered in the shim (identity:helper:texture_sublevel); reaching the unix side means the
-     * two halves disagree about the description. */
-    (void)args;
-    D3D9_LOG("d3d9: IDirect3DTexture9::GetSurfaceLevel crossed but is local");
-    return STATUS_NOT_IMPLEMENTED;
+    d3d9_call_Texture9_GetSurfaceLevel(args);
+    return STATUS_SUCCESS;
 }
 
 /* IDirect3DTexture9::LockRect -- slot 19, sync */
@@ -3938,14 +3952,21 @@ NTSTATUS _d3d9_CubeTexture9_GetLevelDesc(void *args)
     return STATUS_SUCCESS;
 }
 
-/* IDirect3DCubeTexture9::GetCubeMapSurface -- slot 18, local */
+/* IDirect3DCubeTexture9::GetCubeMapSurface -- slot 18, resolve */
+/* Answers the identity cache in the shim on a miss; the handle it
+ * writes into the block is what the guest wrapper is built from. */
+static void d3d9_call_CubeTexture9_GetCubeMapSurface(struct d3d9_CubeTexture9_GetCubeMapSurface_params *_p)
+{
+    d3d9_native_handle _ppCubeMapSurface = 0;
+
+    _p->ret = d3d9_native_CubeTexture9_GetCubeMapSurface(_p->self, (D3DCUBEMAP_FACES)_p->FaceType, (UINT)_p->Level, &_ppCubeMapSurface);
+    _p->ppCubeMapSurface = _ppCubeMapSurface;
+}
+
 NTSTATUS _d3d9_CubeTexture9_GetCubeMapSurface(void *args)
 {
-    /* answered in the shim (identity:helper:cube_surface); reaching the unix side means the
-     * two halves disagree about the description. */
-    (void)args;
-    D3D9_LOG("d3d9: IDirect3DCubeTexture9::GetCubeMapSurface crossed but is local");
-    return STATUS_NOT_IMPLEMENTED;
+    d3d9_call_CubeTexture9_GetCubeMapSurface(args);
+    return STATUS_SUCCESS;
 }
 
 /* IDirect3DCubeTexture9::LockRect -- slot 19, sync */
@@ -4262,14 +4283,21 @@ NTSTATUS _d3d9_VolumeTexture9_GetLevelDesc(void *args)
     return STATUS_SUCCESS;
 }
 
-/* IDirect3DVolumeTexture9::GetVolumeLevel -- slot 18, local */
+/* IDirect3DVolumeTexture9::GetVolumeLevel -- slot 18, resolve */
+/* Answers the identity cache in the shim on a miss; the handle it
+ * writes into the block is what the guest wrapper is built from. */
+static void d3d9_call_VolumeTexture9_GetVolumeLevel(struct d3d9_VolumeTexture9_GetVolumeLevel_params *_p)
+{
+    d3d9_native_handle _ppVolumeLevel = 0;
+
+    _p->ret = d3d9_native_VolumeTexture9_GetVolumeLevel(_p->self, (UINT)_p->Level, &_ppVolumeLevel);
+    _p->ppVolumeLevel = _ppVolumeLevel;
+}
+
 NTSTATUS _d3d9_VolumeTexture9_GetVolumeLevel(void *args)
 {
-    /* answered in the shim (identity:helper:texture_sublevel); reaching the unix side means the
-     * two halves disagree about the description. */
-    (void)args;
-    D3D9_LOG("d3d9: IDirect3DVolumeTexture9::GetVolumeLevel crossed but is local");
-    return STATUS_NOT_IMPLEMENTED;
+    d3d9_call_VolumeTexture9_GetVolumeLevel(args);
+    return STATUS_SUCCESS;
 }
 
 /* IDirect3DVolumeTexture9::LockBox -- slot 19, sync */
@@ -4685,10 +4713,10 @@ NTSTATUS _d3d9_VertexBuffer9_GetType(void *args)
 /* IDirect3DVertexBuffer9::Lock -- slot 11, sync */
 static void d3d9_call_VertexBuffer9_Lock(struct d3d9_VertexBuffer9_Lock_params *_p)
 {
-    d3d9_native_handle _ppbData = 0;
+    void *_ppbData = NULL;
 
     _p->ret = d3d9_native_VertexBuffer9_Lock(_p->self, (UINT)_p->OffsetToLock, (UINT)_p->SizeToLock, &_ppbData, (DWORD)_p->Flags);
-    _p->ppbData = _ppbData;
+    _p->ppbData = SUCCEEDED(_p->ret) ? D3D9_GUEST_PTR32(_ppbData) : 0;
 }
 
 NTSTATUS _d3d9_VertexBuffer9_Lock(void *args)
@@ -4894,10 +4922,10 @@ NTSTATUS _d3d9_IndexBuffer9_GetType(void *args)
 /* IDirect3DIndexBuffer9::Lock -- slot 11, sync */
 static void d3d9_call_IndexBuffer9_Lock(struct d3d9_IndexBuffer9_Lock_params *_p)
 {
-    d3d9_native_handle _ppbData = 0;
+    void *_ppbData = NULL;
 
     _p->ret = d3d9_native_IndexBuffer9_Lock(_p->self, (UINT)_p->OffsetToLock, (UINT)_p->SizeToLock, &_ppbData, (DWORD)_p->Flags);
-    _p->ppbData = _ppbData;
+    _p->ppbData = SUCCEEDED(_p->ret) ? D3D9_GUEST_PTR32(_ppbData) : 0;
 }
 
 NTSTATUS _d3d9_IndexBuffer9_Lock(void *args)
@@ -5296,6 +5324,50 @@ static void d3d9_call_Query9_GetData(struct d3d9_Query9_GetData_params *_p)
 NTSTATUS _d3d9_Query9_GetData(void *args)
 {
     d3d9_call_Query9_GetData(args);
+    return STATUS_SUCCESS;
+}
+
+/* ---- the transport slots -----------------------------------------------
+ * Not vtable methods, so nothing in the interface description produces them;
+ * see TRANSPORT_SLOTS in d3d9_api.py.  They keep the numbers the hand-written
+ * shim half already calls with, immediately after the generated range. */
+
+/* arena_register -- slot 321, transport */
+static void d3d9_call_arena_register(struct d3d9_arena_register_params *_p)
+{
+    _p->ret = d3d9_native_arena_register((uint32_t)_p->guest_base, (uint64_t)_p->size) ? E_FAIL : D3D_OK;
+}
+
+NTSTATUS _d3d9_arena_register(void *args)
+{
+    d3d9_call_arena_register(args);
+    return STATUS_SUCCESS;
+}
+
+/* window_state -- slot 322, transport */
+static void d3d9_call_window_state(struct d3d9_window_state_params *_p)
+{
+    _p->ret = d3d9_native_window_state((HWND)(ULONG_PTR)_p->hwnd, (uint32_t)_p->width, (uint32_t)_p->height, (uint32_t)_p->flags);
+}
+
+NTSTATUS _d3d9_window_state(void *args)
+{
+    d3d9_call_window_state(args);
+    return STATUS_SUCCESS;
+}
+
+/* create_interface -- slot 323, transport */
+static void d3d9_call_create_interface(struct d3d9_create_interface_params *_p)
+{
+    d3d9_native_handle _iface = 0;
+
+    _p->ret = d3d9_native_create_interface(&_iface, (uint32_t)_p->sdk_version, (uint32_t)_p->is_ex);
+    _p->iface = _iface;
+}
+
+NTSTATUS _d3d9_create_interface(void *args)
+{
+    d3d9_call_create_interface(args);
     return STATUS_SUCCESS;
 }
 

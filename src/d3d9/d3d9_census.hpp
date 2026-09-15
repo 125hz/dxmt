@@ -54,6 +54,25 @@ void frame(unsigned code);
 void shaderConstF(unsigned vec4_count);
 void lockBytes(unsigned size_bytes); /* 0 means "to the end of the buffer" */
 
+/* MADEIRA: the query-poll instrument, reported on its own [d3d9-query] line
+ * beside the census summary (same window, same frame clock).
+ *
+ * The census made the problem visible but cannot explain it: a per-method
+ * count cannot separate "the application asked 85k times" from "each ask cost
+ * a command-buffer submit". These five counters do. They are deliberately
+ * NOT emitted by gen_d3d9_census.py -- they are a hand-placed instrument in
+ * one class (MTLD3D9Query), not a per-vtable-slot counter, so the generator's
+ * "the code IS the index" contract does not apply and the name table is
+ * untouched.
+ *
+ * queryPoll is the only one on the spin path, so it is a single relaxed
+ * uint32 add like D3D9_CENSUS; the completion counters run at issue rate
+ * (hundreds per frame, not tens of thousands) and can afford 64 bits. */
+void queryIssued();                   /* Issue(D3DISSUE_END) on EVENT/OCCLUSION */
+void queryFlushed();                  /* GetData committed the issuing chunk  */
+void queryPoll(bool complete, bool parked);
+void queryCompleted(uint64_t issue_to_complete_ns, uint32_t polls);
+
 } // namespace dxmt::census
 
 #define D3D9_CENSUS(code)                                                                                              \

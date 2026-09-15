@@ -30,7 +30,9 @@ Outputs (WOW64_DESIGN.md 8.7):
                                        hook contract the hand-written files
                                        must satisfy
   src/d3d9shim/d3d9shim_thunks.c       15 vtables, 320 bodies (i386 PE)
-  src/d3d9/unix/d3d9_unix.c            321 unix entries + the ring replay
+  src/d3d9/unix/d3d9_unix.c            324 unix entries (320 vtable slots, the
+                                       init handshake, the three transport
+                                       slots) + the ring replay
   src/d3d9/unix/d3d9_unix_table.c      both dispatch tables
   src/d3d9/unix/d3d9_native_hooks.h    the per-method native hook prototypes
 
@@ -112,14 +114,56 @@ def state_struct(kind):
 
 
 def opcodes():
-    """[(name, it, m)] in canonical order; index IS the unix table slot."""
+    """[(name, it, m)] in canonical order; index IS the unix table slot.
+
+    Slot 0 is the init handshake, 1..320 the vtable methods, and then the
+    three TRANSPORT slots -- the things the boundary needs that are not
+    vtable methods.  They come last so no generated slot number moves, which
+    is how they keep the numbers (321, 322, 323) the hand-written half already
+    ships against; a transport entry is (name, None, <TRANSPORT_SLOTS dict>).
+    """
     out = [("D3D9OP_init", None, None)]
     for it, m in api.iter_methods():
         out.append((api.opcode_name(it, m), it, m))
+    for t in api.TRANSPORT_SLOTS:
+        out.append((t["op"], None, t))
     return out
 
 
 OPS = opcodes()
+TRANSPORT_BASE = 1 + api.EXPECTED_TOTAL_SLOTS
+
+
+def is_transport(it, m):
+    return it is None and m is not None
+
+
+def op_symbol(it, m):
+    """The _d3d9_<sym> / d3d9_call_<sym> stem for one table slot."""
+    if m is None:
+        return "init"
+    if it is None:
+        return m["name"]
+    return api.symbol(it, m)
+
+
+def transport_params(t):
+    """The transport hook's C parameter list, from the field roles."""
+    ps = []
+    for ctype, name, role in t["fields"]:
+        base = role.split(":", 1)[0]
+        if base == "scalar":
+            ps.append("%s %s" % (role.split(":", 1)[1], name))
+        elif base == "hwnd32":
+            ps.append("HWND " + name)
+        elif base == "guest_ptr":
+            ps.append("void *" + name)
+        elif base == "handle_out":
+            ps.append("d3d9_native_handle *" + name)
+        else:
+            raise SystemExit("unknown transport role %r" % role)
+        del ctype
+    return ", ".join(ps)
 
 
 def mirror_of(shape):
@@ -144,6 +188,13 @@ def arg_target(a):
     if a["tag"] in ("in_array", "out_array"):
         return a["shape"].split(":")[1]
     return None
+
+
+def guest_ptr_target(a):
+    """`void **ppbData` -> `void *`: the type the OUT pointer points at."""
+    base = a["ctype"].strip()
+    assert base.endswith("**"), a["ctype"]
+    return base[:-2].strip() + " *"
 
 
 def is_iface_array(a):
@@ -190,6 +241,11 @@ def native_params(it, m):
             ps.append("const void *" + n)
         elif t in LOCKED:
             ps.append("%s *%s" % (LOCKED[t], n))
+        elif t == "guest_ptr_out":
+            # The mapped-memory OUT pointer.  A HOST pointer here: the unix
+            # entry is what turns it back into a guest address, exactly as it
+            # does for D3DLOCKED_RECT::pBits.
+            ps.append("%s*%s" % (guest_ptr_target(a), n))
         elif t == "in_array" and is_iface_array(a):
             ps.append("const uint32_t *" + n)   # guest interface pointers
         elif t in ("in_struct", "in_array"):
@@ -236,7 +292,7 @@ def to_c(expr):
 
 POINTER_TAGS = ("in_struct", "out_struct", "inout_struct", "in_array",
                 "out_array", "out_ptr", "user_mem_in", "locked_rect_out",
-                "locked_box_out", "shared_handle_inout")
+                "locked_box_out", "shared_handle_inout", "guest_ptr_out")
 
 
 def to_c_size(expr, m):
@@ -304,7 +360,15 @@ def emit_ops_h():
     o.append("#define D3D9SHIM_OP_COUNT %du\n" % len(OPS))
 
     o.append("enum d3d9shim_op {")
-    for i, (name, _it, _m) in enumerate(OPS):
+    for i, (name, it, m) in enumerate(OPS):
+        if is_transport(it, m) and i == TRANSPORT_BASE:
+            o.append("    /* The TRANSPORT slots: not vtable methods, so no")
+            o.append("     * interface in the description produces them.  They")
+            o.append("     * come after the whole generated range, which is what")
+            o.append("     * fixes their numbers at %d.. and leaves every"
+                     % TRANSPORT_BASE)
+            o.append("     * generated slot -- the slot number IS the ABI --")
+            o.append("     * exactly where it was. */")
         o.append("    %-56s = %3d," % (name, i))
     o.append("    D3D9OP_COUNT_ = %d" % len(OPS))
     o.append("};\n")
@@ -433,6 +497,44 @@ _Static_assert(sizeof(struct d3d9_ring_record) == 8, "d3d9_ring_record");
             off += width
         o.append("")
 
+    # ---- transport blocks ----------------------------------------------
+    o.append("""/* ------------------------------------------------------------------------
+ * Transport blocks.  Same fixed-width rule as a vtable block -- uint64_t
+ * fields first, then the 4-byte ones, then the result, then padding to a
+ * multiple of 8 -- so one definition is right on i386 and on LP64 here too.
+ *
+ * These three were hand-written in d3d9shim_object.h and sat PAST the end of
+ * a table sized D3D9SHIM_OP_COUNT, so neither dispatch table had an entry for
+ * them and every call on one failed the bind.  d3d9_api.py now describes
+ * them, which is what gets them entries; the layouts below are the ones the
+ * hand-written header _Static_asserted, unchanged.
+ * ------------------------------------------------------------------------ */
+""")
+    for name, value in api.WINDOW_STATE_FLAGS:
+        o.append("#define %-30s 0x%xu" % (name, value))
+    o.append("")
+    for i, t in enumerate(api.TRANSPORT_SLOTS):
+        o.append("/* slot %d -- %s */" % (TRANSPORT_BASE + i,
+                                          t["note"].replace("*/", "* /")))
+        o.append("struct %s {" % t["block"])
+        roles = {f[1]: f[2] for f in t["fields"]}
+        for ctype, fname, role in api.transport_fields(t):
+            note = "OUT: result" if role == "ret" else roles[fname]
+            o.append("    %-10s %-30s /* %s */" % (ctype, fname + ";", note))
+        for j in range(api.transport_pad_words(t)):
+            o.append("    uint32_t   _pad%d;" % j)
+        o.append("};")
+        o.append('_Static_assert(sizeof(struct %s) == %d, "%s");'
+                 % (t["block"], t["size"], t["block"]))
+        off = 0
+        for ctype, fname, _role in api.transport_fields(t):
+            width = 8 if ctype == "uint64_t" else 4
+            off = (off + width - 1) // width * width
+            o.append('_Static_assert(offsetof(struct %s, %s) == %d, "%s.%s");'
+                     % (t["block"], fname, off, t["block"], fname))
+            off += width
+        o.append("")
+
     o.append("#endif /* __MADEIRA_D3D9SHIM_OPS_H */")
     return "\n".join(o) + "\n"
 
@@ -554,7 +656,15 @@ extern void d3d9shim_unlock(struct d3d9shim_device *dev);
 extern void d3d9shim_log_once(const char *what);
 
 /* identity helpers: return a BORROWED reference, or NULL.  The generated
- * body does the AddRef and the store, so these must not. */""")
+ * body does the AddRef and the store, so these must not.
+ *
+ * A helper named by a `resolve` slot owes one thing more: on a cache MISS it
+ * makes the single synchronous crossing on that slot own opcode --
+ * d3d9shim_native_call(op, &block, sizeof(block)) with block.self set to
+ * the receiver -- and adopts the native handle the unix entry writes into
+ * the block.  That is the ONLY way a child identity can enter the shim,
+ * because a child handle is produced by nothing but the method that hands
+ * the child out. */""")
     for name, sig in sorted(api.IDENTITY_HELPERS.items()):
         o.append("/* %s%s */" % (name, sig))
     o.append("extern struct d3d9shim_object *d3d9shim_device_back_buffer("
@@ -565,6 +675,12 @@ extern void d3d9shim_log_once(const char *what);
     o.append("extern struct d3d9shim_object *d3d9shim_device_stream_source("
              "struct d3d9shim_device *dev, UINT stream_idx, UINT *offset, "
              "UINT *stride);")
+    o.append("extern struct d3d9shim_object *d3d9shim_device_swapchain("
+             "struct d3d9shim_device *dev, UINT swapchain_idx);")
+    o.append("extern struct d3d9shim_object *d3d9shim_device_render_target("
+             "struct d3d9shim_device *dev, DWORD idx);")
+    o.append("extern struct d3d9shim_object *d3d9shim_device_depth_stencil("
+             "struct d3d9shim_device *dev);")
     o.append("extern struct d3d9shim_object *d3d9shim_swapchain_back_buffer("
              "struct d3d9shim_swapchain *sc, UINT backbuffer_idx, "
              "D3DBACKBUFFER_TYPE type);")
@@ -617,7 +733,7 @@ def pack_stmt(a):
     n, t = a["name"], a["tag"]
     if t == "iface_in":
         return "    _p.%s = d3d9shim_obj_native(%s);" % (n, n)
-    if t == "iface_out":
+    if t in ("iface_out", "guest_ptr_out"):
         return None
     if t in ("handle", "hwnd"):
         return "    _p.%s = (uint64_t)(ULONG_PTR)%s;" % (n, n)
@@ -635,6 +751,14 @@ def pack_stmt(a):
 def unpack_stmts(m):
     out = []
     for a in m["args"]:
+        if a["tag"] == "guest_ptr_out":
+            # The mapped-memory pointer, already a GUEST address: the unix
+            # entry ran it through ios_wow_guest_ptr32(), so the shim -- which
+            # IS the guest -- only has to widen it back to a pointer.  This is
+            # D3DLOCKED_RECT::pBits with no struct around it.
+            out.append("    *%s = (%s)(ULONG_PTR)_p.%s;"
+                       % (a["name"], guest_ptr_target(a).strip(), a["name"]))
+            continue
         if a["tag"] != "iface_out":
             continue
         iface = a["shape"].split(":", 1)[1]
@@ -693,7 +817,15 @@ def emit_body(it, m):
                     api.symbol(it, m), args))
         return o
 
-    if m["disp"] == "local":
+    if m["disp"] in ("local", "resolve"):
+        if m["disp"] == "resolve":
+            o.insert(0, "    /* resolve: the identity cache answers, and on a "
+                        "miss the helper")
+            o.insert(1, "     * makes one crossing on this opcode and adopts "
+                        "the handle the")
+            o.insert(2, "     * unix entry returns -- nothing else in the "
+                        "system can tell the")
+            o.insert(3, "     * shim what a child native handle is. */")
         return o + emit_local(it, m)
 
     pack = [s for s in (pack_stmt(a) for a in m["args"]) if s]
@@ -708,6 +840,12 @@ def emit_body(it, m):
     o.append("    struct d3d9shim_device *_dev = d3d9shim_device_of(&_self->hdr);")
     o.append("    HRESULT _hr;")
     o.append("")
+    for a in m["args"]:
+        if a["tag"] == "guest_ptr_out":
+            # Nothing is packed for it, so a NULL one would otherwise cross as
+            # a request the native side cannot refuse on the caller behalf.
+            o.append("    if (!%s)" % a["name"])
+            o.append("        return D3DERR_INVALIDCALL;")
     o.append("    _hr = d3d9shim_flush(_dev);")
     o.append("    if (FAILED(_hr))")
     o.append("        %s" % fail_ret(m, "_hr"))
@@ -774,6 +912,12 @@ def emit_local(it, m):
         elif helper == "device_stream_source":
             call = ("d3d9shim_device_stream_source(_self, %s, %s, %s)"
                     % (an[0], an[2], an[3]))
+        elif helper == "device_swapchain":
+            call = "d3d9shim_device_swapchain(_self, %s)" % an[0]
+        elif helper == "device_render_target":
+            call = "d3d9shim_device_render_target(_self, %s)" % an[0]
+        elif helper == "device_depth_stencil":
+            call = "d3d9shim_device_depth_stencil(_self)"
         elif helper == "swapchain_back_buffer":
             call = ("d3d9shim_swapchain_back_buffer(_self, %s, %s)"
                     % (an[0], an[1]))
@@ -871,6 +1015,18 @@ def emit_defer(it, m, pack, block):
              % (it["iface"], m["name"]))
     o.append("        %s" % fail_ret(m))
     o.append("    }")
+    # The shadow has to be maintained on BOTH arms.  Phase 1 is
+    # synchronous-everything, so if only the phase-2 arm applied it the
+    # bindings the `local` and `resolve` getters read would never be updated
+    # and GetTexture would answer NULL right after a successful SetTexture.
+    # This is the single call site: it is the one that is always taken.
+    if m["ret"] == "HRESULT":
+        o.append("    if (SUCCEEDED((HRESULT)_p.ret))")
+        o.append("        d3d9shim_shadow_apply(_dev, %s, &_p);"
+                 % api.opcode_name(it, m))
+    else:
+        o.append("    d3d9shim_shadow_apply(_dev, %s, &_p);"
+                 % api.opcode_name(it, m))
     o += unpack_stmts(m)
     o.append(ret_stmt(m))
     return o
@@ -942,11 +1098,25 @@ def emit_native_hooks_h():
 /* A native object reference: an index + generation into the native table,
  * never a host pointer (invariant 4).  0 is "none". */
 typedef uint64_t d3d9_native_handle;
+""")
+    o.append("""/* What a handle points at.  The glue stores the CANONICAL interface pointer
+ * for the kind (the one named beside each value below) and every lookup is
+ * checked against it, so a handle of the wrong kind is D3DERR_INVALIDCALL
+ * rather than a wild cast.  0 is reserved: d3d9_native_handle_lookup() reads
+ * it as "any kind", which only the teardown sweep ever asks for. */
+enum d3d9_native_kind {
+    D3D9_NATIVE_KIND_NONE = 0,""")
+    for i, it in enumerate(api.INTERFACES):
+        o.append("    %-38s = %2d, /* %s */"
+                 % ("D3D9_NATIVE_KIND_" + it["kind"], i + 1, it["iface"]))
+    o.append("""    D3D9_NATIVE_KIND_COUNT
+};
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
+""")
+    o.append("""
 /* Called once, from _d3d9_init, after the hash handshake passes. */
 extern int d3d9_native_init(void);
 /* Called from ios_wow_reclaim_dead_windows() BEFORE the PROT_NONE replace
@@ -963,6 +1133,17 @@ extern void d3d9_native_process_teardown(void *peb);
                  % (it["iface"], m["name"], m["slot"], m["disp"]))
         o.append("extern %s d3d9_native_%s(%s);"
                  % (native_ret(m), api.symbol(it, m), native_params(it, m)))
+    o.append("")
+    o.append("""/* The three TRANSPORT hooks.  Not vtable methods -- the guest arena
+ * registration (8.2(c)), the per-HWND state cache (8.2(d)) and the creation
+ * of the IDirect3D9(Ex) every other call self descends from, which is a DLL
+ * export rather than a slot. */""")
+    for i, t in enumerate(api.TRANSPORT_SLOTS):
+        o.append("/* transport slot %d -- %s */"
+                 % (TRANSPORT_BASE + i,
+                    "0 on success" if t["ret_zero_ok"] else "an HRESULT"))
+        o.append("extern %s %s(%s);"
+                 % (t["ret"], t["hook"], transport_params(t)))
     o.append("""
 #ifdef __cplusplus
 }
@@ -1027,6 +1208,18 @@ def unix_convert(it, m):
             callargs.append("_%s_g ? &_%s : NULL" % (n, n))
             post.append("    if (_%s_g)" % n)
             post.append("        D3D9_SHARED_OUT(_%s_g, _%s, %s);" % (n, n, pool))
+        elif t == "guest_ptr_out":
+            # The mapped-memory OUT pointer.  Nothing comes IN -- the shim
+            # packs nothing and refuses a NULL out-parameter itself -- so the
+            # entry hands the hook a host slot and converts the answer back
+            # with ios_wow_guest_ptr32(), which is the same rule as
+            # D3DLOCKED_RECT::pBits and the same guarantee: the pointer the
+            # native allocator hands out is always inside the guest arena.
+            decls.append("    %s_%s = NULL;" % (guest_ptr_target(a), n))
+            callargs.append("&_%s" % n)
+            post.append("    _p->%s = %s ? D3D9_GUEST_PTR32(_%s) : 0;"
+                        % (n, "SUCCEEDED(_p->ret)" if m["ret"] == "HRESULT"
+                           else "1", n))
         elif t in LOCKED:
             host = LOCKED[t]
             mirror = "d3d9_%s32" % host
@@ -1139,28 +1332,47 @@ extern size_t d3d9_up_index_bytes(D3DPRIMITIVETYPE type, UINT primitive_count,
     # mirror conversions
     o.append("/* ---- mirror conversions "
              "-------------------------------------------- */\n")
+    used_in, used_out = set(), set()
+    for it, m in api.iter_methods():
+        for a in m["args"]:
+            target = LOCKED.get(a["tag"]) or arg_target(a)
+            if target not in MIRROR_BY_NAME:
+                continue
+            if a["tag"] in ("in_struct", "inout_struct"):
+                used_in.add(target)
+            if a["tag"] in LOCKED or a["tag"] in ("out_struct", "inout_struct"):
+                used_out.add(target)
     for s in api.MIRROR_STRUCTS:
         host, mirror = s["name"], "d3d9_%s32" % s["name"]
-        o.append("static void d3d9_mirror_in_%s(%s *dst, const struct %s *src)"
-                 % (host, host, mirror))
-        o.append("{")
-        o.append("    memset(dst, 0, sizeof(*dst));")
-        done = set()
-        for ctype, name, _o32, _o64, role in s["fields"]:
-            if role == "scalar":
-                o.append("    dst->%s = src->%s;" % (name, name))
-            elif role == "hwnd":
-                o.append("    dst->%s = (HWND)(ULONG_PTR)src->%s;" % (name, name))
-            elif role == "guest_ptr":
-                o.append("    dst->%s = D3D9_HOST_PTR(src->%s);" % (name, name))
-            elif role == "u64_lo":
-                base = name[:-3]
-                if base in done:
-                    continue
-                done.add(base)
-                o.append("    dst->%s.LowPart = src->%s_lo;" % (base, base))
-                o.append("    dst->%s.HighPart = (LONG)src->%s_hi;" % (base, base))
-        o.append("}\n")
+        assert host in used_out, host
+        if host not in used_in:
+            o.append("/* %s never crosses INWARD, so it has no "
+                     "d3d9_mirror_in_%s(). */" % (host, host))
+            o.append("")
+        if host in used_in:
+            o.append("static void d3d9_mirror_in_%s(%s *dst, const struct %s *src)"
+                     % (host, host, mirror))
+            o.append("{")
+            o.append("    memset(dst, 0, sizeof(*dst));")
+            done = set()
+            for ctype, name, _o32, _o64, role in s["fields"]:
+                if role == "scalar":
+                    o.append("    dst->%s = src->%s;" % (name, name))
+                elif role == "hwnd":
+                    o.append("    dst->%s = (HWND)(ULONG_PTR)src->%s;"
+                             % (name, name))
+                elif role == "guest_ptr":
+                    o.append("    dst->%s = D3D9_HOST_PTR(src->%s);"
+                             % (name, name))
+                elif role == "u64_lo":
+                    base = name[:-3]
+                    if base in done:
+                        continue
+                    done.add(base)
+                    o.append("    dst->%s.LowPart = src->%s_lo;" % (base, base))
+                    o.append("    dst->%s.HighPart = (LONG)src->%s_hi;"
+                             % (base, base))
+            o.append("}\n")
         o.append("static void d3d9_mirror_out_%s(struct %s *dst, const %s *src)"
                  % (host, mirror, host))
         o.append("{")
@@ -1221,6 +1433,14 @@ NTSTATUS _d3d9_init(void *args)
         block = api.block_struct(it, m)
         o.append("/* %s::%s -- slot %d, %s */"
                  % (it["iface"], m["name"], m["slot"], m["disp"]))
+        if m["disp"] == "resolve":
+            # A real entry, and the reason `resolve` exists as a disposition:
+            # the shim answers this method from its identity cache, but a
+            # child native handle is produced by NOTHING ELSE, so the one
+            # crossing that fills the cache lands here.
+            o.append("/* Answers the identity cache in the shim on a miss; "
+                     "the handle it\n * writes into the block is what the "
+                     "guest wrapper is built from. */")
         if m["disp"] == "local":
             o.append("NTSTATUS _d3d9_%s(void *args)" % sym)
             o.append("{")
@@ -1260,6 +1480,61 @@ NTSTATUS _d3d9_init(void *args)
         o.append("NTSTATUS _d3d9_%s(void *args)" % sym)
         o.append("{")
         o.append("    d3d9_call_%s(args);" % sym)
+        o.append("    return STATUS_SUCCESS;")
+        o.append("}")
+        o.append("")
+
+    # ---- the transport slots --------------------------------------------
+    o.append("""/* ---- the transport slots -----------------------------------------------
+ * Not vtable methods, so nothing in the interface description produces them;
+ * see TRANSPORT_SLOTS in d3d9_api.py.  They keep the numbers the hand-written
+ * shim half already calls with, immediately after the generated range. */
+""")
+    for i, t in enumerate(api.TRANSPORT_SLOTS):
+        o.append("/* %s -- slot %d, transport */" % (t["name"], TRANSPORT_BASE + i))
+        o.append("static void d3d9_call_%s(struct %s *_p)" % (t["name"], t["block"]))
+        o.append("{")
+        decls, pre, callargs = [], [], []
+        for ctype, fname, role in t["fields"]:
+            base = role.split(":", 1)[0]
+            if base == "scalar":
+                callargs.append("(%s)_p->%s" % (role.split(":", 1)[1], fname))
+            elif base == "hwnd32":
+                callargs.append("(HWND)(ULONG_PTR)_p->%s" % fname)
+            elif base == "guest_ptr":
+                size = role.split(":", 1)[1]
+                size = size if size.isdigit() else "_p->" + size
+                decls.append("    void *_%s = D3D9_HOST_PTR(_p->%s);" % (fname, fname))
+                pre.append("    if (!_%s || !D3D9_IN_WINDOW(_%s, %s)) {"
+                           % (fname, fname, size))
+                pre.append('        D3D9_LOG("d3d9: %s: %s is not a usable '
+                           'guest pointer");' % (t["name"], fname))
+                pre.append("        _p->ret = D3DERR_INVALIDCALL;")
+                pre.append("        return;")
+                pre.append("    }")
+                callargs.append("_%s" % fname)
+            elif base == "handle_out":
+                decls.append("    d3d9_native_handle _%s = 0;" % fname)
+                callargs.append("&_%s" % fname)
+            del ctype
+        for d in decls:
+            o.append(d)
+        if decls:
+            o.append("")
+        o += pre
+        if t["ret_zero_ok"]:
+            o.append("    _p->ret = %s(%s) ? E_FAIL : D3D_OK;"
+                     % (t["hook"], ", ".join(callargs)))
+        else:
+            o.append("    _p->ret = %s(%s);" % (t["hook"], ", ".join(callargs)))
+        for _ctype, fname, role in t["fields"]:
+            if role.split(":", 1)[0] == "handle_out":
+                o.append("    _p->%s = _%s;" % (fname, fname))
+        o.append("}")
+        o.append("")
+        o.append("NTSTATUS _d3d9_%s(void *args)" % t["name"])
+        o.append("{")
+        o.append("    d3d9_call_%s(args);" % t["name"])
         o.append("    return STATUS_SUCCESS;")
         o.append("}")
         o.append("")
@@ -1336,15 +1611,14 @@ def emit_unix_table_c():
 
 /* Defined in d3d9_unix.c, one per slot. */""")
     for i, (opname, it, m) in enumerate(OPS):
-        sym = "init" if m is None else api.symbol(it, m)
-        o.append("extern NTSTATUS _d3d9_%s(void *args);" % sym)
+        o.append("extern NTSTATUS _d3d9_%s(void *args);" % op_symbol(it, m))
         del opname, i
     o.append("")
     for table in ("dxmt_d3d9_unix_call_funcs", "dxmt_d3d9_unix_call_wow64_funcs"):
         o.append("const void *const %s[D3D9SHIM_OP_COUNT] = {" % table)
         for i, (opname, it, m) in enumerate(OPS):
-            sym = "init" if m is None else api.symbol(it, m)
-            o.append("    /* %3d */ (const void *)_d3d9_%s," % (i, sym))
+            o.append("    /* %3d */ (const void *)_d3d9_%s,"
+                     % (i, op_symbol(it, m)))
             del opname
         o.append("};")
         o.append("")
@@ -1354,6 +1628,266 @@ def emit_unix_table_c():
 _Static_assert(sizeof(dxmt_d3d9_unix_call_funcs) / sizeof(const void *)
                == D3D9SHIM_OP_COUNT,
                "d3d9 unix table length must equal the opcode count");""")
+    return "\n".join(o) + "\n"
+
+
+# --------------------------------------------------------------------------
+# d3d9_native_gen.inc -- the mechanical native bodies (WOW64_DESIGN.md 8.5)
+#
+# 8.5 asks for one d3d9_native_<Iface>_<Method> per slot, implemented against
+# the MTLD3D9* classes.  All but five of them are the same three lines -- look
+# the receiver up in the handle table, look every interface argument up,
+# forward, intern whatever came back -- because d3d9_unix.c has already
+# converted, validated and (where a mirror needs it) expanded everything else.
+# Writing 315 of those by hand is exactly the drift this generator exists to
+# prevent, so they are emitted from the same description the entries come
+# from and d3d9_native_glue.cpp hand-writes only what is not mechanical.
+# --------------------------------------------------------------------------
+
+KIND_IFACE = {it["kind"]: it["iface"] for it in api.INTERFACES}
+
+# `any`-kind interface arguments (IDirect3DBaseTexture9 / IDirect3DResource9 /
+# IUnknown): the handle does not say which concrete class it is, so the glue
+# resolves those through a kind switch.
+ANY_IN_HELPER = {
+    "IDirect3DBaseTexture9": "d3d9_native_as_base_texture",
+    "IDirect3DResource9": "d3d9_native_as_resource",
+    "IUnknown": "d3d9_native_as_unknown",
+}
+
+# Slots whose native body is HAND-WRITTEN in d3d9_native_glue.cpp, and why.
+NATIVE_HANDWRITTEN = {
+    ("D3D9Ex", "CreateDevice"):
+        "the shim owns D3DCREATE_MULTITHREADED (is_protected=false) and the "
+        "window-size cache is seeded before the swapchain is built",
+    ("D3D9Ex", "CreateDeviceEx"):
+        "same as CreateDevice",
+    ("Device9Ex", "GetCreationParameters"):
+        "CreateDevice strips D3DCREATE_MULTITHREADED before the native "
+        "device sees it, so the flag has to be put back here",
+    ("Device9Ex", "CheckResourceResidency"):
+        "its array holds GUEST interface pointers, which have no native "
+        "meaning; only the NULL-with-a-count rule is answerable here",
+    ("Surface9", "GetDC"):
+        "shim-local: D3DKMTCreateDCFromMemory runs on the guest thread",
+    ("Surface9", "ReleaseDC"):
+        "shim-local, like GetDC",
+}
+
+# What a hook returns when its receiver or one of its arguments does not
+# resolve (a validated failure, never a host fault -- 8.9-4), and what it
+# returns when a C++ exception would otherwise escape into 32-bit code.
+NATIVE_FAIL = {
+    "HRESULT": "D3DERR_INVALIDCALL",
+    "ULONG": "0",
+    "UINT": "0",
+    "DWORD": "0",
+    "WINBOOL": "FALSE",
+    "float": "0.0f",
+    "HMONITOR": "NULL",
+    "D3DRESOURCETYPE": "(D3DRESOURCETYPE)0",
+    "D3DTEXTUREFILTERTYPE": "(D3DTEXTUREFILTERTYPE)0",
+    "D3DQUERYTYPE": "(D3DQUERYTYPE)0",
+    "int": "0",
+}
+NATIVE_CATCH = dict(NATIVE_FAIL, HRESULT="E_FAIL")
+
+
+def native_handwritten(it, m):
+    return (it["short"], m["name"]) in NATIVE_HANDWRITTEN
+
+
+def any_iface_out(m):
+    """True when a slot hands out an interface whose concrete kind the handle
+    table cannot know (QueryInterface, GetContainer, GetTexture).  Every one
+    of them is `local` -- answered in the shim, never crossing -- which
+    generator_self_check() enforces."""
+    for a in m["args"]:
+        if a["tag"] == "iface_out" and KINDS[a["shape"].split(":", 1)[1]] == "ANY":
+            return True
+    return False
+
+
+def has_iface_array(m):
+    return any(is_iface_array(a) for a in m["args"])
+
+
+def not_mechanical(m):
+    """A shape no forwarding body can carry.  Always `local` or hand-written."""
+    return m["name"] == "QueryInterface" or any_iface_out(m) or has_iface_array(m)
+
+
+def deref_type(ctype, stars):
+    t = ctype.strip()
+    assert t.endswith(stars), (ctype, stars)
+    return t[: -len(stars)].strip()
+
+
+# REFIID / REFGUID are `const GUID &` behind a typedef.  The wire shape is a
+# pointer (it has to be: the block carries a guest address), and the hook takes
+# one, so the forwarding body dereferences -- after checking, because the unix
+# entry lets a NULL in_struct through as the NULL the application passed.
+REFERENCE_CTYPES = ("REFIID", "REFGUID", "REFCLSID")
+
+
+def is_reference_arg(a):
+    return a["ctype"].strip() in REFERENCE_CTYPES or a["ctype"].strip().endswith("&")
+
+
+def pass_expr(a):
+    """How one already-converted argument is handed to the native method.
+
+    The SDK is not consistent about const on INPUT parameters -- ResetEx takes
+    a `D3DDISPLAYMODEEX *` it only reads, SetConvolutionMonoKernel a
+    `float *` -- while the description (correctly) calls them inputs, so the
+    hook's parameter is const.  Casting the const away at the call is the only
+    thing that can bridge that, and it is safe in the direction that matters:
+    where the SDK does say const, the cast is a no-op the conversion undoes.
+    """
+    t, n = a["tag"], a["name"]
+    if t in ("in_struct", "in_array"):
+        if is_reference_arg(a):
+            return "*" + n
+        return "const_cast<%s *>(%s)" % (arg_target(a), n)
+    if t == "user_mem_in":
+        return "const_cast<void *>(%s)" % n
+    return n
+
+
+def emit_native_body(it, m):
+    sym = api.symbol(it, m)
+    ret = native_ret(m)
+    void = ret == "void"
+    fail = "" if void else " " + NATIVE_FAIL[m["ret"]]
+    caught = "" if void else " " + NATIVE_CATCH[m["ret"]]
+    kind = "D3D9_NATIVE_KIND_" + it["kind"]
+
+    o = ["/* %s::%s -- slot %d, %s */"
+         % (it["iface"], m["name"], m["slot"], m["disp"])]
+    o.append(ret)
+    o.append("d3d9_native_%s(%s)" % (sym, native_params(it, m)))
+    o.append("{")
+    o.append("  D3D9_NATIVE_ENTER(%s);" % api.opcode_name(it, m))
+
+    if not_mechanical(m):
+        for a in m["args"]:
+            o.append("  (void)%s;" % a["name"])
+        o.append("  (void)self;")
+        o.append('  D3D9_NATIVE_LOCAL("%s::%s");' % (it["iface"], m["name"]))
+        o.append("  return%s;" % (" E_NOTIMPL" if m["ret"] == "HRESULT" else fail))
+        o.append("}")
+        return o
+
+    if m["name"] == "Release":
+        # Retiring the handle is what drops the native reference; the guest
+        # refcount is the shim's business and only the LAST release crosses.
+        o.append("  return d3d9_native_retire(self, %s);" % kind)
+        o.append("}")
+        return o
+
+    o.append("  try {")
+    o.append("    %s *_self = d3d9_native_lookup<%s>(self, %s);"
+             % (it["iface"], it["iface"], kind))
+    o.append("    if (!_self)")
+    o.append("      return%s;" % fail)
+
+    call = []
+    adopt = []
+    for a in m["args"]:
+        t, n = a["tag"], a["name"]
+        if t == "iface_in":
+            iface = a["shape"].split(":", 1)[1]
+            k = KINDS[iface]
+            ctype = a["ctype"].rstrip("* ") + " *"
+            if k == "ANY":
+                o.append("    %s _a_%s = %s(%s);"
+                         % (ctype, n, ANY_IN_HELPER[iface], n))
+            else:
+                o.append("    %s _a_%s = d3d9_native_lookup<%s>(%s, "
+                         "D3D9_NATIVE_KIND_%s);"
+                         % (ctype, n, KIND_IFACE[k], n, k))
+            # A NULL handle is a legal argument (SetTexture(stage, NULL));
+            # a non-NULL one that does not resolve is not.
+            o.append("    if (%s && !_a_%s)" % (n, n))
+            o.append("      return%s;" % fail)
+            call.append("_a_" + n)
+        elif t == "iface_out":
+            inner = deref_type(a["ctype"], "**")
+            k = KINDS[a["shape"].split(":", 1)[1]]
+            o.append("    %s *_o_%s = nullptr;" % (inner, n))
+            o.append("    if (%s)" % n)
+            o.append("      *%s = 0;" % n)
+            call.append("&_o_" + n)
+            adopt.append((n, KIND_IFACE[k], "D3D9_NATIVE_KIND_" + k))
+        else:
+            if is_reference_arg(a):
+                o.append("    if (!%s)" % n)
+                o.append("      return%s;" % fail)
+            call.append(pass_expr(a))
+
+    invoke = "_self->%s(%s)" % (m["name"], ", ".join(call))
+    if void:
+        o.append("    %s;" % invoke)
+        o.append("    return;")
+    elif adopt:
+        o.append("    HRESULT _hr = %s;" % invoke)
+        for n, canon, k in adopt:
+            o.append("    d3d9_native_adopt<%s>(_o_%s, %s, %s, SUCCEEDED(_hr));"
+                     % (canon, n, k, n))
+        o.append("    return _hr;")
+    else:
+        o.append("    return %s;" % invoke)
+
+    o.append("  } catch (...) {")
+    o.append('    D3D9_NATIVE_CAUGHT("%s::%s");' % (it["iface"], m["name"]))
+    o.append("    return%s;" % caught)
+    o.append("  }")
+    o.append("}")
+    return o
+
+
+def emit_native_gen_inc():
+    o = [BANNER % "d3d9_native_gen.inc -- the mechanical native bodies"]
+    o.append("""/* Included ONCE, from research/dxmt/src/d3d9/unix/d3d9_native_glue.cpp,
+ * inside its extern "C" block and after the helpers every body below calls.
+ * Not a header: no include guard, and nothing else may include it.
+ *
+ * One body per vtable slot whose shape is mechanical -- look the receiver up
+ * in the handle table, look every interface argument up, forward to the
+ * MTLD3D9* object, intern whatever came back.  d3d9_unix.c has already
+ * converted, validated and expanded everything else, so there is nothing
+ * left for these to decide.  Every one wraps the call in try/catch, because
+ * no C++ exception may escape into 32-bit code (8.9-4).
+ *
+ * HAND-WRITTEN in d3d9_native_glue.cpp instead:""")
+    for (short, name), why in sorted(NATIVE_HANDWRITTEN.items()):
+        o.append(" *   %s::%s -- %s" % (short, name, why))
+    o.append(" */\n")
+
+    o.append("/* Opcode names, for the [d3d9-native-census] summary: emitted "
+             "here so a\n * counter cannot name a slot other than the one it "
+             "counted. */")
+    o.append("static const char *const d3d9_native_op_names[D3D9SHIM_OP_COUNT] = {")
+    for i, (name, it, m) in enumerate(OPS):
+        if m is None:
+            label = "init"
+        elif it is None:
+            label = m["name"]
+        else:
+            label = "%s::%s" % (it["iface"], m["name"])
+        o.append('    /* %3d */ "%s",' % (i, label))
+    o.append("};")
+    o.append("")
+
+    for it, m in api.iter_methods():
+        if native_handwritten(it, m):
+            o.append("/* %s::%s -- slot %d, %s: HAND-WRITTEN in "
+                     "d3d9_native_glue.cpp. */"
+                     % (it["iface"], m["name"], m["slot"], m["disp"]))
+            o.append("")
+            continue
+        o += emit_native_body(it, m)
+        o.append("")
     return "\n".join(o) + "\n"
 
 
@@ -1372,9 +1906,22 @@ def generator_self_check():
         seen[name] = i
     if OPS[0][0] != "D3D9OP_init":
         bad.append("slot 0 must be the init handshake")
-    if len(OPS) != 1 + api.EXPECTED_TOTAL_SLOTS:
+    if len(OPS) != 1 + api.EXPECTED_TOTAL_SLOTS + len(api.TRANSPORT_SLOTS):
         bad.append("opcode count %d, expected %d"
-                   % (len(OPS), 1 + api.EXPECTED_TOTAL_SLOTS))
+                   % (len(OPS),
+                      1 + api.EXPECTED_TOTAL_SLOTS + len(api.TRANSPORT_SLOTS)))
+    # The transport slots are an ABI the hand-written half already calls
+    # with: they must come AFTER the whole generated range and in order, so
+    # arena_register stays 321, window_state 322, create_interface 323.
+    for t in api.TRANSPORT_SLOTS:
+        want = t["slot"]
+        if want >= len(OPS) or OPS[want][0] != t["op"]:
+            bad.append("transport slot %s is not at index %d" % (t["op"], want))
+        if OPS[want][1] is not None or not is_transport(*OPS[want][1:]):
+            bad.append("transport slot %s is not marked as one" % t["op"])
+    for i, (name, it, m) in enumerate(OPS):
+        if is_transport(it, m) and i < TRANSPORT_BASE:
+            bad.append("transport slot %s inside the generated range" % name)
     for it, m in api.iter_methods():
         for a in m["args"]:
             if a["tag"] in ("iface_in", "iface_out"):
@@ -1382,10 +1929,49 @@ def generator_self_check():
                 if iface not in KINDS:
                     bad.append("%s::%s: %s names an interface with no kind"
                                % (it["iface"], m["name"], a["shape"]))
-        if m["disp"] == "local" and m["local"].startswith("identity"):
+        if m["disp"] in ("local", "resolve") and (m["local"] or "").startswith("identity"):
             if not any(a["tag"] == "iface_out" for a in m["args"]):
                 bad.append("%s::%s: identity local with no iface_out argument"
                            % (it["iface"], m["name"]))
+        if m["disp"] == "resolve":
+            # The shim resolve reads the child handle as the block SECOND
+            # 64-bit word -- it has one generic reader, not one per slot -- so
+            # the iface_out must be the first field after `self`.  The layout
+            # rule (64-bit fields first) gives that for free today; this is
+            # what catches the day a second u64 argument quietly takes the
+            # place.
+            fields = api.block_fields(m)
+            outs = [a["name"] for a in m["args"] if a["tag"] == "iface_out"]
+            if len(outs) != 1:
+                bad.append("%s::%s: a resolve needs exactly one iface_out"
+                           % (it["iface"], m["name"]))
+            elif len(fields) < 2 or fields[1][1] != outs[0] \
+                    or fields[1][0] != "uint64_t":
+                bad.append("%s::%s: the resolved handle must be the block "
+                           "second 64-bit word, found %r"
+                           % (it["iface"], m["name"],
+                              fields[1][1] if len(fields) > 1 else None))
+        # The native side of step 4: a shape no forwarding body can carry has
+        # to be answered in the shim (`local`) or named in NATIVE_HANDWRITTEN.
+        # Reclassifying one of them to `sync` without doing either would emit
+        # an E_NOTIMPL that silently crossed, which is the one failure mode
+        # 8.5's "unimplemented = never a hole" rule exists to prevent.
+        if not_mechanical(m) and m["disp"] != "local" \
+                and not native_handwritten(it, m):
+            bad.append("%s::%s: %s but its shape (an any-kind iface_out or an "
+                       "interface array) cannot be forwarded mechanically -- "
+                       "keep it local or add it to NATIVE_HANDWRITTEN"
+                       % (it["iface"], m["name"], m["disp"]))
+        for a in m["args"]:
+            if a["tag"] == "iface_in" \
+                    and KINDS[a["shape"].split(":", 1)[1]] == "ANY" \
+                    and a["shape"].split(":", 1)[1] not in ANY_IN_HELPER:
+                bad.append("%s::%s: %s has no entry in ANY_IN_HELPER"
+                           % (it["iface"], m["name"], a["shape"]))
+            if a["tag"] == "guest_ptr_out" and not a["ctype"].count("*") == 2:
+                bad.append("%s::%s: %s is a guest_ptr_out but its C type %r is "
+                           "not a pointer to a pointer"
+                           % (it["iface"], m["name"], a["name"], a["ctype"]))
     for s in api.MIRROR_STRUCTS:
         off = 0
         for _ctype, _n, off32, _off64, _role in s["fields"]:
@@ -1402,6 +1988,7 @@ OUTPUTS = [
     ("research/dxmt/src/d3d9/unix/d3d9_native_hooks.h", emit_native_hooks_h),
     ("research/dxmt/src/d3d9/unix/d3d9_unix.c", emit_unix_c),
     ("research/dxmt/src/d3d9/unix/d3d9_unix_table.c", emit_unix_table_c),
+    ("research/dxmt/src/d3d9/unix/d3d9_native_gen.inc", emit_native_gen_inc),
 ]
 
 

@@ -16,7 +16,13 @@ namespace dxmt {
 // memory heavy title can approach, and each block costs host RAM plus a Metal
 // address space registration plus a pre-fault, so there the ring holds more
 // and smaller blocks instead.
-#ifdef __i386__
+// MADEIRA (WOW64_DESIGN.md section 8.2(a)): the !DXMT_MADEIRA half reverts
+// this toward the upstream tag for the native frontend. The 8 MB block is a
+// concession to a 32-bit guest's VA ceiling, and natively these blocks leave
+// the guest window entirely -- they are host allocations the application
+// never sees -- so the 32 MB block that suits every other 64-bit target
+// suits this one too.
+#if defined(__i386__) && !defined(DXMT_MADEIRA)
 constexpr size_t kStagingBlockSize = 0x800000; // 8MB
 #else
 constexpr size_t kStagingBlockSize = 0x2000000; // 32MB

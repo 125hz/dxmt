@@ -2,6 +2,17 @@
 #include "d3d9_interface.hpp"
 #include "log/log.hpp"
 
+/* MADEIRA (WOW64_DESIGN.md section 8.2(b)): D3DPERF_*'s DWORD_PTR arguments
+ * and the shader validator's Win32 integer types are not in the native
+ * windows.h.  Note that everything in this file is SHIM-LOCAL in the final
+ * shape -- the ten DLL exports, the PIX counters and the whole validator
+ * state machine run on the guest's own thread -- so these bodies survive here
+ * only to keep the native library self-contained and linkable until step 3
+ * moves them.  See research/dxmt/LICENSE-MADEIRA.md. */
+#ifdef DXMT_MADEIRA
+#include "util_madeira_compat.h"
+#endif
+
 #include <atomic>
 
 namespace dxmt {

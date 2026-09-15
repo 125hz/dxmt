@@ -642,6 +642,10 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_CreateAdditionalSwapChain(ID
 
 static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_GetSwapChain(IDirect3DDevice9Ex *iface, UINT swapchain_idx, IDirect3DSwapChain9 ** swapchain)
 {
+    /* resolve: the identity cache answers, and on a miss the helper
+     * makes one crossing on this opcode and adopts the handle the
+     * unix entry returns -- nothing else in the system can tell the
+     * shim what a child native handle is. */
     struct d3d9shim_device *_self = (struct d3d9shim_device *)iface;
     struct d3d9shim_object *_child;
     struct d3d9shim_device *_dev = d3d9shim_device_of(&_self->hdr);
@@ -649,7 +653,7 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_GetSwapChain(IDirect3DDevice
     if (!swapchain)
         return D3DERR_INVALIDCALL;
     d3d9shim_lock(_dev);
-    _child = (swapchain_idx < D3D9SHIM_MAX_SWAPCHAINS) ? _self->swapchains[swapchain_idx] : NULL;
+    _child = d3d9shim_device_swapchain(_self, swapchain_idx);
     if (_child)
         d3d9shim_obj_addref(_child);
     d3d9shim_unlock(_dev);
@@ -692,6 +696,10 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_Present(IDirect3DDevice9Ex *
 
 static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_GetBackBuffer(IDirect3DDevice9Ex *iface, UINT swapchain_idx, UINT backbuffer_idx, D3DBACKBUFFER_TYPE backbuffer_type, IDirect3DSurface9 ** backbuffer)
 {
+    /* resolve: the identity cache answers, and on a miss the helper
+     * makes one crossing on this opcode and adopts the handle the
+     * unix entry returns -- nothing else in the system can tell the
+     * shim what a child native handle is. */
     struct d3d9shim_device *_self = (struct d3d9shim_device *)iface;
     struct d3d9shim_object *_child;
     struct d3d9shim_device *_dev = d3d9shim_device_of(&_self->hdr);
@@ -1164,11 +1172,17 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetRenderTarget(IDirect3DDev
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetRenderTarget");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetRenderTarget, &_p);
     return (HRESULT)_p.ret;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_GetRenderTarget(IDirect3DDevice9Ex *iface, DWORD idx, IDirect3DSurface9 ** surface)
 {
+    /* resolve: the identity cache answers, and on a miss the helper
+     * makes one crossing on this opcode and adopts the handle the
+     * unix entry returns -- nothing else in the system can tell the
+     * shim what a child native handle is. */
     struct d3d9shim_device *_self = (struct d3d9shim_device *)iface;
     struct d3d9shim_object *_child;
     struct d3d9shim_device *_dev = d3d9shim_device_of(&_self->hdr);
@@ -1176,7 +1190,7 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_GetRenderTarget(IDirect3DDev
     if (!surface)
         return D3DERR_INVALIDCALL;
     d3d9shim_lock(_dev);
-    _child = (idx < D3D_MAX_SIMULTANEOUS_RENDERTARGETS) ? _self->render_targets[idx] : NULL;
+    _child = d3d9shim_device_render_target(_self, idx);
     if (_child)
         d3d9shim_obj_addref(_child);
     d3d9shim_unlock(_dev);
@@ -1218,11 +1232,17 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetDepthStencilSurface(IDire
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetDepthStencilSurface");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetDepthStencilSurface, &_p);
     return (HRESULT)_p.ret;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_GetDepthStencilSurface(IDirect3DDevice9Ex *iface, IDirect3DSurface9 ** depth_stencil)
 {
+    /* resolve: the identity cache answers, and on a miss the helper
+     * makes one crossing on this opcode and adopts the handle the
+     * unix entry returns -- nothing else in the system can tell the
+     * shim what a child native handle is. */
     struct d3d9shim_device *_self = (struct d3d9shim_device *)iface;
     struct d3d9shim_object *_child;
     struct d3d9shim_device *_dev = d3d9shim_device_of(&_self->hdr);
@@ -1230,7 +1250,7 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_GetDepthStencilSurface(IDire
     if (!depth_stencil)
         return D3DERR_INVALIDCALL;
     d3d9shim_lock(_dev);
-    _child = _self->depth_stencil;
+    _child = d3d9shim_device_depth_stencil(_self);
     if (_child)
         d3d9shim_obj_addref(_child);
     d3d9shim_unlock(_dev);
@@ -1270,6 +1290,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_BeginScene(IDirect3DDevice9E
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::BeginScene");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_BeginScene, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -1305,6 +1327,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_EndScene(IDirect3DDevice9Ex 
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::EndScene");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_EndScene, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -1348,6 +1372,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_Clear(IDirect3DDevice9Ex *if
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::Clear");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_Clear, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -1387,6 +1413,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetTransform(IDirect3DDevice
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetTransform");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetTransform, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -1447,6 +1475,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_MultiplyTransform(IDirect3DD
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::MultiplyTransform");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_MultiplyTransform, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -1484,6 +1514,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetViewport(IDirect3DDevice9
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetViewport");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetViewport, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -1541,6 +1573,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetMaterial(IDirect3DDevice9
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetMaterial");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetMaterial, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -1600,6 +1634,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetLight(IDirect3DDevice9Ex 
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetLight");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetLight, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -1656,6 +1692,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_LightEnable(IDirect3DDevice9
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::LightEnable");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_LightEnable, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -1716,6 +1754,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetClipPlane(IDirect3DDevice
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetClipPlane");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetClipPlane, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -1772,6 +1812,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetRenderState(IDirect3DDevi
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetRenderState");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetRenderState, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -1892,6 +1934,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetClipStatus(IDirect3DDevic
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetClipStatus");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetClipStatus, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -1968,6 +2012,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetTexture(IDirect3DDevice9E
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetTexture");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetTexture, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2027,6 +2073,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetTextureStageState(IDirect
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetTextureStageState");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetTextureStageState, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2090,6 +2138,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetSamplerState(IDirect3DDev
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetSamplerState");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetSamplerState, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2149,6 +2199,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetPaletteEntries(IDirect3DD
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetPaletteEntries");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetPaletteEntries, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2203,6 +2255,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetCurrentTexturePalette(IDi
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetCurrentTexturePalette");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetCurrentTexturePalette, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2260,6 +2314,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetScissorRect(IDirect3DDevi
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetScissorRect");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetScissorRect, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2317,6 +2373,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetSoftwareVertexProcessing(
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetSoftwareVertexProcessing");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetSoftwareVertexProcessing, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2369,6 +2427,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetNPatchMode(IDirect3DDevic
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetNPatchMode");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetNPatchMode, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2429,6 +2489,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_DrawPrimitive(IDirect3DDevic
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::DrawPrimitive");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_DrawPrimitive, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2476,6 +2538,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_DrawIndexedPrimitive(IDirect
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::DrawIndexedPrimitive");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_DrawIndexedPrimitive, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2610,6 +2674,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetVertexDeclaration(IDirect
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetVertexDeclaration");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetVertexDeclaration, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2660,6 +2726,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetFVF(IDirect3DDevice9Ex *i
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetFVF");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetFVF, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2739,6 +2807,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetVertexShader(IDirect3DDev
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetVertexShader");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetVertexShader, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2797,6 +2867,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetVertexShaderConstantF(IDi
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetVertexShaderConstantF");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetVertexShaderConstantF, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2860,6 +2932,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetVertexShaderConstantI(IDi
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetVertexShaderConstantI");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetVertexShaderConstantI, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2923,6 +2997,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetVertexShaderConstantB(IDi
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetVertexShaderConstantB");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetVertexShaderConstantB, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -2988,6 +3064,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetStreamSource(IDirect3DDev
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetStreamSource");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetStreamSource, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -3046,6 +3124,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetStreamSourceFreq(IDirect3
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetStreamSourceFreq");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetStreamSourceFreq, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -3104,6 +3184,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetIndices(IDirect3DDevice9E
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetIndices");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetIndices, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -3180,6 +3262,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetPixelShader(IDirect3DDevi
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetPixelShader");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetPixelShader, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -3238,6 +3322,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetPixelShaderConstantF(IDir
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetPixelShaderConstantF");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetPixelShaderConstantF, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -3301,6 +3387,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetPixelShaderConstantI(IDir
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetPixelShaderConstantI");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetPixelShaderConstantI, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -3364,6 +3452,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Device9Ex_SetPixelShaderConstantB(IDir
         d3d9shim_log_once("unix call failed: IDirect3DDevice9Ex::SetPixelShaderConstantB");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Device9Ex_SetPixelShaderConstantB, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -3834,6 +3924,10 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_SwapChain9Ex_GetFrontBufferData(IDirec
 
 static HRESULT STDMETHODCALLTYPE d3d9shim_SwapChain9Ex_GetBackBuffer(IDirect3DSwapChain9Ex *iface, UINT backbuffer_idx, D3DBACKBUFFER_TYPE backbuffer_type, struct IDirect3DSurface9 ** backbuffer)
 {
+    /* resolve: the identity cache answers, and on a miss the helper
+     * makes one crossing on this opcode and adopts the handle the
+     * unix entry returns -- nothing else in the system can tell the
+     * shim what a child native handle is. */
     struct d3d9shim_swapchain *_self = (struct d3d9shim_swapchain *)iface;
     struct d3d9shim_object *_child;
     struct d3d9shim_device *_dev = d3d9shim_device_of(&_self->hdr);
@@ -4120,6 +4214,7 @@ static DWORD STDMETHODCALLTYPE d3d9shim_Surface9_SetPriority(IDirect3DSurface9 *
         d3d9shim_log_once("unix call failed: IDirect3DSurface9::SetPriority");
         return 0;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_Surface9_SetPriority, &_p);
     return (DWORD)_p.ret;
 }
 
@@ -4170,6 +4265,7 @@ static void STDMETHODCALLTYPE d3d9shim_Surface9_PreLoad(IDirect3DSurface9 *iface
         d3d9shim_log_once("unix call failed: IDirect3DSurface9::PreLoad");
         return;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_Surface9_PreLoad, &_p);
     return;
 }
 
@@ -4404,6 +4500,7 @@ static DWORD STDMETHODCALLTYPE d3d9shim_Texture9_SetPriority(IDirect3DTexture9 *
         d3d9shim_log_once("unix call failed: IDirect3DTexture9::SetPriority");
         return 0;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_Texture9_SetPriority, &_p);
     return (DWORD)_p.ret;
 }
 
@@ -4454,6 +4551,7 @@ static void STDMETHODCALLTYPE d3d9shim_Texture9_PreLoad(IDirect3DTexture9 *iface
         d3d9shim_log_once("unix call failed: IDirect3DTexture9::PreLoad");
         return;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_Texture9_PreLoad, &_p);
     return;
 }
 
@@ -4496,6 +4594,7 @@ static DWORD STDMETHODCALLTYPE d3d9shim_Texture9_SetLOD(IDirect3DTexture9 *iface
         d3d9shim_log_once("unix call failed: IDirect3DTexture9::SetLOD");
         return 0;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_Texture9_SetLOD, &_p);
     return (DWORD)_p.ret;
 }
 
@@ -4567,6 +4666,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Texture9_SetAutoGenFilterType(IDirect3
         d3d9shim_log_once("unix call failed: IDirect3DTexture9::SetAutoGenFilterType");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Texture9_SetAutoGenFilterType, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -4631,6 +4732,10 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Texture9_GetLevelDesc(IDirect3DTexture
 
 static HRESULT STDMETHODCALLTYPE d3d9shim_Texture9_GetSurfaceLevel(IDirect3DTexture9 *iface, UINT Level, IDirect3DSurface9** ppSurfaceLevel)
 {
+    /* resolve: the identity cache answers, and on a miss the helper
+     * makes one crossing on this opcode and adopts the handle the
+     * unix entry returns -- nothing else in the system can tell the
+     * shim what a child native handle is. */
     struct d3d9shim_texture *_self = (struct d3d9shim_texture *)iface;
     struct d3d9shim_object *_child;
     struct d3d9shim_device *_dev = d3d9shim_device_of(&_self->hdr);
@@ -4719,6 +4824,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Texture9_AddDirtyRect(IDirect3DTexture
         d3d9shim_log_once("unix call failed: IDirect3DTexture9::AddDirtyRect");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Texture9_AddDirtyRect, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -4855,6 +4962,7 @@ static DWORD STDMETHODCALLTYPE d3d9shim_CubeTexture9_SetPriority(IDirect3DCubeTe
         d3d9shim_log_once("unix call failed: IDirect3DCubeTexture9::SetPriority");
         return 0;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_CubeTexture9_SetPriority, &_p);
     return (DWORD)_p.ret;
 }
 
@@ -4905,6 +5013,7 @@ static void STDMETHODCALLTYPE d3d9shim_CubeTexture9_PreLoad(IDirect3DCubeTexture
         d3d9shim_log_once("unix call failed: IDirect3DCubeTexture9::PreLoad");
         return;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_CubeTexture9_PreLoad, &_p);
     return;
 }
 
@@ -4947,6 +5056,7 @@ static DWORD STDMETHODCALLTYPE d3d9shim_CubeTexture9_SetLOD(IDirect3DCubeTexture
         d3d9shim_log_once("unix call failed: IDirect3DCubeTexture9::SetLOD");
         return 0;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_CubeTexture9_SetLOD, &_p);
     return (DWORD)_p.ret;
 }
 
@@ -5018,6 +5128,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_CubeTexture9_SetAutoGenFilterType(IDir
         d3d9shim_log_once("unix call failed: IDirect3DCubeTexture9::SetAutoGenFilterType");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_CubeTexture9_SetAutoGenFilterType, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -5082,6 +5194,10 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_CubeTexture9_GetLevelDesc(IDirect3DCub
 
 static HRESULT STDMETHODCALLTYPE d3d9shim_CubeTexture9_GetCubeMapSurface(IDirect3DCubeTexture9 *iface, D3DCUBEMAP_FACES FaceType, UINT Level, IDirect3DSurface9** ppCubeMapSurface)
 {
+    /* resolve: the identity cache answers, and on a miss the helper
+     * makes one crossing on this opcode and adopts the handle the
+     * unix entry returns -- nothing else in the system can tell the
+     * shim what a child native handle is. */
     struct d3d9shim_cubetexture *_self = (struct d3d9shim_cubetexture *)iface;
     struct d3d9shim_object *_child;
     struct d3d9shim_device *_dev = d3d9shim_device_of(&_self->hdr);
@@ -5174,6 +5290,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_CubeTexture9_AddDirtyRect(IDirect3DCub
         d3d9shim_log_once("unix call failed: IDirect3DCubeTexture9::AddDirtyRect");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_CubeTexture9_AddDirtyRect, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -5310,6 +5428,7 @@ static DWORD STDMETHODCALLTYPE d3d9shim_VolumeTexture9_SetPriority(IDirect3DVolu
         d3d9shim_log_once("unix call failed: IDirect3DVolumeTexture9::SetPriority");
         return 0;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_VolumeTexture9_SetPriority, &_p);
     return (DWORD)_p.ret;
 }
 
@@ -5360,6 +5479,7 @@ static void STDMETHODCALLTYPE d3d9shim_VolumeTexture9_PreLoad(IDirect3DVolumeTex
         d3d9shim_log_once("unix call failed: IDirect3DVolumeTexture9::PreLoad");
         return;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_VolumeTexture9_PreLoad, &_p);
     return;
 }
 
@@ -5402,6 +5522,7 @@ static DWORD STDMETHODCALLTYPE d3d9shim_VolumeTexture9_SetLOD(IDirect3DVolumeTex
         d3d9shim_log_once("unix call failed: IDirect3DVolumeTexture9::SetLOD");
         return 0;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_VolumeTexture9_SetLOD, &_p);
     return (DWORD)_p.ret;
 }
 
@@ -5473,6 +5594,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_VolumeTexture9_SetAutoGenFilterType(ID
         d3d9shim_log_once("unix call failed: IDirect3DVolumeTexture9::SetAutoGenFilterType");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_VolumeTexture9_SetAutoGenFilterType, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -5537,6 +5660,10 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_VolumeTexture9_GetLevelDesc(IDirect3DV
 
 static HRESULT STDMETHODCALLTYPE d3d9shim_VolumeTexture9_GetVolumeLevel(IDirect3DVolumeTexture9 *iface, UINT Level, IDirect3DVolume9** ppVolumeLevel)
 {
+    /* resolve: the identity cache answers, and on a miss the helper
+     * makes one crossing on this opcode and adopts the handle the
+     * unix entry returns -- nothing else in the system can tell the
+     * shim what a child native handle is. */
     struct d3d9shim_volumetexture *_self = (struct d3d9shim_volumetexture *)iface;
     struct d3d9shim_object *_child;
     struct d3d9shim_device *_dev = d3d9shim_device_of(&_self->hdr);
@@ -5625,6 +5752,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_VolumeTexture9_AddDirtyBox(IDirect3DVo
         d3d9shim_log_once("unix call failed: IDirect3DVolumeTexture9::AddDirtyBox");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_VolumeTexture9_AddDirtyBox, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -5939,6 +6068,7 @@ static DWORD STDMETHODCALLTYPE d3d9shim_VertexBuffer9_SetPriority(IDirect3DVerte
         d3d9shim_log_once("unix call failed: IDirect3DVertexBuffer9::SetPriority");
         return 0;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_VertexBuffer9_SetPriority, &_p);
     return (DWORD)_p.ret;
 }
 
@@ -5989,6 +6119,7 @@ static void STDMETHODCALLTYPE d3d9shim_VertexBuffer9_PreLoad(IDirect3DVertexBuff
         d3d9shim_log_once("unix call failed: IDirect3DVertexBuffer9::PreLoad");
         return;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_VertexBuffer9_PreLoad, &_p);
     return;
 }
 
@@ -6005,6 +6136,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_VertexBuffer9_Lock(IDirect3DVertexBuff
     struct d3d9shim_device *_dev = d3d9shim_device_of(&_self->hdr);
     HRESULT _hr;
 
+    if (!ppbData)
+        return D3DERR_INVALIDCALL;
     _hr = d3d9shim_flush(_dev);
     if (FAILED(_hr))
         return _hr;
@@ -6017,8 +6150,7 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_VertexBuffer9_Lock(IDirect3DVertexBuff
         d3d9shim_log_once("unix call failed: IDirect3DVertexBuffer9::Lock");
         return E_FAIL;
     }
-    if (ppbData)
-        *ppbData = (void *)(_p.ppbData ? d3d9shim_obj_from_native(D3D9SHIM_KIND_ANY, _p.ppbData) : NULL);
+    *ppbData = (void *)(ULONG_PTR)_p.ppbData;
     return (HRESULT)_p.ret;
 }
 
@@ -6194,6 +6326,7 @@ static DWORD STDMETHODCALLTYPE d3d9shim_IndexBuffer9_SetPriority(IDirect3DIndexB
         d3d9shim_log_once("unix call failed: IDirect3DIndexBuffer9::SetPriority");
         return 0;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_IndexBuffer9_SetPriority, &_p);
     return (DWORD)_p.ret;
 }
 
@@ -6244,6 +6377,7 @@ static void STDMETHODCALLTYPE d3d9shim_IndexBuffer9_PreLoad(IDirect3DIndexBuffer
         d3d9shim_log_once("unix call failed: IDirect3DIndexBuffer9::PreLoad");
         return;
     }
+    d3d9shim_shadow_apply(_dev, D3D9OP_IndexBuffer9_PreLoad, &_p);
     return;
 }
 
@@ -6260,6 +6394,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_IndexBuffer9_Lock(IDirect3DIndexBuffer
     struct d3d9shim_device *_dev = d3d9shim_device_of(&_self->hdr);
     HRESULT _hr;
 
+    if (!ppbData)
+        return D3DERR_INVALIDCALL;
     _hr = d3d9shim_flush(_dev);
     if (FAILED(_hr))
         return _hr;
@@ -6272,8 +6408,7 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_IndexBuffer9_Lock(IDirect3DIndexBuffer
         d3d9shim_log_once("unix call failed: IDirect3DIndexBuffer9::Lock");
         return E_FAIL;
     }
-    if (ppbData)
-        *ppbData = (void *)(_p.ppbData ? d3d9shim_obj_from_native(D3D9SHIM_KIND_ANY, _p.ppbData) : NULL);
+    *ppbData = (void *)(ULONG_PTR)_p.ppbData;
     return (HRESULT)_p.ret;
 }
 
@@ -6566,6 +6701,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_StateBlock9_Apply(IDirect3DStateBlock9
         d3d9shim_log_once("unix call failed: IDirect3DStateBlock9::Apply");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_StateBlock9_Apply, &_p);
     return (HRESULT)_p.ret;
 }
 
@@ -6659,6 +6796,8 @@ static HRESULT STDMETHODCALLTYPE d3d9shim_Query9_Issue(IDirect3DQuery9 *iface, D
         d3d9shim_log_once("unix call failed: IDirect3DQuery9::Issue");
         return E_FAIL;
     }
+    if (SUCCEEDED((HRESULT)_p.ret))
+        d3d9shim_shadow_apply(_dev, D3D9OP_Query9_Issue, &_p);
     return (HRESULT)_p.ret;
 }
 

@@ -4,6 +4,7 @@
 #include "util_env.hpp"
 #include "util_win32_compat.h"
 #include <atomic>
+#include <chrono>
 
 #define ASYNC_ENCODING 1
 
@@ -218,6 +219,34 @@ void CommandQueue::Retain(uint64_t seq, Allocation* allocaiton) {
     tracker.addStorage(temp_buffer.ptr, block_size);
   }
 };
+
+// MADEIRA: see dxmt_command_queue.hpp for why a non-blocking poller needs
+// this instead of WaitCPUFence.
+bool
+CommandQueue::WaitCPUFenceBounded(uint64_t seq, uint64_t timeout_ns) {
+  if (cpu_coherent.signaledValue() >= seq)
+    return true;
+  // Phase 1: a short load-spin. The watermark is published by the finish
+  // thread with a release store, so a re-check costs one acquire load; if the
+  // command buffer is about to retire this catches it without entering the
+  // scheduler at all.
+  constexpr unsigned kSpinIterations = 64;
+  for (unsigned i = 0; i < kSpinIterations; i++) {
+    if (cpu_coherent.signaledValue() >= seq)
+      return true;
+  }
+  // Phase 2: yield until the deadline. this_thread::yield is SwitchToThread on
+  // the PE build, so the encode / finish threads (both TIME_CRITICAL) get the
+  // core the poller would otherwise have burned. The clock is read once per
+  // yield, because reading it is the expensive part of this loop.
+  const auto deadline = clock::now() + std::chrono::nanoseconds(timeout_ns);
+  do {
+    this_thread::yield();
+    if (cpu_coherent.signaledValue() >= seq)
+      return true;
+  } while (clock::now() < deadline);
+  return cpu_coherent.signaledValue() >= seq;
+}
 
 void
 CommandQueue::MarkDeviceError() {

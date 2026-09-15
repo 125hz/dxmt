@@ -86,7 +86,7 @@ enum d3d9shim_kind {
 #define D3D9_MAX_PS_CONST_I                        16
 #endif
 #ifndef D3D9_MAX_TRANSFORMS
-#define D3D9_MAX_TRANSFORMS                        10
+#define D3D9_MAX_TRANSFORMS                        266
 #endif
 #ifndef D3D9_MAX_VERTEX_STREAMS
 #define D3D9_MAX_VERTEX_STREAMS                    16
@@ -304,17 +304,31 @@ extern void d3d9shim_unlock(struct d3d9shim_device *dev);
 extern void d3d9shim_log_once(const char *what);
 
 /* identity helpers: return a BORROWED reference, or NULL.  The generated
- * body does the AddRef and the store, so these must not. */
+ * body does the AddRef and the store, so these must not.
+ *
+ * A helper named by a `resolve` slot owes one thing more: on a cache MISS it
+ * makes the single synchronous crossing on that slot own opcode --
+ * d3d9shim_native_call(op, &block, sizeof(block)) with block.self set to
+ * the receiver -- and adopts the native handle the unix entry writes into
+ * the block.  That is the ONLY way a child identity can enter the shim,
+ * because a child handle is produced by nothing but the method that hands
+ * the child out. */
 /* container(object, riid)  -- QIs the container to riid */
 /* cube_surface(cube, face, level) */
 /* device_back_buffer(device, swapchain_idx, backbuffer_idx, backbuffer_type) */
+/* device_depth_stencil(device)  -- resolves on a miss */
+/* device_render_target(device, idx)  -- resolves on a miss */
 /* device_stream_source(device, stream_idx, &offset, &stride) */
+/* device_swapchain(device, swapchain_idx)  -- resolves on a miss */
 /* device_texture(device, stage)  -- applies texture_stage_to_slot() */
 /* swapchain_back_buffer(swapchain, backbuffer_idx, backbuffer_type) */
 /* texture_sublevel(texture, level) */
 extern struct d3d9shim_object *d3d9shim_device_back_buffer(struct d3d9shim_device *dev, UINT swapchain_idx, UINT backbuffer_idx, D3DBACKBUFFER_TYPE type);
 extern struct d3d9shim_object *d3d9shim_device_texture(struct d3d9shim_device *dev, DWORD stage);
 extern struct d3d9shim_object *d3d9shim_device_stream_source(struct d3d9shim_device *dev, UINT stream_idx, UINT *offset, UINT *stride);
+extern struct d3d9shim_object *d3d9shim_device_swapchain(struct d3d9shim_device *dev, UINT swapchain_idx);
+extern struct d3d9shim_object *d3d9shim_device_render_target(struct d3d9shim_device *dev, DWORD idx);
+extern struct d3d9shim_object *d3d9shim_device_depth_stencil(struct d3d9shim_device *dev);
 extern struct d3d9shim_object *d3d9shim_swapchain_back_buffer(struct d3d9shim_swapchain *sc, UINT backbuffer_idx, D3DBACKBUFFER_TYPE type);
 extern struct d3d9shim_object *d3d9shim_texture_sublevel(struct d3d9shim_object *tex, UINT level);
 extern struct d3d9shim_object *d3d9shim_cube_surface(struct d3d9shim_cubetexture *tex, D3DCUBEMAP_FACES face, UINT level);

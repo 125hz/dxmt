@@ -9,6 +9,9 @@
 #include "util_env.hpp"
 #include "util_string.hpp"
 #include "wsi_monitor.hpp"
+#ifdef DXMT_MADEIRA
+#include "wsi_window.hpp"
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -989,7 +992,23 @@ CanonicalisePresentParams(D3DPRESENT_PARAMETERS &p, HWND hwndFallback, UINT adap
     p.AutoDepthStencilFormat = D3DFMT_D24S8;
 
   if (p.Windowed && (p.BackBufferWidth == 0 || p.BackBufferHeight == 0)) {
-#ifdef _WIN32
+#if defined(DXMT_MADEIRA)
+    /* MADEIRA (WOW64_DESIGN.md section 8.2(d)): no user32 here, and the
+     * upstream !_WIN32 arm below leaves the extent at 0, which is not a
+     * swapchain any caller can use. wsi::getWindowSize answers from the
+     * per-HWND client-size cache the shim fills at CreateDevice / Reset /
+     * Present (src/util/wsi_window_madeira.cpp), which is the same number
+     * GetClientRect would have produced. */
+    {
+      HWND deriveFrom = p.hDeviceWindow ? p.hDeviceWindow : hwndFallback;
+      uint32_t width = 0, height = 0;
+      wsi::getWindowSize(deriveFrom, &width, &height);
+      if (p.BackBufferWidth == 0)
+        p.BackBufferWidth = width > 0 ? width : 8;
+      if (p.BackBufferHeight == 0)
+        p.BackBufferHeight = height > 0 ? height : 8;
+    }
+#elif defined(_WIN32)
     HWND deriveFrom = p.hDeviceWindow ? p.hDeviceWindow : hwndFallback;
     if (deriveFrom) {
       RECT rc{};

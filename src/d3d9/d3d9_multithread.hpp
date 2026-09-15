@@ -15,6 +15,15 @@
 
 #include <windows.h>
 
+/* MADEIRA (WOW64_DESIGN.md section 8.2(d)): natively there is no user32 or
+ * kernel32 under this file -- GetCurrentThreadId, SwitchToThread and
+ * YieldProcessor come from util_madeira_compat.h, which implements the first
+ * two for real (a stub returning 0 would make the spinlock below believe
+ * every thread is the owner).  See research/dxmt/LICENSE-MADEIRA.md. */
+#ifdef DXMT_MADEIRA
+#include "util_madeira_compat.h"
+#endif
+
 namespace dxmt {
 
 /* A spinlock the same thread can acquire multiple times, keyed by the

@@ -9,6 +9,7 @@
  */
 
 #include "d3d9_mem.hpp"
+#include "d3d9_guest_alloc.hpp"
 #include "log/log.hpp"
 #include "util_math.hpp"
 #include "util_string.hpp"
@@ -340,9 +341,16 @@ D3D9MemoryAllocator::AllocatedMemory() const {
   return m_allocatedMemory.load();
 }
 
+/* MADEIRA (WOW64_DESIGN.md section 8.2(c)): these are the MANAGED /
+ * SYSTEMMEM mirrors, which LockRect hands straight to the application, so
+ * they must come out of the guest arena rather than the host heap.  Off
+ * Madeira guest_calloc is calloc with an alignment argument, so the call site
+ * keeps its exact meaning.  Note that the reclaiming chunk allocator above is
+ * gated on _WIN32 && !_WIN64 (d3d9_mem.hpp:29-31) and is therefore OFF here:
+ * section 8.2(c) accepts that for phase 1 and section 8.9-6 censuses it. */
 D3D9Memory::D3D9Memory(D3D9MemoryAllocator *pAllocator, size_t Size) :
     m_allocator(pAllocator),
-    m_ptr(std::calloc(1, Size)),
+    m_ptr(guest_calloc(Size, DXMT_PAGE_SIZE)),
     m_size(Size) {}
 
 D3D9Memory::D3D9Memory(D3D9Memory &&other) :
@@ -369,7 +377,7 @@ D3D9Memory::Free() {
   if (m_ptr == nullptr)
     return;
 
-  std::free(m_ptr);
+  guest_free(m_ptr);
   m_ptr = nullptr;
   m_allocator->NotifyFreed(m_size);
 }

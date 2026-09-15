@@ -50,8 +50,8 @@
  * rather than pretending otherwise (WOW64_DESIGN.md 7.4 rule 4). */
 
 #define D3D9SHIM_API_VERSION 1u
-#define D3D9SHIM_API_HASH 0x61f38aa775a4c16bull
-#define D3D9SHIM_OP_COUNT 321u
+#define D3D9SHIM_API_HASH 0xf49329770a2bc97bull
+#define D3D9SHIM_OP_COUNT 324u
 
 enum d3d9shim_op {
     D3D9OP_init                                              =   0,
@@ -375,7 +375,16 @@ enum d3d9shim_op {
     D3D9OP_Query9_GetDataSize                                = 318,
     D3D9OP_Query9_Issue                                      = 319,
     D3D9OP_Query9_GetData                                    = 320,
-    D3D9OP_COUNT_ = 321
+    /* The TRANSPORT slots: not vtable methods, so no
+     * interface in the description produces them.  They
+     * come after the whole generated range, which is what
+     * fixes their numbers at 321.. and leaves every
+     * generated slot -- the slot number IS the ABI --
+     * exactly where it was. */
+    D3D9SHIM_OP_arena_register                               = 321,
+    D3D9SHIM_OP_window_state                                 = 322,
+    D3D9SHIM_OP_create_interface                             = 323,
+    D3D9OP_COUNT_ = 324
 };
 
 /* _d3d9_init status codes. */
@@ -1088,7 +1097,7 @@ _Static_assert(offsetof(struct d3d9_Device9Ex_CreateAdditionalSwapChain_params, 
 _Static_assert(offsetof(struct d3d9_Device9Ex_CreateAdditionalSwapChain_params, parameters) == 16, "d3d9_Device9Ex_CreateAdditionalSwapChain_params.parameters");
 _Static_assert(offsetof(struct d3d9_Device9Ex_CreateAdditionalSwapChain_params, ret) == 20, "d3d9_Device9Ex_CreateAdditionalSwapChain_params.ret");
 
-/* IDirect3DDevice9Ex::GetSwapChain -- slot 14, local */
+/* IDirect3DDevice9Ex::GetSwapChain -- slot 14, resolve */
 struct d3d9_Device9Ex_GetSwapChain_params {
     uint64_t   self;                          /* receiving object's native handle */
     uint64_t   swapchain;                     /* iface_out:IDirect3DSwapChain9 */
@@ -1139,7 +1148,7 @@ _Static_assert(offsetof(struct d3d9_Device9Ex_Present_params, dst_rect) == 20, "
 _Static_assert(offsetof(struct d3d9_Device9Ex_Present_params, dirty_region) == 24, "d3d9_Device9Ex_Present_params.dirty_region");
 _Static_assert(offsetof(struct d3d9_Device9Ex_Present_params, ret) == 28, "d3d9_Device9Ex_Present_params.ret");
 
-/* IDirect3DDevice9Ex::GetBackBuffer -- slot 18, local */
+/* IDirect3DDevice9Ex::GetBackBuffer -- slot 18, resolve */
 struct d3d9_Device9Ex_GetBackBuffer_params {
     uint64_t   self;                          /* receiving object's native handle */
     uint64_t   backbuffer;                    /* iface_out:IDirect3DSurface9 */
@@ -1503,7 +1512,7 @@ _Static_assert(offsetof(struct d3d9_Device9Ex_SetRenderTarget_params, surface) =
 _Static_assert(offsetof(struct d3d9_Device9Ex_SetRenderTarget_params, idx) == 16, "d3d9_Device9Ex_SetRenderTarget_params.idx");
 _Static_assert(offsetof(struct d3d9_Device9Ex_SetRenderTarget_params, ret) == 20, "d3d9_Device9Ex_SetRenderTarget_params.ret");
 
-/* IDirect3DDevice9Ex::GetRenderTarget -- slot 38, local */
+/* IDirect3DDevice9Ex::GetRenderTarget -- slot 38, resolve */
 struct d3d9_Device9Ex_GetRenderTarget_params {
     uint64_t   self;                          /* receiving object's native handle */
     uint64_t   surface;                       /* iface_out:IDirect3DSurface9 */
@@ -1528,7 +1537,7 @@ _Static_assert(offsetof(struct d3d9_Device9Ex_SetDepthStencilSurface_params, sel
 _Static_assert(offsetof(struct d3d9_Device9Ex_SetDepthStencilSurface_params, depth_stencil) == 8, "d3d9_Device9Ex_SetDepthStencilSurface_params.depth_stencil");
 _Static_assert(offsetof(struct d3d9_Device9Ex_SetDepthStencilSurface_params, ret) == 16, "d3d9_Device9Ex_SetDepthStencilSurface_params.ret");
 
-/* IDirect3DDevice9Ex::GetDepthStencilSurface -- slot 40, local */
+/* IDirect3DDevice9Ex::GetDepthStencilSurface -- slot 40, resolve */
 struct d3d9_Device9Ex_GetDepthStencilSurface_params {
     uint64_t   self;                          /* receiving object's native handle */
     uint64_t   depth_stencil;                 /* iface_out:IDirect3DSurface9 */
@@ -2923,7 +2932,7 @@ _Static_assert(offsetof(struct d3d9_SwapChain9Ex_GetFrontBufferData_params, self
 _Static_assert(offsetof(struct d3d9_SwapChain9Ex_GetFrontBufferData_params, dst_surface) == 8, "d3d9_SwapChain9Ex_GetFrontBufferData_params.dst_surface");
 _Static_assert(offsetof(struct d3d9_SwapChain9Ex_GetFrontBufferData_params, ret) == 16, "d3d9_SwapChain9Ex_GetFrontBufferData_params.ret");
 
-/* IDirect3DSwapChain9Ex::GetBackBuffer -- slot 5, local */
+/* IDirect3DSwapChain9Ex::GetBackBuffer -- slot 5, resolve */
 struct d3d9_SwapChain9Ex_GetBackBuffer_params {
     uint64_t   self;                          /* receiving object's native handle */
     uint64_t   backbuffer;                    /* iface_out:IDirect3DSurface9 */
@@ -3420,7 +3429,7 @@ _Static_assert(offsetof(struct d3d9_Texture9_GetLevelDesc_params, Level) == 8, "
 _Static_assert(offsetof(struct d3d9_Texture9_GetLevelDesc_params, pDesc) == 12, "d3d9_Texture9_GetLevelDesc_params.pDesc");
 _Static_assert(offsetof(struct d3d9_Texture9_GetLevelDesc_params, ret) == 16, "d3d9_Texture9_GetLevelDesc_params.ret");
 
-/* IDirect3DTexture9::GetSurfaceLevel -- slot 18, local */
+/* IDirect3DTexture9::GetSurfaceLevel -- slot 18, resolve */
 struct d3d9_Texture9_GetSurfaceLevel_params {
     uint64_t   self;                          /* receiving object's native handle */
     uint64_t   ppSurfaceLevel;                /* iface_out:IDirect3DSurface9 */
@@ -3673,7 +3682,7 @@ _Static_assert(offsetof(struct d3d9_CubeTexture9_GetLevelDesc_params, Level) == 
 _Static_assert(offsetof(struct d3d9_CubeTexture9_GetLevelDesc_params, pDesc) == 12, "d3d9_CubeTexture9_GetLevelDesc_params.pDesc");
 _Static_assert(offsetof(struct d3d9_CubeTexture9_GetLevelDesc_params, ret) == 16, "d3d9_CubeTexture9_GetLevelDesc_params.ret");
 
-/* IDirect3DCubeTexture9::GetCubeMapSurface -- slot 18, local */
+/* IDirect3DCubeTexture9::GetCubeMapSurface -- slot 18, resolve */
 struct d3d9_CubeTexture9_GetCubeMapSurface_params {
     uint64_t   self;                          /* receiving object's native handle */
     uint64_t   ppCubeMapSurface;              /* iface_out:IDirect3DSurface9 */
@@ -3936,7 +3945,7 @@ _Static_assert(offsetof(struct d3d9_VolumeTexture9_GetLevelDesc_params, Level) =
 _Static_assert(offsetof(struct d3d9_VolumeTexture9_GetLevelDesc_params, pDesc) == 12, "d3d9_VolumeTexture9_GetLevelDesc_params.pDesc");
 _Static_assert(offsetof(struct d3d9_VolumeTexture9_GetLevelDesc_params, ret) == 16, "d3d9_VolumeTexture9_GetLevelDesc_params.ret");
 
-/* IDirect3DVolumeTexture9::GetVolumeLevel -- slot 18, local */
+/* IDirect3DVolumeTexture9::GetVolumeLevel -- slot 18, resolve */
 struct d3d9_VolumeTexture9_GetVolumeLevel_params {
     uint64_t   self;                          /* receiving object's native handle */
     uint64_t   ppVolumeLevel;                 /* iface_out:IDirect3DVolume9 */
@@ -4257,19 +4266,20 @@ _Static_assert(offsetof(struct d3d9_VertexBuffer9_GetType_params, ret) == 8, "d3
 /* IDirect3DVertexBuffer9::Lock -- slot 11, sync, flushes */
 struct d3d9_VertexBuffer9_Lock_params {
     uint64_t   self;                          /* receiving object's native handle */
-    uint64_t   ppbData;                       /* iface_out:IUnknown */
     uint32_t   OffsetToLock;                  /* u32 */
     uint32_t   SizeToLock;                    /* u32 */
+    uint32_t   ppbData;                       /* guest_ptr_out */
     uint32_t   Flags;                         /* u32 */
     int32_t    ret;                           /* result */
+    uint32_t   _pad0;
 };
 _Static_assert(sizeof(struct d3d9_VertexBuffer9_Lock_params) == 32, "d3d9_VertexBuffer9_Lock_params");
 _Static_assert(offsetof(struct d3d9_VertexBuffer9_Lock_params, self) == 0, "d3d9_VertexBuffer9_Lock_params.self");
-_Static_assert(offsetof(struct d3d9_VertexBuffer9_Lock_params, ppbData) == 8, "d3d9_VertexBuffer9_Lock_params.ppbData");
-_Static_assert(offsetof(struct d3d9_VertexBuffer9_Lock_params, OffsetToLock) == 16, "d3d9_VertexBuffer9_Lock_params.OffsetToLock");
-_Static_assert(offsetof(struct d3d9_VertexBuffer9_Lock_params, SizeToLock) == 20, "d3d9_VertexBuffer9_Lock_params.SizeToLock");
-_Static_assert(offsetof(struct d3d9_VertexBuffer9_Lock_params, Flags) == 24, "d3d9_VertexBuffer9_Lock_params.Flags");
-_Static_assert(offsetof(struct d3d9_VertexBuffer9_Lock_params, ret) == 28, "d3d9_VertexBuffer9_Lock_params.ret");
+_Static_assert(offsetof(struct d3d9_VertexBuffer9_Lock_params, OffsetToLock) == 8, "d3d9_VertexBuffer9_Lock_params.OffsetToLock");
+_Static_assert(offsetof(struct d3d9_VertexBuffer9_Lock_params, SizeToLock) == 12, "d3d9_VertexBuffer9_Lock_params.SizeToLock");
+_Static_assert(offsetof(struct d3d9_VertexBuffer9_Lock_params, ppbData) == 16, "d3d9_VertexBuffer9_Lock_params.ppbData");
+_Static_assert(offsetof(struct d3d9_VertexBuffer9_Lock_params, Flags) == 20, "d3d9_VertexBuffer9_Lock_params.Flags");
+_Static_assert(offsetof(struct d3d9_VertexBuffer9_Lock_params, ret) == 24, "d3d9_VertexBuffer9_Lock_params.ret");
 
 /* IDirect3DVertexBuffer9::Unlock -- slot 12, sync, flushes */
 struct d3d9_VertexBuffer9_Unlock_params {
@@ -4422,19 +4432,20 @@ _Static_assert(offsetof(struct d3d9_IndexBuffer9_GetType_params, ret) == 8, "d3d
 /* IDirect3DIndexBuffer9::Lock -- slot 11, sync, flushes */
 struct d3d9_IndexBuffer9_Lock_params {
     uint64_t   self;                          /* receiving object's native handle */
-    uint64_t   ppbData;                       /* iface_out:IUnknown */
     uint32_t   OffsetToLock;                  /* u32 */
     uint32_t   SizeToLock;                    /* u32 */
+    uint32_t   ppbData;                       /* guest_ptr_out */
     uint32_t   Flags;                         /* u32 */
     int32_t    ret;                           /* result */
+    uint32_t   _pad0;
 };
 _Static_assert(sizeof(struct d3d9_IndexBuffer9_Lock_params) == 32, "d3d9_IndexBuffer9_Lock_params");
 _Static_assert(offsetof(struct d3d9_IndexBuffer9_Lock_params, self) == 0, "d3d9_IndexBuffer9_Lock_params.self");
-_Static_assert(offsetof(struct d3d9_IndexBuffer9_Lock_params, ppbData) == 8, "d3d9_IndexBuffer9_Lock_params.ppbData");
-_Static_assert(offsetof(struct d3d9_IndexBuffer9_Lock_params, OffsetToLock) == 16, "d3d9_IndexBuffer9_Lock_params.OffsetToLock");
-_Static_assert(offsetof(struct d3d9_IndexBuffer9_Lock_params, SizeToLock) == 20, "d3d9_IndexBuffer9_Lock_params.SizeToLock");
-_Static_assert(offsetof(struct d3d9_IndexBuffer9_Lock_params, Flags) == 24, "d3d9_IndexBuffer9_Lock_params.Flags");
-_Static_assert(offsetof(struct d3d9_IndexBuffer9_Lock_params, ret) == 28, "d3d9_IndexBuffer9_Lock_params.ret");
+_Static_assert(offsetof(struct d3d9_IndexBuffer9_Lock_params, OffsetToLock) == 8, "d3d9_IndexBuffer9_Lock_params.OffsetToLock");
+_Static_assert(offsetof(struct d3d9_IndexBuffer9_Lock_params, SizeToLock) == 12, "d3d9_IndexBuffer9_Lock_params.SizeToLock");
+_Static_assert(offsetof(struct d3d9_IndexBuffer9_Lock_params, ppbData) == 16, "d3d9_IndexBuffer9_Lock_params.ppbData");
+_Static_assert(offsetof(struct d3d9_IndexBuffer9_Lock_params, Flags) == 20, "d3d9_IndexBuffer9_Lock_params.Flags");
+_Static_assert(offsetof(struct d3d9_IndexBuffer9_Lock_params, ret) == 24, "d3d9_IndexBuffer9_Lock_params.ret");
 
 /* IDirect3DIndexBuffer9::Unlock -- slot 12, sync, flushes */
 struct d3d9_IndexBuffer9_Unlock_params {
@@ -4789,5 +4800,64 @@ _Static_assert(offsetof(struct d3d9_Query9_GetData_params, pData) == 8, "d3d9_Qu
 _Static_assert(offsetof(struct d3d9_Query9_GetData_params, dwSize) == 12, "d3d9_Query9_GetData_params.dwSize");
 _Static_assert(offsetof(struct d3d9_Query9_GetData_params, dwGetDataFlags) == 16, "d3d9_Query9_GetData_params.dwGetDataFlags");
 _Static_assert(offsetof(struct d3d9_Query9_GetData_params, ret) == 20, "d3d9_Query9_GetData_params.ret");
+
+/* ------------------------------------------------------------------------
+ * Transport blocks.  Same fixed-width rule as a vtable block -- uint64_t
+ * fields first, then the 4-byte ones, then the result, then padding to a
+ * multiple of 8 -- so one definition is right on i386 and on LP64 here too.
+ *
+ * These three were hand-written in d3d9shim_object.h and sat PAST the end of
+ * a table sized D3D9SHIM_OP_COUNT, so neither dispatch table had an entry for
+ * them and every call on one failed the bind.  d3d9_api.py now describes
+ * them, which is what gets them entries; the layouts below are the ones the
+ * hand-written header _Static_asserted, unchanged.
+ * ------------------------------------------------------------------------ */
+
+#define D3D9SHIM_WINDOW_VISIBLE        0x1u
+#define D3D9SHIM_WINDOW_FOREGROUND     0x2u
+#define D3D9SHIM_WINDOW_FULLSCREEN     0x4u
+#define D3D9SHIM_WINDOW_GONE           0x8u
+
+/* slot 321 -- hands the native sub-allocator one VirtualAlloc'd guest arena chunk (WOW64_DESIGN.md 8.2(c)).  guest_base is a GUEST address the window chokepoint has already placed inside [B, B+4G); the native side owns the sub-allocation, so the entry does NOT convert it. */
+struct d3d9_arena_register_params {
+    uint32_t   guest_base;                    /* scalar:uint32_t */
+    uint32_t   size;                          /* scalar:uint64_t */
+    int32_t    ret;                           /* OUT: result */
+    uint32_t   _pad0;
+};
+_Static_assert(sizeof(struct d3d9_arena_register_params) == 16, "d3d9_arena_register_params");
+_Static_assert(offsetof(struct d3d9_arena_register_params, guest_base) == 0, "d3d9_arena_register_params.guest_base");
+_Static_assert(offsetof(struct d3d9_arena_register_params, size) == 4, "d3d9_arena_register_params.size");
+_Static_assert(offsetof(struct d3d9_arena_register_params, ret) == 8, "d3d9_arena_register_params.ret");
+
+/* slot 322 -- the per-HWND client size, visibility and foreground state wsi_window_madeira.cpp answers from (8.2(d)).  Pushed at CreateDevice, Reset, Present and from the focus window proc. */
+struct d3d9_window_state_params {
+    uint32_t   hwnd;                          /* hwnd32 */
+    uint32_t   width;                         /* scalar:uint32_t */
+    uint32_t   height;                        /* scalar:uint32_t */
+    uint32_t   flags;                         /* scalar:uint32_t */
+    int32_t    ret;                           /* OUT: result */
+    uint32_t   _pad0;
+};
+_Static_assert(sizeof(struct d3d9_window_state_params) == 24, "d3d9_window_state_params");
+_Static_assert(offsetof(struct d3d9_window_state_params, hwnd) == 0, "d3d9_window_state_params.hwnd");
+_Static_assert(offsetof(struct d3d9_window_state_params, width) == 4, "d3d9_window_state_params.width");
+_Static_assert(offsetof(struct d3d9_window_state_params, height) == 8, "d3d9_window_state_params.height");
+_Static_assert(offsetof(struct d3d9_window_state_params, flags) == 12, "d3d9_window_state_params.flags");
+_Static_assert(offsetof(struct d3d9_window_state_params, ret) == 16, "d3d9_window_state_params.ret");
+
+/* slot 323 -- creates the native IDirect3D9(Ex) -- the handle every other call's `self` descends from.  Direct3DCreate9(Ex) is a DLL export rather than a vtable slot, so no method in INTERFACES produces it and there is no iface_out anywhere for it. */
+struct d3d9_create_interface_params {
+    uint64_t   iface;                         /* handle_out */
+    uint32_t   sdk_version;                   /* scalar:uint32_t */
+    uint32_t   is_ex;                         /* scalar:uint32_t */
+    int32_t    ret;                           /* OUT: result */
+    uint32_t   _pad0;
+};
+_Static_assert(sizeof(struct d3d9_create_interface_params) == 24, "d3d9_create_interface_params");
+_Static_assert(offsetof(struct d3d9_create_interface_params, iface) == 0, "d3d9_create_interface_params.iface");
+_Static_assert(offsetof(struct d3d9_create_interface_params, sdk_version) == 8, "d3d9_create_interface_params.sdk_version");
+_Static_assert(offsetof(struct d3d9_create_interface_params, is_ex) == 12, "d3d9_create_interface_params.is_ex");
+_Static_assert(offsetof(struct d3d9_create_interface_params, ret) == 16, "d3d9_create_interface_params.ret");
 
 #endif /* __MADEIRA_D3D9SHIM_OPS_H */

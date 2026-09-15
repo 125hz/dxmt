@@ -64,6 +64,24 @@ std::atomic<uint32_t> g_hist_lock[kHistBuckets];
 std::atomic<uint32_t> g_presents;
 std::atomic<bool> g_reporting;
 
+/* MADEIRA [d3d9-query]: see d3d9_census.hpp. */
+std::atomic<uint32_t> g_q_issued;
+std::atomic<uint32_t> g_q_flushed;
+std::atomic<uint32_t> g_q_polls;
+std::atomic<uint32_t> g_q_polls_complete;
+std::atomic<uint32_t> g_q_polls_parked;
+std::atomic<uint32_t> g_q_completions;
+std::atomic<uint64_t> g_q_latency_ns;
+std::atomic<uint32_t> g_q_latency_max_us;
+
+uint32_t g_prev_q_issued;
+uint32_t g_prev_q_flushed;
+uint32_t g_prev_q_polls;
+uint32_t g_prev_q_polls_complete;
+uint32_t g_prev_q_polls_parked;
+uint32_t g_prev_q_completions;
+uint64_t g_prev_q_latency_ns;
+
 /* Snapshots taken by the previous summary. Only ever touched under
  * g_reporting, so plain types are enough. */
 uint32_t g_prev_calls[D3D9_CENSUS_COUNT];
@@ -98,6 +116,59 @@ void line(const char *fmt, ...) {
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
   Logger::info(std::string("[d3d9-census] ") + buf);
+}
+
+/* MADEIRA: own tag so the query instrument can be grepped out of a device log
+ * without the 20-line census block around it. */
+void qline(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void qline(const char *fmt, ...) {
+  char buf[512];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  Logger::info(std::string("[d3d9-query] ") + buf);
+}
+
+/* MADEIRA: one window's worth of the query-poll instrument. Same windowing
+ * rule as the census itself -- unsigned wrap arithmetic against the previous
+ * summary's snapshot, so a wrapped counter still yields the right delta. */
+void reportQueries(uint32_t frames) {
+  uint32_t issued = g_q_issued.load(std::memory_order_relaxed);
+  uint32_t flushed = g_q_flushed.load(std::memory_order_relaxed);
+  uint32_t polls = g_q_polls.load(std::memory_order_relaxed);
+  uint32_t hits = g_q_polls_complete.load(std::memory_order_relaxed);
+  uint32_t parked = g_q_polls_parked.load(std::memory_order_relaxed);
+  uint32_t done = g_q_completions.load(std::memory_order_relaxed);
+  uint64_t latency = g_q_latency_ns.load(std::memory_order_relaxed);
+  uint32_t worst = g_q_latency_max_us.load(std::memory_order_relaxed);
+
+  uint32_t w_issued = issued - g_prev_q_issued;
+  uint32_t w_flushed = flushed - g_prev_q_flushed;
+  uint32_t w_polls = polls - g_prev_q_polls;
+  uint32_t w_hits = hits - g_prev_q_polls_complete;
+  uint32_t w_parked = parked - g_prev_q_polls_parked;
+  uint32_t w_done = done - g_prev_q_completions;
+  uint64_t w_latency = latency - g_prev_q_latency_ns;
+
+  if (!w_issued && !w_polls) {
+    qline("no query traffic this window");
+  } else {
+    qline("issued=%u (%.1f/f) flush_submits=%u polls=%u (%.1f/f) hit=%u parked=%u (%.1f%% of polls)", w_issued,
+          (double)w_issued / (double)frames, w_flushed, w_polls, (double)w_polls / (double)frames, w_hits, w_parked,
+          w_polls ? 100.0 * (double)w_parked / (double)w_polls : 0.0);
+    qline("completions=%u polls_per_completion=%.1f issue_to_complete_avg=%.1fus worst_ever=%uus", w_done,
+          w_done ? (double)w_polls / (double)w_done : 0.0, w_done ? (double)w_latency / (double)w_done / 1000.0 : 0.0,
+          worst);
+  }
+
+  g_prev_q_issued = issued;
+  g_prev_q_flushed = flushed;
+  g_prev_q_polls = polls;
+  g_prev_q_polls_complete = hits;
+  g_prev_q_polls_parked = parked;
+  g_prev_q_completions = done;
+  g_prev_q_latency_ns = latency;
 }
 
 void report() {
@@ -168,6 +239,8 @@ void report() {
     line("buffer lock bytes:%s", buf);
   }
 
+  reportQueries(frames);
+
   line("---- end summary %u ----", g_summary_seq);
 
   memcpy(g_prev_calls, cur, sizeof(g_prev_calls));
@@ -227,6 +300,34 @@ void shaderConstF(unsigned n) {
       break;
     }
   g_hist_const[b].fetch_add(1, std::memory_order_relaxed);
+}
+
+/* MADEIRA [d3d9-query] counters. Unconditional on g_on like the histograms:
+ * the callers already test it, and these are not on a 317-slot hot path. */
+void queryIssued() {
+  g_q_issued.fetch_add(1, std::memory_order_relaxed);
+}
+
+void queryFlushed() {
+  g_q_flushed.fetch_add(1, std::memory_order_relaxed);
+}
+
+void queryPoll(bool complete, bool parked) {
+  g_q_polls.fetch_add(1, std::memory_order_relaxed);
+  if (complete)
+    g_q_polls_complete.fetch_add(1, std::memory_order_relaxed);
+  if (parked)
+    g_q_polls_parked.fetch_add(1, std::memory_order_relaxed);
+}
+
+void queryCompleted(uint64_t issue_to_complete_ns, uint32_t polls) {
+  (void)polls;
+  g_q_completions.fetch_add(1, std::memory_order_relaxed);
+  g_q_latency_ns.fetch_add(issue_to_complete_ns, std::memory_order_relaxed);
+  uint32_t us = (uint32_t)(issue_to_complete_ns / 1000u);
+  uint32_t prev = g_q_latency_max_us.load(std::memory_order_relaxed);
+  while (us > prev && !g_q_latency_max_us.compare_exchange_weak(prev, us, std::memory_order_relaxed))
+    ;
 }
 
 void lockBytes(unsigned n) {

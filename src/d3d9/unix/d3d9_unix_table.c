@@ -361,6 +361,9 @@ extern NTSTATUS _d3d9_Query9_GetType(void *args);
 extern NTSTATUS _d3d9_Query9_GetDataSize(void *args);
 extern NTSTATUS _d3d9_Query9_Issue(void *args);
 extern NTSTATUS _d3d9_Query9_GetData(void *args);
+extern NTSTATUS _d3d9_arena_register(void *args);
+extern NTSTATUS _d3d9_window_state(void *args);
+extern NTSTATUS _d3d9_create_interface(void *args);
 
 const void *const dxmt_d3d9_unix_call_funcs[D3D9SHIM_OP_COUNT] = {
     /*   0 */ (const void *)_d3d9_init,
@@ -684,6 +687,9 @@ const void *const dxmt_d3d9_unix_call_funcs[D3D9SHIM_OP_COUNT] = {
     /* 318 */ (const void *)_d3d9_Query9_GetDataSize,
     /* 319 */ (const void *)_d3d9_Query9_Issue,
     /* 320 */ (const void *)_d3d9_Query9_GetData,
+    /* 321 */ (const void *)_d3d9_arena_register,
+    /* 322 */ (const void *)_d3d9_window_state,
+    /* 323 */ (const void *)_d3d9_create_interface,
 };
 
 const void *const dxmt_d3d9_unix_call_wow64_funcs[D3D9SHIM_OP_COUNT] = {
@@ -1008,6 +1014,9 @@ const void *const dxmt_d3d9_unix_call_wow64_funcs[D3D9SHIM_OP_COUNT] = {
     /* 318 */ (const void *)_d3d9_Query9_GetDataSize,
     /* 319 */ (const void *)_d3d9_Query9_Issue,
     /* 320 */ (const void *)_d3d9_Query9_GetData,
+    /* 321 */ (const void *)_d3d9_arena_register,
+    /* 322 */ (const void *)_d3d9_window_state,
+    /* 323 */ (const void *)_d3d9_create_interface,
 };
 
 _Static_assert(sizeof(dxmt_d3d9_unix_call_funcs)
