@@ -2218,11 +2218,15 @@ uint64_t madeira_get_present_count(void) {
  *       release their drawable unpresented so the pool never blocks.
  *       Measures raw stack throughput independent of the panel; the
  *       present COUNTER counts every game present (incl. skipped) so
- *       the FPS overlay reads true game rate. */
+ *       the FPS overlay reads true game rate.
+ *   3 = LOCKED30 (2026-09-15, device feedback): same mechanism as mode 1,
+ *       afterMinimumDuration(1/30) — exact 30. A real cap on THIS present
+ *       path, not merely a CADisplayLink hint: the drawable is genuinely
+ *       held until the next 1/30s boundary, same as mode 1 is at 1/60s. */
 static volatile int g_madeira_vsync_mode = 1;
 void madeira_set_vsync_locked(int mode) {
   g_madeira_vsync_mode = mode;
-  dprintf(STDERR_FILENO, "[iOS DXMT] vsync_mode=%d (1=locked60 0=max 2=raw)\n", mode);
+  dprintf(STDERR_FILENO, "[iOS DXMT] vsync_mode=%d (1=locked60 0=max 2=raw 3=locked30)\n", mode);
 }
 int madeira_get_vsync_locked(void) { return g_madeira_vsync_mode; }
 
@@ -2241,6 +2245,14 @@ _MTLCommandBuffer_presentDrawable(void *obj) {
     madeira_log_present_cadence("presentDrawable60", 0.0);
     [(id<MTLCommandBuffer>)params->handle presentDrawable:(id<MTLDrawable>)params->arg
                                      afterMinimumDuration:(1.0 / 60.0)];
+  } else if (mode == 3) {
+    /* Device feedback (2026-09-15): a real 30fps cap, exact same mechanism
+     * as the mode-1 60fps cap just above -- afterMinimumDuration holds the
+     * drawable on THIS present path, so this is a genuine cap independent
+     * of whatever CADisplayLink/ProMotionIntent is doing on the Swift side. */
+    madeira_log_present_cadence("presentDrawable30", 0.0);
+    [(id<MTLCommandBuffer>)params->handle presentDrawable:(id<MTLDrawable>)params->arg
+                                     afterMinimumDuration:(1.0 / 30.0)];
   } else if (mode == 2) {
     /* Frame-skip gating lives in _MetalLayer_nextDrawable (nil return);
      * only real, ≥18ms-spaced frames reach here. */
