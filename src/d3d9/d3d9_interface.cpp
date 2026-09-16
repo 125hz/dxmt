@@ -77,9 +77,10 @@ adapterModes(UINT adapter) {
   if (!mon)
     return modes;
 
-  // The platform list repeats each extent once per colour depth. D3D9 advertises
-  // X8R8G8B8 only, so without this the same resolution surfaces several times in
-  // an app's resolution menu.
+  // The platform list repeats each extent once per colour depth. D3D9 enumerates
+  // one entry per extent per display FORMAT (see isEnumerableDisplayFormat), so
+  // without this the same resolution surfaces several times in an app's
+  // resolution menu.
   wsi::WsiMode wm{};
   for (UINT i = 0; wsi::getDisplayMode(mon, i, &wm); ++i) {
     const UINT hz = refreshRateHzOr60(wm);
@@ -94,6 +95,37 @@ adapterModes(UINT adapter) {
     return std::tie(a.width, a.height) < std::tie(b.width, b.height);
   });
   return modes;
+}
+
+// The display formats EnumAdapterModes reports modes for.
+//
+// Was X8R8G8B8 alone, on the reasoning that Apple panels have no 16-bit modes.
+// That is true of a real panel and false of this one: the display behind
+// EnumAdapterModes here is the win32u virtual monitor, whose
+// ChangeDisplaySettings honours DM_PELSWIDTH / DM_PELSHEIGHT and ignores
+// dmBitsPerPel entirely (build/win32u-unix/sysparams_ios.c,
+// ios_virtual_change_display_settings), and the backbuffer is composited into a
+// Metal layer whose own format never depended on the app's display format. So
+// every extent really is settable at every one of these formats, which is the
+// contract adapterModes() documents above.
+//
+// It matters because CheckDeviceType gates a FULLSCREEN device on
+// GetAdapterModeCount(DisplayFormat) != 0: an application of the D3D8 era that
+// offers 16-bit colour, or that probes R5G6B5 first and only falls back to
+// 32-bit if that fails, was told the adapter has no modes at all. The set is
+// the four D3D9 display formats (wined3d directx.c; DXVK d3d9_adapter.cpp maps
+// each to a monitor bpp and enumerates both depths the same way).
+static bool
+isEnumerableDisplayFormat(D3DFORMAT format) {
+  switch (format) {
+  case D3DFMT_X8R8G8B8:
+  case D3DFMT_R5G6B5:
+  case D3DFMT_X1R5G5B5:
+  case D3DFMT_A2R10G10B10:
+    return true;
+  default:
+    return false;
+  }
 }
 
 // Accepted for a fullscreen present even when the display does not enumerate
@@ -129,6 +161,65 @@ isPresentableFullscreenExtent(UINT adapter, UINT width, UINT height, UINT refres
   return std::any_of(std::begin(kPresentableExtents), std::end(kPresentableExtents), [&](const auto &e) {
     return e.width == width && e.height == height;
   });
+}
+
+// MADEIRA: the [d3d9-modes] trace (declared in d3d9_interface.hpp).
+//
+// A failed renderer init used to leave nothing in the log but the application's
+// own error box: what it asked the adapter for, what the adapter offered, and
+// which of the two did not match were all invisible. These two calls make the
+// next log answer that without a rebuild.
+static const char *
+d3dFormatName(D3DFORMAT f) {
+  switch (f) {
+  case D3DFMT_UNKNOWN:      return "UNKNOWN";
+  case D3DFMT_X8R8G8B8:     return "X8R8G8B8";
+  case D3DFMT_A8R8G8B8:     return "A8R8G8B8";
+  case D3DFMT_R5G6B5:       return "R5G6B5";
+  case D3DFMT_X1R5G5B5:     return "X1R5G5B5";
+  case D3DFMT_A1R5G5B5:     return "A1R5G5B5";
+  case D3DFMT_A2R10G10B10:  return "A2R10G10B10";
+  default:                  return "other";
+  }
+}
+
+void
+LogAdapterModesOnce(UINT adapter) {
+  static std::once_flag once;
+  std::call_once(once, [adapter]() {
+    const auto modes = adapterModes(adapter);
+
+    wsi::WsiMode cur{};
+    HMONITOR mon = wsi::enumMonitors(adapter);
+    const bool haveCur = mon && wsi::getCurrentDisplayMode(mon, &cur);
+
+    std::string line = str::format("[d3d9-modes] adapter ", adapter, " count=", modes.size(), " current=");
+    if (haveCur)
+      line += str::format(cur.width, "x", cur.height, "@", refreshRateHzOr60(cur));
+    else
+      line += "unknown";
+
+    // The first eight are enough to tell a real table from a synthesized stub,
+    // and short enough not to flood a log that is already large.
+    const size_t shown = modes.size() < 8 ? modes.size() : 8;
+    for (size_t i = 0; i < shown; i++)
+      line += str::format(" | ", modes[i].width, "x", modes[i].height, "@", refreshRateHzOr60(modes[i]));
+    if (modes.size() > shown)
+      line += str::format(" | +", modes.size() - shown, " more");
+
+    Logger::info(line);
+  });
+}
+
+void
+LogPresentRequest(const char *what, const D3DPRESENT_PARAMETERS &p, HRESULT hr) {
+  Logger::info(
+      str::format(
+          "[d3d9-modes] ", what, " ", p.BackBufferWidth, "x", p.BackBufferHeight, " ",
+          d3dFormatName(p.BackBufferFormat), " refresh=", p.FullScreen_RefreshRateInHz,
+          " windowed=", p.Windowed ? 1 : 0, " count=", p.BackBufferCount, " -> hr 0x", std::hex, (unsigned)hr
+      )
+  );
 }
 
 MTLD3D9Interface::~MTLD3D9Interface() = default;
@@ -214,11 +305,9 @@ MTLD3D9Interface::GetAdapterModeCount(UINT Adapter, D3DFORMAT Format) {
   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_GetAdapterModeCount);
   if (Adapter >= m_adapterCount)
     return 0;
-  // wined3d filters: D3D9 only enumerates X8R8G8B8 / R5G6B5 here, and
-  // Apple displays don't expose 16-bit modes any more. Reject everything
-  // except X8R8G8B8. wine dlls/d3d9/directx.c (Ex variant).
-  if (Format != D3DFMT_X8R8G8B8)
+  if (!isEnumerableDisplayFormat(Format))
     return 0;
+  LogAdapterModesOnce(Adapter);
   return static_cast<UINT>(adapterModes(Adapter).size());
 }
 
@@ -227,8 +316,9 @@ MTLD3D9Interface::EnumAdapterModes(UINT Adapter, D3DFORMAT Format, UINT Mode, D3
   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_EnumAdapterModes);
   if (!pMode || Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
-  if (Format != D3DFMT_X8R8G8B8)
+  if (!isEnumerableDisplayFormat(Format))
     return D3DERR_INVALIDCALL;
+  LogAdapterModesOnce(Adapter);
 
   const auto modes = adapterModes(Adapter);
   if (Mode >= modes.size())
@@ -237,7 +327,10 @@ MTLD3D9Interface::EnumAdapterModes(UINT Adapter, D3DFORMAT Format, UINT Mode, D3
   pMode->Width = modes[Mode].width;
   pMode->Height = modes[Mode].height;
   pMode->RefreshRate = refreshRateHzOr60(modes[Mode]);
-  pMode->Format = D3DFMT_X8R8G8B8;
+  // The mode is reported at the format that was asked for: the extent is what
+  // varies per entry, the format is the caller's filter (wined3d directx.c
+  // wined3d_output_get_mode, DXVK d3d9_adapter.cpp).
+  pMode->Format = Format;
   return D3D_OK;
 }
 
@@ -246,6 +339,7 @@ MTLD3D9Interface::GetAdapterDisplayMode(UINT Adapter, D3DDISPLAYMODE *pMode) {
   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_GetAdapterDisplayMode);
   if (!pMode || Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
+  LogAdapterModesOnce(Adapter);
 
   HMONITOR mon = wsi::enumMonitors(Adapter);
   wsi::WsiMode wm{};
@@ -1075,8 +1169,10 @@ MTLD3D9Interface::CreateDevice(
   // it straight through CreateDeviceEx), so it validates with the extended
   // backbuffer-count / swap-effect limits and QIs to IDirect3DDevice9Ex. A
   // plain IDirect3D9 stays non-extended.
+  LogAdapterModesOnce(Adapter);
   if (const char *reason = PresentParamsRejectReason(*pPresentationParameters, /*isEx=*/m_isEx)) {
     Logger::warn(str::format("CreateDevice: rejected D3DPRESENT_PARAMETERS::", reason));
+    LogPresentRequest("CreateDevice", *pPresentationParameters, D3DERR_INVALIDCALL);
     return D3DERR_INVALIDCALL;
   }
 
@@ -1086,12 +1182,16 @@ MTLD3D9Interface::CreateDevice(
   // backbuffer count) in place. D3D9 writes the realized values back into the
   // caller's struct, the same as Reset and CreateAdditionalSwapChain, and that
   // is what apps read after CreateDevice.
-  if (!CanonicalisePresentParams(*pPresentationParameters, hFocusWindow, Adapter))
+  if (!CanonicalisePresentParams(*pPresentationParameters, hFocusWindow, Adapter)) {
+    LogPresentRequest("CreateDevice", *pPresentationParameters, D3DERR_INVALIDCALL);
     return D3DERR_INVALIDCALL;
+  }
 
   WMT::Reference<WMT::Device> metalDevice = m_adapters.object(Adapter);
-  if (!metalDevice.handle)
+  if (!metalDevice.handle) {
+    LogPresentRequest("CreateDevice", *pPresentationParameters, D3DERR_OUTOFVIDEOMEMORY);
     return D3DERR_OUTOFVIDEOMEMORY;
+  }
 
   auto *device = new MTLD3D9Device(
       this, /*isEx=*/m_isEx, Adapter, DeviceType, hFocusWindow, BehaviorFlags, *pPresentationParameters,
@@ -1099,6 +1199,7 @@ MTLD3D9Interface::CreateDevice(
   );
   device->AddRef();
   *ppReturnedDeviceInterface = static_cast<IDirect3DDevice9 *>(device);
+  LogPresentRequest("CreateDevice", *pPresentationParameters, D3D_OK);
   return D3D_OK;
 }
 
@@ -1107,10 +1208,11 @@ MTLD3D9Interface::GetAdapterModeCountEx(UINT Adapter, const D3DDISPLAYMODEFILTER
   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_GetAdapterModeCountEx);
   if (!pFilter || Adapter >= m_adapterCount)
     return 0;
-  if (pFilter->Format != D3DFMT_X8R8G8B8)
+  if (!isEnumerableDisplayFormat(pFilter->Format))
     return 0;
   if (pFilter->ScanLineOrdering == D3DSCANLINEORDERING_INTERLACED)
     return 0;
+  LogAdapterModesOnce(Adapter);
   return static_cast<UINT>(adapterModes(Adapter).size());
 }
 
@@ -1121,10 +1223,11 @@ MTLD3D9Interface::EnumAdapterModesEx(
   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_EnumAdapterModesEx);
   if (!pFilter || !pMode || Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
-  if (pFilter->Format != D3DFMT_X8R8G8B8)
+  if (!isEnumerableDisplayFormat(pFilter->Format))
     return D3DERR_INVALIDCALL;
   if (pFilter->ScanLineOrdering == D3DSCANLINEORDERING_INTERLACED)
     return D3DERR_INVALIDCALL;
+  LogAdapterModesOnce(Adapter);
 
   const auto modes = adapterModes(Adapter);
   if (Mode >= modes.size())
@@ -1134,7 +1237,7 @@ MTLD3D9Interface::EnumAdapterModesEx(
   pMode->Width = modes[Mode].width;
   pMode->Height = modes[Mode].height;
   pMode->RefreshRate = refreshRateHzOr60(modes[Mode]);
-  pMode->Format = D3DFMT_X8R8G8B8;
+  pMode->Format = pFilter->Format;
   pMode->ScanLineOrdering = D3DSCANLINEORDERING_PROGRESSIVE;
   return D3D_OK;
 }
@@ -1189,8 +1292,10 @@ MTLD3D9Interface::CreateDeviceEx(
     return D3DERR_INVALIDCALL;
   if (DeviceType != D3DDEVTYPE_HAL && DeviceType != D3DDEVTYPE_REF && DeviceType != D3DDEVTYPE_SW)
     return D3DERR_INVALIDCALL;
+  LogAdapterModesOnce(Adapter);
   if (const char *reason = PresentParamsRejectReason(*pPresentationParameters, /*isEx=*/true)) {
     Logger::warn(str::format("CreateDeviceEx: rejected D3DPRESENT_PARAMETERS::", reason));
+    LogPresentRequest("CreateDeviceEx", *pPresentationParameters, D3DERR_INVALIDCALL);
     return D3DERR_INVALIDCALL;
   }
 
@@ -1198,12 +1303,16 @@ MTLD3D9Interface::CreateDeviceEx(
 
   // Canonicalise in place so the caller reads back the realized extent /
   // format / count, matching CreateDevice and the Reset path.
-  if (!CanonicalisePresentParams(*pPresentationParameters, hFocusWindow, Adapter))
+  if (!CanonicalisePresentParams(*pPresentationParameters, hFocusWindow, Adapter)) {
+    LogPresentRequest("CreateDeviceEx", *pPresentationParameters, D3DERR_INVALIDCALL);
     return D3DERR_INVALIDCALL;
+  }
 
   WMT::Reference<WMT::Device> metalDevice = m_adapters.object(Adapter);
-  if (!metalDevice.handle)
+  if (!metalDevice.handle) {
+    LogPresentRequest("CreateDeviceEx", *pPresentationParameters, D3DERR_OUTOFVIDEOMEMORY);
     return D3DERR_OUTOFVIDEOMEMORY;
+  }
 
   auto *device = new MTLD3D9Device(
       this, /*isEx=*/true, Adapter, DeviceType, hFocusWindow, BehaviorFlags, *pPresentationParameters,
@@ -1211,6 +1320,7 @@ MTLD3D9Interface::CreateDeviceEx(
   );
   device->AddRef();
   *ppDevice = static_cast<IDirect3DDevice9Ex *>(device);
+  LogPresentRequest("CreateDeviceEx", *pPresentationParameters, D3D_OK);
   return D3D_OK;
 }
 

@@ -98,23 +98,88 @@ static inline void fillMode(WsiMode *pMode, uint32_t w, uint32_t h) {
   pMode->interlaced = false;
 }
 
-/* Mode list: classic small modes + the real desktop resolution (deduped),
- * all @ 60Hz 32bpp. Mirrors the win32u NtUserEnumDisplaySettings synth so
- * user32 and DXGI tell games the same story. Nothing larger than the
- * desktop — bigger modes crop on the virtual desktop surface. */
+/* iOS-Madeira 2026-09-16: the mode list used to be "640x480, 800x600 and
+ * whatever you are already running" -- THREE entries, at most. The win32u
+ * virtual monitor has offered a real mode table since 2026-09-14
+ * (build/win32u-unix/sysparams_ios.c, ios_standard_modes[]), so user32 and
+ * DXMT stopped telling applications the same story: EnumDisplaySettings
+ * listed 14+ modes and IDirect3D9::GetAdapterModeCount listed 3. An
+ * application that had saved 1024x768, or that walks EnumAdapterModes looking
+ * for the mode it wants before CreateDevice, found nothing and fell into its
+ * own "could not initialise the renderer" path.
+ *
+ * The two sources must agree, so ask the one authority there is:
+ *
+ *  - where user32 exists (the PE builds), EnumDisplaySettingsExW IS the win32u
+ *    table, verbatim -- no second copy to drift.
+ *  - below the Win32 boundary (DXMT_MADEIRA, the native ARM64 frontend) there
+ *    is no user32 at all, so the table is mirrored here, filtered exactly the
+ *    way sysparams_ios.c filters it (index 0 = current mode; nothing above
+ *    twice the current mode's pixel count). Keep the two tables in step. */
+#ifndef DXMT_MADEIRA
 bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode *pMode) {
   if (hMonitor != kSyntheticMonitor || !pMode)
     return false;
-  uint32_t sw, sh;
-  getScreenSize(&sw, &sh);
-  uint32_t widths[3]  = {640, 800, sw};
-  uint32_t heights[3] = {480, 600, sh};
-  uint32_t count = ((sw == 640 && sh == 480) || (sw == 800 && sh == 600)) ? 2 : 3;
-  if (modeNumber >= count)
+
+  DEVMODEW dm = {};
+  dm.dmSize = sizeof(dm);
+  /* NULL device = the primary display. win32u answers every name with the
+   * single virtual display, so the name never has to be resolved first. */
+  if (!::EnumDisplaySettingsExW(nullptr, (DWORD)modeNumber, &dm, 0))
     return false;
-  fillMode(pMode, widths[modeNumber], heights[modeNumber]);
+  if (!dm.dmPelsWidth || !dm.dmPelsHeight)
+    return false;
+
+  pMode->width = dm.dmPelsWidth;
+  pMode->height = dm.dmPelsHeight;
+  /* dmDisplayFrequency is 0 or 1 on a driver that does not track a rate;
+   * both mean "unspecified", and a 0/1 Hz mode is not something an
+   * application can select. */
+  pMode->refreshRate.numerator = (dm.dmDisplayFrequency > 1) ? dm.dmDisplayFrequency : 60;
+  pMode->refreshRate.denominator = 1;
+  pMode->bitsPerPixel = dm.dmBitsPerPel ? dm.dmBitsPerPel : 32;
+  pMode->interlaced = (dm.dmDisplayFlags & DM_INTERLACED) != 0;
   return true;
 }
+#else
+/* Mirror of ios_standard_modes[] in build/win32u-unix/sysparams_ios.c. */
+static const struct { uint32_t w, h; } kStandardModes[] = {
+    {  640,  480 }, {  800,  600 }, { 1024,  768 }, { 1152,  864 },
+    { 1280,  720 }, { 1280,  768 }, { 1280,  800 }, { 1280,  960 },
+    { 1280, 1024 }, { 1360,  768 }, { 1366,  768 }, { 1440,  900 },
+    { 1600,  900 }, { 1600, 1200 }, { 1680, 1050 }, { 1920, 1080 },
+    { 1920, 1200 }, { 2048, 1536 }, { 2560, 1440 },
+};
+
+bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode *pMode) {
+  if (hMonitor != kSyntheticMonitor || !pMode)
+    return false;
+
+  uint32_t sw, sh;
+  getScreenSize(&sw, &sh);
+
+  /* Index 0 is always the CURRENT mode, as in sysparams_ios.c: a current mode
+   * missing from the list reads as "this monitor cannot do what it is doing". */
+  if (modeNumber == 0) {
+    fillMode(pMode, sw, sh);
+    return true;
+  }
+
+  uint32_t n = 0;
+  for (size_t i = 0; i < sizeof(kStandardModes) / sizeof(kStandardModes[0]); i++) {
+    const uint32_t mw = kStandardModes[i].w, mh = kStandardModes[i].h;
+    if (mw == sw && mh == sh)
+      continue;                                                   /* already index 0 */
+    if ((uint64_t)mw * mh > 2ull * (uint64_t)sw * sh)
+      continue;                                                   /* too big to drive */
+    if (++n != modeNumber)
+      continue;
+    fillMode(pMode, mw, mh);
+    return true;
+  }
+  return false;
+}
+#endif
 
 bool getCurrentDisplayMode(HMONITOR hMonitor, WsiMode *pMode) {
   if (hMonitor != kSyntheticMonitor || !pMode)

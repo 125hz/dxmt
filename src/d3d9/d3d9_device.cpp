@@ -2392,6 +2392,7 @@ MTLD3D9Device::Reset(D3DPRESENT_PARAMETERS *pPresentationParameters) {
   // validate SwapEffect/BackBufferCount/SampleQuality, write back to caller.
   if (const char *reason = PresentParamsRejectReason(*pPresentationParameters, m_isEx)) {
     Logger::warn(str::format("Reset: rejected D3DPRESENT_PARAMETERS::", reason));
+    LogPresentRequest("Reset", *pPresentationParameters, D3DERR_INVALIDCALL);
     return D3DERR_INVALIDCALL;
   }
   if (!CanonicalisePresentParams(
@@ -2403,8 +2404,13 @@ MTLD3D9Device::Reset(D3DPRESENT_PARAMETERS *pPresentationParameters) {
     // !extended); its ResetEx returns the failure and stays presentable.
     if (!m_isEx)
       m_deviceState.store(DeviceState::NotReset, std::memory_order_relaxed);
+    LogPresentRequest("Reset", *pPresentationParameters, D3DERR_INVALIDCALL);
     return D3DERR_INVALIDCALL;
   }
+  // MADEIRA: the accepted request, logged once the extent/format are the
+  // realized ones. A Reset that fails further down (the losable-resource gate)
+  // still shows here as the mode that was asked for.
+  LogPresentRequest("Reset", *pPresentationParameters, D3D_OK);
 
   // Spec gate: non-Ex devices reject Reset when any app-held
   // D3DPOOL_DEFAULT resource or state block is still alive. wined3d

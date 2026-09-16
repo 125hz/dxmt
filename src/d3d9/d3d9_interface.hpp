@@ -21,6 +21,21 @@ namespace dxmt {
 // Reference: wined3d swapchain.c.
 bool CanonicalisePresentParams(D3DPRESENT_PARAMETERS &p, HWND hwndFallback, UINT adapter);
 
+// MADEIRA: the [d3d9-modes] trace. Two things, and only these two, because the
+// question they answer is "which mode did the application ask for, and why was
+// it refused" -- the one thing a log of a failed renderer init never showed.
+//
+//  - LogAdapterModesOnce() dumps, once per process, the adapter's mode count
+//    and its first eight modes. Called from the mode-enumeration entry points,
+//    so it fires for an application that never reaches CreateDevice.
+//  - LogPresentRequest() logs every CreateDevice / CreateDeviceEx / Reset /
+//    ResetEx / CreateAdditionalSwapChain request as
+//    "WxH fmt refresh windowed=" with the HRESULT it returned.
+//
+// Both write through Logger::info, which reaches the Wine debug channel.
+void LogAdapterModesOnce(UINT adapter);
+void LogPresentRequest(const char *what, const D3DPRESENT_PARAMETERS &p, HRESULT hr);
+
 class MTLD3D9Interface final : public ComObject<IDirect3D9Ex> {
 public:
   MTLD3D9Interface(UINT SDKVersion, bool isEx);
