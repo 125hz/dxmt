@@ -131,9 +131,25 @@ struct unixcall_mtldevice_newrenderpso {
   obj_handle_t ret_pso;
 };
 
+struct unixcall_mtldevice_newrenderpso_vd {
+  obj_handle_t device;
+  struct WMTConstMemoryPointer info;
+  struct WMTConstMemoryPointer vd;
+  obj_handle_t ret_error;
+  obj_handle_t ret_pso;
+};
+
 struct unixcall_mtldevice_newmeshrenderpso {
   obj_handle_t device;
   struct WMTConstMemoryPointer info;
+  obj_handle_t ret_error;
+  obj_handle_t ret_pso;
+};
+
+struct unixcall_mtldevice_newgeompso {   /* ml927 */
+  obj_handle_t device;
+  struct WMTConstMemoryPointer info;
+  struct WMTConstMemoryPointer ge;
   obj_handle_t ret_error;
   obj_handle_t ret_pso;
 };
