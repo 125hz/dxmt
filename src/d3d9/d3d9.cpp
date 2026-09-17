@@ -1,4 +1,5 @@
 #include "d3d9.h"
+#include "d3d9_census.hpp"
 #include "d3d9_interface.hpp"
 #include "log/log.hpp"
 
@@ -24,6 +25,15 @@ extern "C" BOOL WINAPI
 DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
   if (reason == DLL_PROCESS_ATTACH)
     DisableThreadLibraryCalls(instance);
+  /* MADEIRA [d3d9-last]: the orderly half of the crash dump. The vectored
+   * handler in d3d9_census.cpp covers a fault; this covers the other way a
+   * run ends -- the application calling ExitProcess after its own error
+   * handling, which on this port is the MADEIRA-EXIT line in the log and
+   * otherwise leaves no record of what D3D9 was asked for last. `reserved`
+   * is non-NULL exactly when the process (not just this library) is going
+   * away, which is the case worth a dump. */
+  else if (reason == DLL_PROCESS_DETACH && reserved)
+    dxmt::census::dumpLastCalls("process detach");
   return TRUE;
 }
 #endif

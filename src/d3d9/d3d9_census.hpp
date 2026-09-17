@@ -73,12 +73,70 @@ void queryFlushed();                  /* GetData committed the issuing chunk  */
 void queryPoll(bool complete, bool parked);
 void queryCompleted(uint64_t issue_to_complete_ns, uint32_t polls);
 
+/* MADEIRA [d3d9-last]: the last-call ring.
+ *
+ * A guest that dies dereferencing something D3D9 handed it leaves an
+ * address and nothing else: the log says "read of NULL+4 in game code" and
+ * the question "what did it ask us for just before that" has no answer. The
+ * census already runs at the top of all 317 vtable slots, so the ring costs
+ * one more relaxed store per call on the same already-taken branch.
+ *
+ * 64 entries, power of two, no lock: a single relaxed fetch_add on the head
+ * picks the slot, the fields are then stored plainly. Two threads can
+ * interleave inside one slot and a reader can see a half-written entry --
+ * accepted deliberately, because the alternative (a seqlock or a mutex) puts
+ * real synchronisation on a path that runs thousands of times per frame to
+ * serve a diagnostic that only ever runs once, after the process is already
+ * dying. The sequence number printed with each entry makes a torn slot
+ * obvious rather than silently misleading.
+ *
+ * Entries are of two kinds. Every slot pushes a CALL on entry (the generated
+ * D3D9_CENSUS macro, so no call site had to be touched); the methods whose
+ * RESULT is the interesting half -- the creates, the gets that hand back an
+ * interface pointer, Reset/Present/TestCooperativeLevel -- also push a RET
+ * carrying the HRESULT and up to two scalar arguments, by hand, at the
+ * return site. A returned E_* or a zeroed out-pointer is what a null in game
+ * code is made of, so the pair is what names it. */
+constexpr unsigned kLastRing = 64;
+
+void ringCall(unsigned code);
+void ringRet(unsigned code, long hr, uint32_t a0, uint32_t a1);
+
+/* A RET entry that names itself with a literal instead of a census code, for
+ * the few places where the interesting event is not one vtable slot: the
+ * device create / Reset / additional-swapchain path, which already funnels
+ * through LogPresentRequest with its HRESULT in hand. `what` must have static
+ * storage duration -- the ring keeps the pointer, not a copy. */
+void ringNote(const char *what, long hr, uint32_t a0, uint32_t a1);
+
+/* Print the ring. `why` names the trigger ("guest-exception", "detach",
+ * "native-hook"); it is printed on the header line so a log with more than
+ * one dump can tell them apart. Safe to call from an exception handler: it
+ * takes no lock of its own and allocates nothing. Capped at a handful of
+ * dumps per process so a fault inside a fault cannot flood the log. */
+void dumpLastCalls(const char *why);
+
 } // namespace dxmt::census
 
 #define D3D9_CENSUS(code)                                                                                              \
   do {                                                                                                                 \
-    if (::dxmt::census::g_on)                                                                                          \
+    if (::dxmt::census::g_on) {                                                                                        \
       ::dxmt::census::g_calls[(code)].fetch_add(1, std::memory_order_relaxed);                                          \
+      ::dxmt::census::ringCall((code));                                                                                \
+    }                                                                                                                  \
+  } while (0)
+
+/* MADEIRA [d3d9-last]: the return half, placed by hand at the return sites
+ * that matter. Deliberately NOT emitted by gen_d3d9_census.py: the generator
+ * owns the ENTRY of every method ("the code IS the index"), and a return site
+ * is not something it can find without parsing control flow. Its spelling
+ * cannot collide with the generator's marker regex either -- that matches
+ * `D3D9_CENSUS(` / `D3D9_CENSUS_FRAME(` exactly, and `D3D9_CENSUS_RET(` is
+ * neither -- so a --strip / re-inject pass leaves these lines alone. */
+#define D3D9_CENSUS_RET(code, hr, a0, a1)                                                                              \
+  do {                                                                                                                 \
+    if (::dxmt::census::g_on)                                                                                          \
+      ::dxmt::census::ringRet((code), (long)(hr), (uint32_t)(a0), (uint32_t)(a1));                                     \
   } while (0)
 
 /* Present only. Separate macro so the frame clock lives in exactly one place;

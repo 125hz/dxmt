@@ -8,14 +8,19 @@
 #include "log/log.hpp"
 #include "util_env.hpp"
 #include "util_string.hpp"
+#include "config/config.hpp"
 #include "wsi_monitor.hpp"
 #ifdef DXMT_MADEIRA
 #include "wsi_window.hpp"
 #endif
 
 #include <algorithm>
+#include <atomic>
+#include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -211,6 +216,249 @@ LogAdapterModesOnce(UINT adapter) {
   });
 }
 
+// MADEIRA: the [d3d9-caps] trace.
+//
+// [d3d9-modes] answered "what extent did it ask for". It cannot answer the
+// question a title of the 2000-2010 era actually fails on, which is "which
+// capability did it probe, and what did we say". Those titles gate whole
+// renderers on a CheckDeviceFormat or a D3DCAPS9 field and then take a silent
+// fallback -- an error box we do not render, an intro that never ends, or a
+// null they dereference three frames later. A log that shows every distinct
+// probe and its HRESULT turns that from a bisect into a read.
+//
+// Two properties make it affordable to leave on:
+//
+//  - ONCE PER DISTINCT QUERY. Frame 1 of a real title issues thousands of
+//    these (the census measured 2016 EnumAdapterModes and 144 CheckDeviceType
+//    calls in a single frame), and the same tuple repeats constantly. The
+//    dedup set below is 1024 open-addressed slots of the query's hash; a
+//    repeat costs one atomic load and nothing else.
+//  - CAPPED AT 256 LINES. A title that probes a genuinely unbounded set (a
+//    format loop over all 2^32 FOURCCs, say) cannot turn the log into this
+//    trace. The 257th line says the cap was hit and nothing is printed after.
+namespace {
+
+constexpr unsigned kCapsLineCap = 256;
+constexpr unsigned kCapsSeenSlots = 1024;
+
+std::atomic<unsigned> g_capsLines;
+std::atomic<uint64_t> g_capsSeen[kCapsSeenSlots];
+
+// True the first time this exact query is seen. Open addressing with a CAS on
+// an empty slot: two threads racing on the same key can both win at most once
+// each, which is a duplicate line, not a correctness problem. A full table
+// stops deduplicating and lets the 256-line cap do the bounding.
+bool
+capsFirstTime(uint64_t key) {
+  if (!key)
+    key = 1; // 0 is the empty marker
+  uint64_t h = key * 0x9e3779b97f4a7c15ull;
+  for (unsigned probe = 0; probe < 16; probe++) {
+    unsigned i = (unsigned)((h >> 32) + probe) & (kCapsSeenSlots - 1);
+    uint64_t cur = g_capsSeen[i].load(std::memory_order_relaxed);
+    if (cur == key)
+      return false;
+    if (cur == 0) {
+      uint64_t expected = 0;
+      if (g_capsSeen[i].compare_exchange_strong(expected, key, std::memory_order_relaxed))
+        return true;
+      if (expected == key)
+        return false;
+    }
+  }
+  return true;
+}
+
+// The dedup key. Built by mixing rather than by packing bit ranges: the
+// fields a probe carries do not fit in 64 bits side by side (Usage alone is
+// 32 bits and a FOURCC format is another 32), and overlapping shifted XORs
+// silently alias one query onto another, which shows up as a line the trace
+// never prints. A 64-bit FNV-1a over the fields has no such quiet failure --
+// a collision is possible but random and rare, rather than systematic.
+uint64_t
+capsKey(unsigned which, uint64_t a, uint64_t b = 0, uint64_t c = 0, uint64_t d = 0, uint64_t e = 0) {
+  uint64_t h = 1469598103934665603ull;
+  const uint64_t parts[6] = {which, a, b, c, d, e};
+  for (uint64_t p : parts) {
+    for (int i = 0; i < 8; i++) {
+      h ^= (p >> (i * 8)) & 0xff;
+      h *= 1099511628211ull;
+    }
+  }
+  return h;
+}
+
+void capsLine(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void
+capsLine(const char *fmt, ...) {
+  unsigned n = g_capsLines.fetch_add(1, std::memory_order_relaxed);
+  if (n > kCapsLineCap)
+    return;
+  if (n == kCapsLineCap) {
+    Logger::info(
+        str::format("[d3d9-caps] ... capped at ", kCapsLineCap, " lines; further distinct queries are not printed")
+    );
+    return;
+  }
+  char buf[512];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  Logger::info(std::string("[d3d9-caps] ") + buf);
+}
+
+// Every D3DFORMAT a title of this era names, plus a numeric/FOURCC fallback so
+// a vendor format nobody here has heard of is still identifiable in the log.
+// Returned by value: this is a diagnostic path, never a hot one.
+std::string
+fmtStr(D3DFORMAT f) {
+  switch (f) {
+  case D3DFMT_UNKNOWN:       return "UNKNOWN";
+  case D3DFMT_R8G8B8:        return "R8G8B8";
+  case D3DFMT_A8R8G8B8:      return "A8R8G8B8";
+  case D3DFMT_X8R8G8B8:      return "X8R8G8B8";
+  case D3DFMT_R5G6B5:        return "R5G6B5";
+  case D3DFMT_X1R5G5B5:      return "X1R5G5B5";
+  case D3DFMT_A1R5G5B5:      return "A1R5G5B5";
+  case D3DFMT_A4R4G4B4:      return "A4R4G4B4";
+  case D3DFMT_R3G3B2:        return "R3G3B2";
+  case D3DFMT_A8:            return "A8";
+  case D3DFMT_A8R3G3B2:      return "A8R3G3B2";
+  case D3DFMT_X4R4G4B4:      return "X4R4G4B4";
+  case D3DFMT_A2B10G10R10:   return "A2B10G10R10";
+  case D3DFMT_A8B8G8R8:      return "A8B8G8R8";
+  case D3DFMT_X8B8G8R8:      return "X8B8G8R8";
+  case D3DFMT_G16R16:        return "G16R16";
+  case D3DFMT_A2R10G10B10:   return "A2R10G10B10";
+  case D3DFMT_A16B16G16R16:  return "A16B16G16R16";
+  case D3DFMT_A8P8:          return "A8P8";
+  case D3DFMT_P8:            return "P8";
+  case D3DFMT_L8:            return "L8";
+  case D3DFMT_A8L8:          return "A8L8";
+  case D3DFMT_A4L4:          return "A4L4";
+  case D3DFMT_V8U8:          return "V8U8";
+  case D3DFMT_L6V5U5:        return "L6V5U5";
+  case D3DFMT_X8L8V8U8:      return "X8L8V8U8";
+  case D3DFMT_Q8W8V8U8:      return "Q8W8V8U8";
+  case D3DFMT_V16U16:        return "V16U16";
+  case D3DFMT_A2W10V10U10:   return "A2W10V10U10";
+  case D3DFMT_D16_LOCKABLE:  return "D16_LOCKABLE";
+  case D3DFMT_D32:           return "D32";
+  case D3DFMT_D15S1:         return "D15S1";
+  case D3DFMT_D24S8:         return "D24S8";
+  case D3DFMT_D24X8:         return "D24X8";
+  case D3DFMT_D24X4S4:       return "D24X4S4";
+  case D3DFMT_D16:           return "D16";
+  case D3DFMT_D32F_LOCKABLE: return "D32F_LOCKABLE";
+  case D3DFMT_D24FS8:        return "D24FS8";
+  case D3DFMT_L16:           return "L16";
+  case D3DFMT_VERTEXDATA:    return "VERTEXDATA";
+  case D3DFMT_INDEX16:       return "INDEX16";
+  case D3DFMT_INDEX32:       return "INDEX32";
+  case D3DFMT_Q16W16V16U16:  return "Q16W16V16U16";
+  case D3DFMT_R16F:          return "R16F";
+  case D3DFMT_G16R16F:       return "G16R16F";
+  case D3DFMT_A16B16G16R16F: return "A16B16G16R16F";
+  case D3DFMT_R32F:          return "R32F";
+  case D3DFMT_G32R32F:       return "G32R32F";
+  case D3DFMT_A32B32G32R32F: return "A32B32G32R32F";
+  case D3DFMT_CxV8U8:        return "CxV8U8";
+  default:
+    break;
+  }
+  // FOURCC (DXT1..5, ATI1/2, INTZ, NULL, ...) reads as its four characters;
+  // anything else as a number.
+  const uint32_t v = (uint32_t)f;
+  char buf[32];
+  const char c0 = (char)(v & 0xff), c1 = (char)((v >> 8) & 0xff), c2 = (char)((v >> 16) & 0xff),
+             c3 = (char)((v >> 24) & 0xff);
+  auto printable = [](char c) { return c >= 0x20 && c < 0x7f; };
+  if (printable(c0) && printable(c1) && printable(c2) && printable(c3)) {
+    snprintf(buf, sizeof(buf), "'%c%c%c%c'", c0, c1, c2, c3);
+    return buf;
+  }
+  snprintf(buf, sizeof(buf), "0x%x", v);
+  return buf;
+}
+
+const char *
+rtypeStr(D3DRESOURCETYPE t) {
+  switch (t) {
+  case D3DRTYPE_SURFACE:       return "SURFACE";
+  case D3DRTYPE_VOLUME:        return "VOLUME";
+  case D3DRTYPE_TEXTURE:       return "TEXTURE";
+  case D3DRTYPE_VOLUMETEXTURE: return "VOLUMETEXTURE";
+  case D3DRTYPE_CUBETEXTURE:   return "CUBETEXTURE";
+  case D3DRTYPE_VERTEXBUFFER:  return "VERTEXBUFFER";
+  case D3DRTYPE_INDEXBUFFER:   return "INDEXBUFFER";
+  default:                     return "?";
+  }
+}
+
+const char *
+devtypeStr(D3DDEVTYPE t) {
+  switch (t) {
+  case D3DDEVTYPE_HAL:      return "HAL";
+  case D3DDEVTYPE_REF:      return "REF";
+  case D3DDEVTYPE_SW:       return "SW";
+  case D3DDEVTYPE_NULLREF:  return "NULLREF";
+  default:                  return "?";
+  }
+}
+
+// The usage bits a CheckDeviceFormat probe can carry, spelled out: which one
+// was refused is the whole answer when a title asks for the same format twice
+// with different usage and only one probe fails.
+std::string
+usageStr(DWORD usage) {
+  if (!usage)
+    return "0";
+  static const struct {
+    DWORD bit;
+    const char *name;
+  } kBits[] = {
+      {D3DUSAGE_RENDERTARGET, "RENDERTARGET"},
+      {D3DUSAGE_DEPTHSTENCIL, "DEPTHSTENCIL"},
+      {D3DUSAGE_DYNAMIC, "DYNAMIC"},
+      {D3DUSAGE_AUTOGENMIPMAP, "AUTOGENMIPMAP"},
+      {D3DUSAGE_DMAP, "DMAP"},
+      {D3DUSAGE_QUERY_LEGACYBUMPMAP, "Q_LEGACYBUMPMAP"},
+      {D3DUSAGE_QUERY_SRGBREAD, "Q_SRGBREAD"},
+      {D3DUSAGE_QUERY_FILTER, "Q_FILTER"},
+      {D3DUSAGE_QUERY_SRGBWRITE, "Q_SRGBWRITE"},
+      {D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING, "Q_POSTPSBLEND"},
+      {D3DUSAGE_QUERY_VERTEXTEXTURE, "Q_VERTEXTEXTURE"},
+      {D3DUSAGE_QUERY_WRAPANDMIP, "Q_WRAPANDMIP"},
+      {D3DUSAGE_WRITEONLY, "WRITEONLY"},
+      {D3DUSAGE_SOFTWAREPROCESSING, "SOFTWAREPROCESSING"},
+      {D3DUSAGE_DONOTCLIP, "DONOTCLIP"},
+      {D3DUSAGE_POINTS, "POINTS"},
+      {D3DUSAGE_RTPATCHES, "RTPATCHES"},
+      {D3DUSAGE_NPATCHES, "NPATCHES"},
+  };
+  std::string out;
+  DWORD left = usage;
+  for (const auto &b : kBits) {
+    if (usage & b.bit) {
+      if (!out.empty())
+        out += "|";
+      out += b.name;
+      left &= ~b.bit;
+    }
+  }
+  if (left) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "0x%x", (unsigned)left);
+    if (!out.empty())
+      out += "|";
+    out += buf;
+  }
+  return out;
+}
+
+} // namespace
+
 void
 LogPresentRequest(const char *what, const D3DPRESENT_PARAMETERS &p, HRESULT hr) {
   Logger::info(
@@ -220,6 +468,11 @@ LogPresentRequest(const char *what, const D3DPRESENT_PARAMETERS &p, HRESULT hr) 
           " windowed=", p.Windowed ? 1 : 0, " count=", p.BackBufferCount, " -> hr 0x", std::hex, (unsigned)hr
       )
   );
+  /* MADEIRA [d3d9-last]: the one place in the frontend where a whole-device
+   * request and its HRESULT are already in the same hand, so the ring gets
+   * the answer and not just the question. `what` is a string literal at every
+   * call site, which is what ringNote requires. */
+  census::ringNote(what, hr, p.BackBufferWidth, p.BackBufferHeight);
 }
 
 MTLD3D9Interface::~MTLD3D9Interface() = default;
@@ -265,6 +518,69 @@ MTLD3D9Interface::GetAdapterCount() {
 // EnumDisplayDevices fallback that walks the registry every frame.
 static const GUID kD3DDeviceD3DUID = {0xaeb2cdd4, 0x6e41, 0x43ea, {0x94, 0x1c, 0x83, 0x61, 0xcc, 0x76, 0x07, 0x81}};
 
+// MADEIRA: the adapter identity this port reports, and the one opt-in knob
+// over it.
+//
+// The defaults are honest: 0x106B is Apple's real PCI vendor ID (the same
+// value dxgi_adapter.cpp hands D3D11 callers), device 1, and the Metal
+// device's own name as the description. A translation layer should say what
+// it is, so nothing here impersonates a GPU vendor by default.
+//
+// The knob exists because a title of this era commonly keeps a hard-coded
+// vendor table -- 0x10DE / 0x1002 / 0x8086 and nothing else -- and treats an
+// unrecognised vendor the way it treats a broken driver: a reduced renderer,
+// a refusal, or a code path nobody tested. That is not a bug we can fix from
+// inside the adapter, only one the user can A/B, so it is spelled exactly the
+// way DXVK spells it (d3d9.customVendorId / d3d9.customDeviceId in
+// DXMT_CONFIG, four hex digits, absent = off) and reachable on device through
+// Documents/madeira-dxmt.txt. Overriding the ids alone leaves the description
+// saying what the adapter really is; d3d9.customDeviceDesc overrides that too
+// for a title that reads the string instead of the numbers.
+//
+// wined3d has the same pair of settings (VideoPciVendorID / VideoPciDeviceID,
+// wined3d_main.c) for the same reason.
+namespace {
+
+struct AdapterIdOverride {
+  int32_t vendorId;
+  int32_t deviceId;
+  std::string desc;
+};
+
+int32_t
+parsePciId(const std::string &s) {
+  if (s.size() != 4)
+    return -1;
+  int32_t id = 0;
+  for (char c : s) {
+    id *= 16;
+    if (c >= '0' && c <= '9')
+      id += c - '0';
+    else if (c >= 'A' && c <= 'F')
+      id += c - 'A' + 10;
+    else if (c >= 'a' && c <= 'f')
+      id += c - 'a' + 10;
+    else
+      return -1;
+  }
+  return id;
+}
+
+const AdapterIdOverride &
+adapterIdOverride() {
+  static const AdapterIdOverride ov = [] {
+    const Config &cfg = Config::getInstance();
+    AdapterIdOverride o{};
+    o.vendorId = parsePciId(cfg.getOption<std::string>("d3d9.customVendorId", ""));
+    o.deviceId = parsePciId(cfg.getOption<std::string>("d3d9.customDeviceId", ""));
+    o.desc = cfg.getOption<std::string>("d3d9.customDeviceDesc", "");
+    return o;
+  }();
+  return ov;
+}
+
+} // namespace
+
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Interface::GetAdapterIdentifier(UINT Adapter, DWORD Flags, D3DADAPTER_IDENTIFIER9 *pIdentifier) {
   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_GetAdapterIdentifier);
@@ -284,9 +600,23 @@ MTLD3D9Interface::GetAdapterIdentifier(UINT Adapter, DWORD Flags, D3DADAPTER_IDE
   // hands back to D3D11 callers. DeviceId / SubSysId / Revision aren't
   // meaningful for Metal but keep DeviceId non-zero; some titles
   // treat 0 as "no adapter" and fall through to a different code path.
+  //
+  // Both must stay in step with the identity the 2D path reports, or a title
+  // that asks D3D9 and DirectDraw for the same adapter sees two different
+  // GPUs: wine/dlls/wined3d/directx.c's no3d gpu_description carries the same
+  // pair, and build/win32u-unix/sysparams_ios.c puts them in the synthesized
+  // EnumDisplayDevices DeviceID string.
   pIdentifier->VendorId = 0x106B;
   pIdentifier->DeviceId = 1;
   // SubSysId / Revision intentionally 0; wined3d does the same.
+
+  const AdapterIdOverride &ov = adapterIdOverride();
+  if (ov.vendorId >= 0)
+    pIdentifier->VendorId = (DWORD)ov.vendorId;
+  if (ov.deviceId >= 0)
+    pIdentifier->DeviceId = (DWORD)ov.deviceId;
+  if (!ov.desc.empty())
+    std::snprintf(pIdentifier->Description, MAX_DEVICE_IDENTIFIER_STRING, "%s", ov.desc.c_str());
 
   // Apps gate driver-bug workarounds on this version; a low value
   // re-enables ancient workaround paths. DXVK reports INT64_MAX
@@ -296,6 +626,18 @@ MTLD3D9Interface::GetAdapterIdentifier(UINT Adapter, DWORD Flags, D3DADAPTER_IDE
 
   pIdentifier->DeviceIdentifier = kD3DDeviceD3DUID;
   pIdentifier->WHQLLevel = (Flags & D3DENUM_WHQL_LEVEL) ? 1 : 0;
+
+  if (capsFirstTime(capsKey(6, Adapter, Flags)))
+    capsLine(
+        "GetAdapterIdentifier adapter=%u flags=0x%x -> hr 0x0  vendor=0x%04x device=0x%04x rev=%u subsys=0x%08x "
+        "driver=\"%s\" version=%u.%u.%u.%u desc=\"%s\" devicename=\"%s\"%s",
+        Adapter, (unsigned)Flags, (unsigned)pIdentifier->VendorId, (unsigned)pIdentifier->DeviceId,
+        (unsigned)pIdentifier->Revision, (unsigned)pIdentifier->SubSysId, pIdentifier->Driver,
+        (unsigned)(pIdentifier->DriverVersion.HighPart >> 16), (unsigned)(pIdentifier->DriverVersion.HighPart & 0xffff),
+        (unsigned)(pIdentifier->DriverVersion.LowPart >> 16), (unsigned)(pIdentifier->DriverVersion.LowPart & 0xffff),
+        pIdentifier->Description, pIdentifier->DeviceName,
+        (ov.vendorId >= 0 || ov.deviceId >= 0 || !ov.desc.empty()) ? "  [overridden by DXMT_CONFIG d3d9.custom*]" : ""
+    );
 
   return D3D_OK;
 }
@@ -353,14 +695,40 @@ MTLD3D9Interface::GetAdapterDisplayMode(UINT Adapter, D3DDISPLAYMODE *pMode) {
   // matches what wined3d does on a 32-bit GL desktop and what every
   // modern Windows desktop reports.
   pMode->Format = D3DFMT_X8R8G8B8;
+  if (capsFirstTime(capsKey(7, Adapter)))
+    capsLine(
+        "GetAdapterDisplayMode adapter=%u -> hr 0x0  %ux%u@%u %s", Adapter, pMode->Width, pMode->Height,
+        pMode->RefreshRate, fmtStr(pMode->Format).c_str()
+    );
   return D3D_OK;
 }
 
+// MADEIRA [d3d9-caps]: the five format/capability probes are traced by
+// wrapping rather than by editing every return. CheckDeviceFormat alone has
+// two dozen exits, and a trace threaded through all of them is a trace that
+// drifts the first time one of them moves. The wrapper is also where the
+// census counter lives (gen_d3d9_census.py injects at the top of every
+// STDMETHODCALLTYPE definition, and the *Probe bodies below deliberately are
+// not STDMETHODCALLTYPE), so the per-method counts are unchanged.
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Interface::CheckDeviceType(
     UINT Adapter, D3DDEVTYPE DevType, D3DFORMAT DisplayFormat, D3DFORMAT BackBufferFormat, BOOL bWindowed
 ) {
   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_CheckDeviceType);
+  HRESULT hr = CheckDeviceTypeProbe(Adapter, DevType, DisplayFormat, BackBufferFormat, bWindowed);
+  uint64_t key = capsKey(1, Adapter, DevType, (uint32_t)DisplayFormat, (uint32_t)BackBufferFormat, bWindowed ? 1u : 0u);
+  if (capsFirstTime(key))
+    capsLine(
+        "CheckDeviceType adapter=%u %s display=%s backbuffer=%s windowed=%d -> hr 0x%08x", Adapter, devtypeStr(DevType),
+        fmtStr(DisplayFormat).c_str(), fmtStr(BackBufferFormat).c_str(), bWindowed ? 1 : 0, (unsigned)hr
+    );
+  return hr;
+}
+
+HRESULT
+MTLD3D9Interface::CheckDeviceTypeProbe(
+    UINT Adapter, D3DDEVTYPE DevType, D3DFORMAT DisplayFormat, D3DFORMAT BackBufferFormat, BOOL bWindowed
+) {
   if (Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
   if (DevType != D3DDEVTYPE_HAL)
@@ -455,16 +823,44 @@ MTLD3D9Interface::CheckDeviceFormat(
     D3DFORMAT CheckFormat
 ) {
   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_CheckDeviceFormat);
+  HRESULT hr = CheckDeviceFormatProbe(Adapter, DeviceType, AdapterFormat, Usage, RType, CheckFormat);
+  uint64_t key = capsKey(2, ((uint64_t)Adapter << 32) | DeviceType, (uint32_t)AdapterFormat, Usage, RType, (uint32_t)CheckFormat);
+  if (capsFirstTime(key))
+    capsLine(
+        "CheckDeviceFormat adapter=%u %s adapterfmt=%s usage=%s rtype=%s fmt=%s -> hr 0x%08x", Adapter,
+        devtypeStr(DeviceType), fmtStr(AdapterFormat).c_str(), usageStr(Usage).c_str(), rtypeStr(RType),
+        fmtStr(CheckFormat).c_str(), (unsigned)hr
+    );
+  return hr;
+}
+
+HRESULT
+MTLD3D9Interface::CheckDeviceFormatProbe(
+    UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT AdapterFormat, DWORD Usage, D3DRESOURCETYPE RType,
+    D3DFORMAT CheckFormat
+) {
   if (Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
 
   // The adapter-format validation precedes the device-type gate: a
   // D3DFMT_UNKNOWN adapter format is D3DERR_INVALIDCALL for every device
   // type, since the d3d9 runtime validates the adapter format before the
-  // device type is ever consumed. wined3d takes the same X8R8G8B8 / R5G6B5
-  // / X1R5G5B5 set; ddraw advertises others but D3D9 doesn't.
-  // wine dlls/d3d9/directx.c.
-  if (AdapterFormat != D3DFMT_X8R8G8B8 && AdapterFormat != D3DFMT_R5G6B5 && AdapterFormat != D3DFMT_X1R5G5B5)
+  // device type is ever consumed.
+  //
+  // The accepted set is the four D3D9 DISPLAY formats, which is exactly the
+  // set isEnumerableDisplayFormat enumerates modes for. A2R10G10B10 used to
+  // be missing here while being enumerable there, and the two answers
+  // contradicted each other in a way an application acts on: CheckDeviceType
+  // for a fullscreen device ends by asking CheckDeviceFormat whether the
+  // backbuffer is a render target AT THE DISPLAY FORMAT, so every
+  // A2R10G10B10 fullscreen probe was refused on an adapter that had just
+  // reported fourteen A2R10G10B10 modes. A title that walks the display
+  // formats and takes the widest one it is offered got a mode list it could
+  // not create a device from, with no second answer telling it to fall back.
+  // A2R10G10B10 is a real render target here (isColorRTFormat lists it), so
+  // accepting it is also what the create path can honour.
+  if (AdapterFormat != D3DFMT_X8R8G8B8 && AdapterFormat != D3DFMT_R5G6B5 && AdapterFormat != D3DFMT_X1R5G5B5 &&
+      AdapterFormat != D3DFMT_A2R10G10B10)
     return AdapterFormat ? D3DERR_NOTAVAILABLE : D3DERR_INVALIDCALL;
   if (DeviceType != D3DDEVTYPE_HAL)
     return D3DERR_NOTAVAILABLE;
@@ -652,10 +1048,27 @@ MTLD3D9Interface::CheckDeviceFormat(
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Interface::CheckDeviceMultiSampleType(
-    UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT SurfaceFormat, BOOL, D3DMULTISAMPLE_TYPE MultiSampleType,
+    UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT SurfaceFormat, BOOL Windowed, D3DMULTISAMPLE_TYPE MultiSampleType,
     DWORD *pQualityLevels
 ) {
   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_CheckDeviceMultiSampleType);
+  HRESULT hr =
+      CheckDeviceMultiSampleTypeProbe(Adapter, DeviceType, SurfaceFormat, Windowed, MultiSampleType, pQualityLevels);
+  uint64_t key = capsKey(3, ((uint64_t)Adapter << 32) | DeviceType, (uint32_t)SurfaceFormat, MultiSampleType);
+  if (capsFirstTime(key))
+    capsLine(
+        "CheckDeviceMultiSampleType adapter=%u %s fmt=%s samples=%u -> hr 0x%08x  quality=%u", Adapter,
+        devtypeStr(DeviceType), fmtStr(SurfaceFormat).c_str(), (unsigned)MultiSampleType, (unsigned)hr,
+        pQualityLevels ? (unsigned)*pQualityLevels : 0u
+    );
+  return hr;
+}
+
+HRESULT
+MTLD3D9Interface::CheckDeviceMultiSampleTypeProbe(
+    UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT SurfaceFormat, BOOL, D3DMULTISAMPLE_TYPE MultiSampleType,
+    DWORD *pQualityLevels
+) {
   if (Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
   if (DeviceType != D3DDEVTYPE_HAL)
@@ -732,11 +1145,32 @@ MTLD3D9Interface::CheckDepthStencilMatch(
     D3DFORMAT DepthStencilFormat
 ) {
   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_CheckDepthStencilMatch);
+  HRESULT hr =
+      CheckDepthStencilMatchProbe(Adapter, DeviceType, AdapterFormat, RenderTargetFormat, DepthStencilFormat);
+  uint64_t key = capsKey(4, ((uint64_t)Adapter << 32) | DeviceType, (uint32_t)AdapterFormat, (uint32_t)RenderTargetFormat, (uint32_t)DepthStencilFormat);
+  if (capsFirstTime(key))
+    capsLine(
+        "CheckDepthStencilMatch adapter=%u %s adapterfmt=%s rt=%s ds=%s -> hr 0x%08x", Adapter, devtypeStr(DeviceType),
+        fmtStr(AdapterFormat).c_str(), fmtStr(RenderTargetFormat).c_str(), fmtStr(DepthStencilFormat).c_str(),
+        (unsigned)hr
+    );
+  return hr;
+}
+
+HRESULT
+MTLD3D9Interface::CheckDepthStencilMatchProbe(
+    UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT AdapterFormat, D3DFORMAT RenderTargetFormat,
+    D3DFORMAT DepthStencilFormat
+) {
   if (Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
   if (DeviceType != D3DDEVTYPE_HAL)
     return D3DERR_NOTAVAILABLE;
-  if (AdapterFormat != D3DFMT_X8R8G8B8 && AdapterFormat != D3DFMT_R5G6B5 && AdapterFormat != D3DFMT_X1R5G5B5)
+  // Same four display formats CheckDeviceFormat accepts, and for the same
+  // reason: an application that probes a depth-stencil pair at the display
+  // format it just enumerated must not be told the format does not exist.
+  if (AdapterFormat != D3DFMT_X8R8G8B8 && AdapterFormat != D3DFMT_R5G6B5 && AdapterFormat != D3DFMT_X1R5G5B5 &&
+      AdapterFormat != D3DFMT_A2R10G10B10)
     return D3DERR_NOTAVAILABLE;
 
   // Shares CheckDeviceFormat's format predicates so the two probes cannot
@@ -756,6 +1190,20 @@ MTLD3D9Interface::CheckDeviceFormatConversion(
     UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT SourceFormat, D3DFORMAT TargetFormat
 ) {
   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Interface_CheckDeviceFormatConversion);
+  HRESULT hr = CheckDeviceFormatConversionProbe(Adapter, DeviceType, SourceFormat, TargetFormat);
+  uint64_t key = capsKey(5, ((uint64_t)Adapter << 32) | DeviceType, (uint32_t)SourceFormat, (uint32_t)TargetFormat);
+  if (capsFirstTime(key))
+    capsLine(
+        "CheckDeviceFormatConversion adapter=%u %s src=%s dst=%s -> hr 0x%08x", Adapter, devtypeStr(DeviceType),
+        fmtStr(SourceFormat).c_str(), fmtStr(TargetFormat).c_str(), (unsigned)hr
+    );
+  return hr;
+}
+
+HRESULT
+MTLD3D9Interface::CheckDeviceFormatConversionProbe(
+    UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT SourceFormat, D3DFORMAT TargetFormat
+) {
   if (Adapter >= m_adapterCount)
     return D3DERR_INVALIDCALL;
   if (DeviceType != D3DDEVTYPE_HAL)
@@ -1038,6 +1486,43 @@ MTLD3D9Interface::GetDeviceCaps(UINT Adapter, D3DDEVTYPE DeviceType, D3DCAPS9 *p
   pCaps->MasterAdapterOrdinal = 0;
   pCaps->AdapterOrdinalInGroup = 0;
   pCaps->NumberOfAdaptersInGroup = 1;
+
+  // MADEIRA [d3d9-caps]: the fields a title of this era actually gates on.
+  // Not the whole D3DCAPS9 -- the struct is 300-odd bytes and most of it has
+  // never decided anything -- but every field that has been seen to end a
+  // renderer: the shader versions, the fixed-function texture limits, the
+  // four capability masks, and the geometry ceilings. Three lines, once per
+  // (adapter, devtype).
+  if (capsFirstTime(capsKey(8, Adapter, DeviceType))) {
+    capsLine(
+        "GetDeviceCaps adapter=%u %s -> hr 0x0  vs=%u.%u ps=%u.%u MaxVertexShaderConst=%u "
+        "MaxVShader30Slots=%u MaxPShader30Slots=%u",
+        Adapter, devtypeStr(DeviceType), (unsigned)((pCaps->VertexShaderVersion >> 8) & 0xff),
+        (unsigned)(pCaps->VertexShaderVersion & 0xff), (unsigned)((pCaps->PixelShaderVersion >> 8) & 0xff),
+        (unsigned)(pCaps->PixelShaderVersion & 0xff), (unsigned)pCaps->MaxVertexShaderConst,
+        (unsigned)pCaps->MaxVertexShader30InstructionSlots, (unsigned)pCaps->MaxPixelShader30InstructionSlots
+    );
+    capsLine(
+        "GetDeviceCaps adapter=%u   MaxSimultaneousTextures=%u MaxTextureBlendStages=%u MaxTexture=%ux%u "
+        "MaxPrimitiveCount=0x%x MaxVertexIndex=0x%x MaxStreams=%u NumSimultaneousRTs=%u MaxActiveLights=%u "
+        "MaxAnisotropy=%u",
+        Adapter, (unsigned)pCaps->MaxSimultaneousTextures, (unsigned)pCaps->MaxTextureBlendStages,
+        (unsigned)pCaps->MaxTextureWidth, (unsigned)pCaps->MaxTextureHeight, (unsigned)pCaps->MaxPrimitiveCount,
+        (unsigned)pCaps->MaxVertexIndex, (unsigned)pCaps->MaxStreams, (unsigned)pCaps->NumSimultaneousRTs,
+        (unsigned)pCaps->MaxActiveLights, (unsigned)pCaps->MaxAnisotropy
+    );
+    capsLine(
+        "GetDeviceCaps adapter=%u   Caps=0x%08x Caps2=0x%08x Caps3=0x%08x DevCaps=0x%08x%s%s TextureCaps=0x%08x%s%s "
+        "RasterCaps=0x%08x PrimitiveMiscCaps=0x%08x StencilCaps=0x%08x DeclTypes=0x%08x",
+        Adapter, (unsigned)pCaps->Caps, (unsigned)pCaps->Caps2, (unsigned)pCaps->Caps3, (unsigned)pCaps->DevCaps,
+        (pCaps->DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT) ? " +HWTNL" : " -HWTNL",
+        (pCaps->DevCaps & D3DDEVCAPS_PUREDEVICE) ? " +PURE" : " -PURE", (unsigned)pCaps->TextureCaps,
+        (pCaps->TextureCaps & D3DPTEXTURECAPS_POW2) ? " +POW2" : " -POW2",
+        (pCaps->TextureCaps & D3DPTEXTURECAPS_NONPOW2CONDITIONAL) ? " +NONPOW2COND" : " -NONPOW2COND",
+        (unsigned)pCaps->RasterCaps, (unsigned)pCaps->PrimitiveMiscCaps, (unsigned)pCaps->StencilCaps,
+        (unsigned)pCaps->DeclTypes
+    );
+  }
 
   return D3D_OK;
 }

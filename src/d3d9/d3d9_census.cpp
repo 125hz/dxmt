@@ -33,6 +33,7 @@
 
 #include "log/log.hpp"
 #include "util_env.hpp"
+#include "util_string.hpp"
 
 #include <cstdarg>
 #include <cstdio>
@@ -248,6 +249,32 @@ void report() {
   g_prev_ticks = ticks;
 }
 
+/* MADEIRA [d3d9-last]: the ring itself. See d3d9_census.hpp for why this is
+ * deliberately unsynchronised. */
+struct LastEntry {
+  uint32_t seq;  /* 0 = never written; otherwise the global push order */
+  uint16_t code; /* index into d3d9_census_names[] when note == nullptr */
+  uint8_t kind;  /* 0 = call (entry), 1 = ret */
+  uint8_t pad;
+  uint32_t tid;
+  int32_t hr;
+  uint32_t a0;
+  uint32_t a1;
+  const char *note; /* static literal naming a non-vtable event, or null */
+};
+
+LastEntry g_last[kLastRing];
+std::atomic<uint32_t> g_last_head;
+std::atomic<uint32_t> g_dumps;
+
+uint32_t currentTid() {
+#ifdef _WIN32
+  return (uint32_t)GetCurrentThreadId();
+#else
+  return 0;
+#endif
+}
+
 /* Deliberately silent. This runs as a static initialiser, and Logger's own
  * s_instance lives in another translation unit: with no ordering guarantee
  * between the two, logging here can reach an unconstructed Logger (its mutex
@@ -255,6 +282,53 @@ void report() {
  * instead, where the ordering question cannot arise. Reading an environment
  * variable and GetTickCount are both safe this early -- neither depends on a
  * C++ object built by another TU's initialiser. */
+#ifdef _WIN32
+/* MADEIRA [d3d9-last]: how the ring reaches the log.
+ *
+ * The 32-bit D3D9 frontend is guest code (d3d9-emulated.dll runs under the
+ * emulator), so the ring lives in guest memory and the host-side crash
+ * reporter in build/ntdll-unix/signal_arm64_ios.c cannot read it -- its weak
+ * d3d9_dump_last_calls() hook resolves against the NATIVE build of this file
+ * and would print an empty ring for an emulated title. A vectored handler
+ * closes that gap without any address publication: it runs in the guest, in
+ * the faulting thread, with the ring right there, on first chance and
+ * therefore before the application's own __except can swallow the fault.
+ *
+ * It only ever observes. EXCEPTION_CONTINUE_SEARCH is returned
+ * unconditionally, so dispatch is exactly what it was.
+ *
+ * The filter matters: a vectored handler sees every exception in the process,
+ * and most of them are routine -- MSVC C++ throws (0xE06D7363), the
+ * thread-name notification (0x406D1388), OutputDebugString
+ * (DBG_PRINTEXCEPTION_C / _WIDE_C), breakpoints under a debugger. Dumping on
+ * those would bury the log and tell nobody anything. Only the codes that end
+ * a process unhandled are worth a dump. */
+LONG CALLBACK lastCallVEH(EXCEPTION_POINTERS *ep) {
+  if (!ep || !ep->ExceptionRecord)
+    return EXCEPTION_CONTINUE_SEARCH;
+  const DWORD code = ep->ExceptionRecord->ExceptionCode;
+  switch (code) {
+  case EXCEPTION_ACCESS_VIOLATION:
+  case EXCEPTION_ILLEGAL_INSTRUCTION:
+  case EXCEPTION_PRIV_INSTRUCTION:
+  case EXCEPTION_IN_PAGE_ERROR:
+  case EXCEPTION_STACK_OVERFLOW:
+  case EXCEPTION_INT_DIVIDE_BY_ZERO:
+  case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+  case EXCEPTION_DATATYPE_MISALIGNMENT:
+    break;
+  default:
+    return EXCEPTION_CONTINUE_SEARCH;
+  }
+  char why[96];
+  snprintf(why, sizeof(why), "guest exception %08x at %p addr %p", (unsigned)code,
+           (void *)ep->ExceptionRecord->ExceptionAddress,
+           ep->ExceptionRecord->NumberParameters > 1 ? (void *)ep->ExceptionRecord->ExceptionInformation[1] : nullptr);
+  dumpLastCalls(why);
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 bool arm() {
   bool on = readEnabled();
   if (on) {
@@ -265,6 +339,11 @@ bool arm() {
         g_interval = (unsigned)v;
     }
     g_prev_ticks = (uint32_t)now_ms();
+#ifdef _WIN32
+    /* First in the chain (the 1 argument): the point is to see the fault
+     * before anything the application installs later can handle it. */
+    AddVectoredExceptionHandler(1, lastCallVEH);
+#endif
   }
   return on;
 }
@@ -330,6 +409,104 @@ void queryCompleted(uint64_t issue_to_complete_ns, uint32_t polls) {
     ;
 }
 
+/* MADEIRA [d3d9-last]. One relaxed fetch_add plus six plain stores. The seq
+ * is written LAST so a reader that sees a non-zero seq has, in the
+ * overwhelmingly common case, the rest of the entry too. */
+void ringCall(unsigned code) {
+  uint32_t n = g_last_head.fetch_add(1, std::memory_order_relaxed) + 1;
+  LastEntry &e = g_last[n & (kLastRing - 1)];
+  e.code = (uint16_t)code;
+  e.kind = 0;
+  e.tid = currentTid();
+  e.hr = 0;
+  e.a0 = 0;
+  e.a1 = 0;
+  e.note = nullptr;
+  e.seq = n;
+}
+
+void ringRet(unsigned code, long hr, uint32_t a0, uint32_t a1) {
+  uint32_t n = g_last_head.fetch_add(1, std::memory_order_relaxed) + 1;
+  LastEntry &e = g_last[n & (kLastRing - 1)];
+  e.code = (uint16_t)code;
+  e.kind = 1;
+  e.tid = currentTid();
+  e.hr = (int32_t)hr;
+  e.a0 = a0;
+  e.a1 = a1;
+  e.note = nullptr;
+  e.seq = n;
+}
+
+void ringNote(const char *what, long hr, uint32_t a0, uint32_t a1) {
+  if (!g_on)
+    return;
+  uint32_t n = g_last_head.fetch_add(1, std::memory_order_relaxed) + 1;
+  LastEntry &e = g_last[n & (kLastRing - 1)];
+  e.code = 0;
+  e.kind = 1;
+  e.tid = currentTid();
+  e.hr = (int32_t)hr;
+  e.a0 = a0;
+  e.a1 = a1;
+  e.note = what;
+  e.seq = n;
+}
+
+void dumpLastCalls(const char *why) {
+  /* Re-entrancy guard, and it is not a nicety: this runs from a fault
+   * handler, and it reaches Logger, which takes a mutex and writes a file.
+   * If the dump itself faults -- or if the thread was already inside this
+   * function -- taking that mutex a second time on the same thread is
+   * undefined behaviour on a std::mutex and in practice a deadlock, which
+   * would turn a crash the user can see into a freeze they cannot. Bailing
+   * out keeps the failure a crash. Per-thread rather than global so two
+   * threads faulting at once still both get a dump. */
+  static thread_local bool in_dump = false;
+  if (in_dump)
+    return;
+
+  /* Three dumps per process. A fault inside the fault handler, or an exit
+   * that follows a crash, must not turn the log into the ring printed over
+   * and over. */
+  if (g_dumps.fetch_add(1, std::memory_order_relaxed) >= 3)
+    return;
+
+  in_dump = true;
+  struct ClearOnExit {
+    bool &flag;
+    ~ClearOnExit() { flag = false; }
+  } clear{in_dump};
+
+  uint32_t head = g_last_head.load(std::memory_order_relaxed);
+  Logger::info(
+      str::format("[d3d9-last] dump (", why, ") head=", head, " ring=", kLastRing, " -- oldest first, seq is the ",
+                  "global push order; a gap in seq means the slot was overwritten mid-read")
+  );
+  if (!head) {
+    Logger::info("[d3d9-last] (empty: no D3D9 call has been made, or the census is off)");
+    return;
+  }
+
+  /* Oldest first: head+1 .. head, skipping slots never written. */
+  unsigned shown = 0;
+  for (unsigned i = 1; i <= kLastRing; i++) {
+    const LastEntry &e = g_last[(head + i) & (kLastRing - 1)];
+    if (!e.seq)
+      continue;
+    const char *name = e.note ? e.note : (e.code < D3D9_CENSUS_COUNT ? d3d9_census_names[e.code] : "?");
+    char buf[256];
+    if (e.kind)
+      snprintf(buf, sizeof(buf), "%6u tid=%04x %-52s -> hr 0x%08x  a0=0x%x a1=0x%x", e.seq, e.tid, name,
+               (unsigned)e.hr, e.a0, e.a1);
+    else
+      snprintf(buf, sizeof(buf), "%6u tid=%04x %-52s", e.seq, e.tid, name);
+    Logger::info(std::string("[d3d9-last] ") + buf);
+    shown++;
+  }
+  Logger::info(str::format("[d3d9-last] end (", shown, " entries)"));
+}
+
 void lockBytes(unsigned n) {
   if (!g_on)
     return;
@@ -346,3 +523,17 @@ void lockBytes(unsigned n) {
 }
 
 } // namespace dxmt::census
+
+/* MADEIRA [d3d9-last]: the host-side entry point.
+ *
+ * build/ntdll-unix/signal_arm64_ios.c declares this weak and calls it from
+ * the one place it reports a guest fault, so a build in which this object is
+ * not linked (or whose linker did not pull it out of libdxmt_combined.a)
+ * simply does nothing there. It is the NATIVE frontend's ring it prints --
+ * for a title on the emulated i386 frontend the in-guest vectored handler
+ * above is what produces the dump, and this one is silent-but-harmless. Both
+ * write the same [d3d9-last] block, so a reader does not have to know which
+ * half of the port answered. */
+extern "C" __attribute__((visibility("default"))) void d3d9_dump_last_calls(void) {
+  ::dxmt::census::dumpLastCalls("native-hook");
+}

@@ -88,6 +88,37 @@ public:
   HRESULT STDMETHODCALLTYPE GetAdapterLUID(UINT Adapter, LUID *pLUID) override;
 
 private:
+  // MADEIRA [d3d9-caps]: the bodies of the five format/capability probes.
+  //
+  // The public methods above are thin wrappers that count the call, run one
+  // of these, and print the query and its HRESULT once per distinct tuple.
+  // The split exists because CheckDeviceFormat alone returns from two dozen
+  // places, and a trace threaded through all of them would drift the first
+  // time one moved.
+  //
+  // These are deliberately NOT declared STDMETHODCALLTYPE: gen_d3d9_census.py
+  // scans for that keyword to place the per-method counters and to build the
+  // code table, so a second definition carrying it would renumber every
+  // method after it. Same reason they are not in the vtable.
+  HRESULT CheckDeviceTypeProbe(
+      UINT Adapter, D3DDEVTYPE DevType, D3DFORMAT DisplayFormat, D3DFORMAT BackBufferFormat, BOOL bWindowed
+  );
+  HRESULT CheckDeviceFormatProbe(
+      UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT AdapterFormat, DWORD Usage, D3DRESOURCETYPE RType,
+      D3DFORMAT CheckFormat
+  );
+  HRESULT CheckDeviceMultiSampleTypeProbe(
+      UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT SurfaceFormat, BOOL Windowed,
+      D3DMULTISAMPLE_TYPE MultiSampleType, DWORD *pQualityLevels
+  );
+  HRESULT CheckDepthStencilMatchProbe(
+      UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT AdapterFormat, D3DFORMAT RenderTargetFormat,
+      D3DFORMAT DepthStencilFormat
+  );
+  HRESULT CheckDeviceFormatConversionProbe(
+      UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT SourceFormat, D3DFORMAT TargetFormat
+  );
+
   const UINT m_sdkVersion;
   const bool m_isEx;
   // Adapter list cached at construction. macOS GPUs do not hotplug
