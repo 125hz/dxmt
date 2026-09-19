@@ -47,7 +47,33 @@
 
 namespace dxmt::census {
 
-std::atomic<uint32_t> g_calls[D3D9_CENSUS_COUNT];
+/* ml999: see the note in d3d9_census.hpp. The counters are per thread; this is
+ * the list the summary sums, and the only place a lock is taken -- once per
+ * thread, on its first D3D9 call, never on the counting path. */
+thread_local ThreadCounters *g_tls_calls = nullptr;
+
+namespace {
+std::atomic<ThreadCounters *> g_tls_list{nullptr};
+}
+
+void countSlow(unsigned code) {
+  ThreadCounters *c = static_cast<ThreadCounters *>(std::calloc(1, sizeof(ThreadCounters)));
+  if (!c)
+    return; /* a census that cannot allocate simply stops counting on this thread */
+  ThreadCounters *head = g_tls_list.load(std::memory_order_relaxed);
+  do {
+    c->next = head;
+  } while (!g_tls_list.compare_exchange_weak(head, c, std::memory_order_release, std::memory_order_relaxed));
+  g_tls_calls = c;
+  c->n[code].store(1, std::memory_order_relaxed);
+}
+
+uint32_t callCount(unsigned code) {
+  uint32_t sum = 0;
+  for (ThreadCounters *c = g_tls_list.load(std::memory_order_acquire); c; c = c->next)
+    sum += c->n[code].load(std::memory_order_relaxed);
+  return sum;
+}
 
 namespace {
 
@@ -183,7 +209,7 @@ void report() {
   unsigned used = 0;
   static uint32_t cur[D3D9_CENSUS_COUNT];
   for (int i = 0; i < D3D9_CENSUS_COUNT; i++) {
-    cur[i] = g_calls[i].load(std::memory_order_relaxed);
+    cur[i] = callCount(i);   /* ml999: summed across the per-thread blocks */
     total += cur[i];
     window += (uint32_t)(cur[i] - g_prev_calls[i]); /* unsigned wrap is the right arithmetic */
     if (cur[i])
@@ -329,6 +355,15 @@ LONG CALLBACK lastCallVEH(EXCEPTION_POINTERS *ep) {
 }
 #endif
 
+/* ml999: the ring is opt-in now. See the note in d3d9_census.hpp -- it is
+ * forensics, not a measurement, and it was the second emulated locked RMW on a
+ * 5540-calls-per-frame path. MADEIRA_D3D9_LAST=1 in Documents/madeira-env.txt
+ * brings it back, together with the vectored handler that prints it. */
+bool armRing() {
+  std::string v = env::getEnvVar("MADEIRA_D3D9_LAST");
+  return v == "1" || v == "on" || v == "yes" || v == "true";
+}
+
 bool arm() {
   bool on = readEnabled();
   if (on) {
@@ -341,8 +376,12 @@ bool arm() {
     g_prev_ticks = (uint32_t)now_ms();
 #ifdef _WIN32
     /* First in the chain (the 1 argument): the point is to see the fault
-     * before anything the application installs later can handle it. */
-    AddVectoredExceptionHandler(1, lastCallVEH);
+     * before anything the application installs later can handle it.
+     * ml999: only when the ring is armed -- with an empty ring the handler has
+     * nothing to print, and every guest exception would walk through it for
+     * nothing. */
+    if (g_ring_on)
+      AddVectoredExceptionHandler(1, lastCallVEH);
 #endif
   }
   return on;
@@ -353,10 +392,15 @@ bool arm() {
 /* Dynamic initialiser: runs during this DLL's own CRT init, long before any
  * vtable slot can be entered, so the hot path never has to test "armed yet?".
  */
+/* ml999: g_ring_on is initialised FIRST and arm() reads it, so the declaration
+ * order here is load-bearing -- within one translation unit dynamic
+ * initialisers run in declaration order, and arm() decides whether to install
+ * the vectored handler from it. */
+bool g_ring_on = armRing();
 bool g_on = arm();
 
 void frame(unsigned code) {
-  g_calls[code].fetch_add(1, std::memory_order_relaxed);
+  count(code);
   uint32_t p = g_presents.fetch_add(1, std::memory_order_relaxed) + 1;
   if (p != 1 && p != 100 && p != 1000 && (p % g_interval) != 0)
     return;
@@ -477,6 +521,17 @@ void dumpLastCalls(const char *why) {
     bool &flag;
     ~ClearOnExit() { flag = false; }
   } clear{in_dump};
+
+  if (!g_ring_on) {
+    /* ml999: say so rather than printing an empty ring, which reads as "D3D9
+     * was never called" and has sent a reader looking in the wrong place. */
+    Logger::info(
+        str::format("[d3d9-last] dump (", why, "): ring disabled -- set MADEIRA_D3D9_LAST=1 in ",
+                    "Documents/madeira-env.txt to record the last ", kLastRing, " D3D9 calls (it costs one ",
+                    "emulated locked RMW per call, which is why it is off by default)")
+    );
+    return;
+  }
 
   uint32_t head = g_last_head.load(std::memory_order_relaxed);
   Logger::info(

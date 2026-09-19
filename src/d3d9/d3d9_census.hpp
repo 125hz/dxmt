@@ -38,7 +38,70 @@ namespace dxmt::census {
  * that -- so the hot path is a plain load, not an atomic one. */
 extern bool g_on;
 
-extern std::atomic<uint32_t> g_calls[D3D9_CENSUS_COUNT];
+/* MADEIRA ml999: PER-THREAD COUNTERS, BECAUSE THE INSTRUMENT WAS DISTORTING
+ * WHAT IT MEASURED.
+ *
+ * The file header above budgets "ONE relaxed 32-bit atomic add per call" and
+ * calls that negligible.  It is not, on this target.  d3d9-emulated.dll is
+ * i386 code running under FEX, so `lock xadd' is not one instruction: it is a
+ * TSO-ordered read-modify-write that the JIT lowers to an exclusive-monitor
+ * sequence.  [d3d9-census] measures 5540 D3D9 calls per frame in the
+ * open-world title, and every one of them paid this add PLUS a second one in
+ * ringCall's head bump -- about 440k emulated locked RMWs a second, inside the
+ * DLL that [prof] puts at 13-20 % of ALL CPU.
+ *
+ * The atomic was never needed for correctness of the number.  Each counter is
+ * a monotone event tally whose only reader is the 5-second summary; nothing
+ * branches on it and nothing needs a total that is consistent at an instant.
+ * So the count moves to a per-thread block and the summary sums the blocks.
+ *
+ * Blocks are allocated on a thread's first D3D9 call, linked into a global
+ * list, and NEVER freed -- a thread that exits must keep contributing the
+ * calls it made, and the summer must not race a free.  At ~1.3 KB per block
+ * and a few dozen threads that is tens of kilobytes, once.
+ *
+ * The counters stay std::atomic so that a summing read and a counting write
+ * are a well-defined relaxed pair rather than a data race, but the write is a
+ * load/add/store of a relaxed atomic, NOT fetch_add: on x86 that is three
+ * plain instructions with no lock prefix, which is the entire point.  Only the
+ * owning thread ever writes its own block, so the non-atomic RMW cannot lose a
+ * count. */
+struct ThreadCounters {
+  std::atomic<uint32_t> n[D3D9_CENSUS_COUNT];
+  ThreadCounters *next;
+};
+
+extern thread_local ThreadCounters *g_tls_calls;
+
+/* First call on this thread: allocate and link the block, then count. Out of
+ * line and never inlined -- it runs once per thread and keeping it out of the
+ * macro keeps the hot path to a TLS load, a test and an increment. */
+void countSlow(unsigned code);
+
+/* Summed across every registered block. Report path only. */
+uint32_t callCount(unsigned code);
+
+inline void
+count(unsigned code) {
+  ThreadCounters *c = g_tls_calls;
+  if (__builtin_expect(c == nullptr, 0)) {
+    countSlow(code);
+    return;
+  }
+  /* Deliberately not fetch_add. See the note above. */
+  c->n[code].store(c->n[code].load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+}
+
+/* MADEIRA ml999: the [d3d9-last] ring is now OPT-IN (MADEIRA_D3D9_LAST=1).
+ *
+ * It is crash forensics, not a measurement: nothing in any report reads it, it
+ * only ever prints after the process is already dying. Its cost is a second
+ * emulated locked RMW on the head plus an out-of-line call and ~8 stores, on
+ * the same 5540-calls-per-frame path. Off by default, the census numbers are
+ * unchanged and the per-call cost is one TLS load and one increment. When it is
+ * off the vectored exception handler is not installed either, so a guest fault
+ * does not walk through it. */
+extern bool g_ring_on;
 
 /* Present. Counted like any other method AND used as the frame clock: the
  * summary cadence is measured in presented frames, because "calls per frame"
@@ -121,8 +184,9 @@ void dumpLastCalls(const char *why);
 #define D3D9_CENSUS(code)                                                                                              \
   do {                                                                                                                 \
     if (::dxmt::census::g_on) {                                                                                        \
-      ::dxmt::census::g_calls[(code)].fetch_add(1, std::memory_order_relaxed);                                          \
-      ::dxmt::census::ringCall((code));                                                                                \
+      ::dxmt::census::count((code));                                                                                   \
+      if (::dxmt::census::g_ring_on)                                                                                   \
+        ::dxmt::census::ringCall((code));                                                                              \
     }                                                                                                                  \
   } while (0)
 
@@ -135,7 +199,7 @@ void dumpLastCalls(const char *why);
  * neither -- so a --strip / re-inject pass leaves these lines alone. */
 #define D3D9_CENSUS_RET(code, hr, a0, a1)                                                                              \
   do {                                                                                                                 \
-    if (::dxmt::census::g_on)                                                                                          \
+    if (::dxmt::census::g_on && ::dxmt::census::g_ring_on)                                                             \
       ::dxmt::census::ringRet((code), (long)(hr), (uint32_t)(a0), (uint32_t)(a1));                                     \
   } while (0)
 

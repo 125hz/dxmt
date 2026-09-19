@@ -53,6 +53,74 @@
 static const WCHAR kFocusProcProp[]   = L"MadeiraD3D9ShimOrigProc";
 static const WCHAR kFocusDeviceProp[] = L"MadeiraD3D9ShimDevice";
 
+/* ml999: THE PROPERTIES ARE A WINESERVER ROUND TRIP, AND WE ALREADY KNOW THE
+ * ANSWER.
+ *
+ * focusWindowProc opened EVERY message with two GetPropW calls, and on this
+ * port a window property lives in the wineserver: [srv-stats] measured
+ * `get_window_property: NtUserGetProp+0x7c' at 2088-2994 per 10 s -- the third
+ * largest server request kind in the whole process -- at 42 us each, purely to
+ * re-read two values this DLL set itself in hook_focus.
+ *
+ * So cache them here, in the process that owns them. The properties stay: they
+ * are the cross-DLL contract (the dedup check in hook_focus reads one, and the
+ * WM_NCDESTROY self-heal needs them if the app re-subclasses on top of us), and
+ * they remain the fallback whenever the cache misses, so behaviour is identical
+ * to before in every case -- the cache can only make it faster, never different.
+ *
+ * Eight slots: a process with more than eight simultaneously subclassed focus
+ * windows falls back to the properties for the extras and is merely as slow as
+ * it was. Publication is release/acquire on the HWND, with the payload written
+ * before the key and read after it, so a reader on the window's own thread
+ * never sees a slot whose proc/device have not landed yet. */
+#define FOCUS_CACHE_MAX 8
+static struct {
+    HWND hwnd;                          /* NULL = free */
+    WNDPROC orig;
+    struct d3d9shim_device *device;
+} g_focus_cache[FOCUS_CACHE_MAX];
+
+static void
+focus_cache_put(HWND hwnd, WNDPROC orig, struct d3d9shim_device *device)
+{
+    int i;
+    for (i = 0; i < FOCUS_CACHE_MAX; i++) {
+        HWND cur = __atomic_load_n(&g_focus_cache[i].hwnd, __ATOMIC_RELAXED);
+        if (cur && cur != hwnd)
+            continue;
+        g_focus_cache[i].orig = orig;
+        g_focus_cache[i].device = device;
+        __atomic_store_n(&g_focus_cache[i].hwnd, hwnd, __ATOMIC_RELEASE);
+        return;
+    }
+    /* Full: the properties still carry it. */
+}
+
+static void
+focus_cache_drop(HWND hwnd)
+{
+    int i;
+    for (i = 0; i < FOCUS_CACHE_MAX; i++)
+        if (__atomic_load_n(&g_focus_cache[i].hwnd, __ATOMIC_RELAXED) == hwnd)
+            __atomic_store_n(&g_focus_cache[i].hwnd, (HWND)NULL, __ATOMIC_RELEASE);
+}
+
+/* 1 on a hit. Only writes through the out pointers when it hits, so a miss
+ * leaves the caller's GetPropW fallback in charge. */
+static int
+focus_cache_get(HWND hwnd, WNDPROC *orig, struct d3d9shim_device **device)
+{
+    int i;
+    for (i = 0; i < FOCUS_CACHE_MAX; i++) {
+        if (__atomic_load_n(&g_focus_cache[i].hwnd, __ATOMIC_ACQUIRE) != hwnd)
+            continue;
+        *orig = g_focus_cache[i].orig;
+        *device = g_focus_cache[i].device;
+        return 1;
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------------------------
  * the per-HWND client-size cache the native wsi reads
  * ------------------------------------------------------------------------ */
@@ -329,9 +397,16 @@ focus_activation(struct d3d9shim_device *dev, int activated)
 static LRESULT CALLBACK
 focusWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
-    WNDPROC orig = (WNDPROC)GetPropW(hwnd, kFocusProcProp);
-    struct d3d9shim_device *device = GetPropW(hwnd, kFocusDeviceProp);
-    BOOL unicode = IsWindowUnicode(hwnd);
+    WNDPROC orig;
+    struct d3d9shim_device *device;
+    BOOL unicode;
+
+    /* ml999: the cache, or the properties if it misses. See focus_cache_put. */
+    if (!focus_cache_get(hwnd, &orig, &device)) {
+        orig = (WNDPROC)GetPropW(hwnd, kFocusProcProp);
+        device = GetPropW(hwnd, kFocusDeviceProp);
+    }
+    unicode = IsWindowUnicode(hwnd);
 
     /* The focus window is being torn down while still subclassed: drop our
      * proc so neither the property nor our function pointer outlives it. */
@@ -339,6 +414,7 @@ focusWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
         SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)orig);
         RemovePropW(hwnd, kFocusProcProp);
         RemovePropW(hwnd, kFocusDeviceProp);
+        focus_cache_drop(hwnd);          /* ml999 */
         d3d9shim_window_forget(hwnd);
         /* The window is going away, so nothing below applies and the
          * application must still receive this. */
@@ -420,6 +496,7 @@ d3d9shim_window_hook_focus(struct d3d9shim_device *dev, HWND fallback)
                : SetWindowLongPtrA(focus, GWLP_WNDPROC, (LONG_PTR)focusWindowProc);
     SetPropW(focus, kFocusProcProp, (HANDLE)orig);
     SetPropW(focus, kFocusDeviceProp, (HANDLE)dev);
+    focus_cache_put(focus, (WNDPROC)orig, dev);   /* ml999 */
     extra->focus_window = focus;
     extra->focus_hooked = 1;
 }
@@ -441,6 +518,12 @@ d3d9shim_window_unhook_focus(struct d3d9shim_device *dev)
      * that outlives its device would be dereferenced by the next activation
      * message, and the proc treats its absence as "forward only". */
     RemovePropW(focus, kFocusDeviceProp);
+    /* ml999: the cached device pointer must die with the property, and it must
+     * die FIRST -- the proc reads the cache before the properties, so a stale
+     * entry here is exactly the dangling device this ordering exists to stop.
+     * Dropping the whole entry is the conservative move: the fallback path is
+     * always correct, so a miss costs speed and never correctness. */
+    focus_cache_drop(focus);
     orig = (WNDPROC)GetPropW(focus, kFocusProcProp);
     if (!orig)
         return;
@@ -455,6 +538,11 @@ d3d9shim_window_unhook_focus(struct d3d9shim_device *dev)
         else
             SetWindowLongPtrA(focus, GWLP_WNDPROC, (LONG_PTR)orig);
         RemovePropW(focus, kFocusProcProp);
+    } else {
+        /* ml999: someone else owns the proc, so kFocusProcProp stays for their
+         * WM_NCDESTROY self-heal. Put the cache back in step with it -- orig
+         * still valid, device gone -- rather than leaving a permanent miss. */
+        focus_cache_put(focus, orig, NULL);
     }
 }
 
