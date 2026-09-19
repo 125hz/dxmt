@@ -209,7 +209,30 @@ public:
   Block
   allocate(size_t block_size) {
     Block block{};
-    block.mapped_address = placed_buffer_ ? malloc(block_size) : nullptr;
+    bool placed = placed_buffer_;
+#if defined(__i386__) && !defined(DXMT_MADEIRA)
+    /* MADEIRA (WOW64_DESIGN.md section 7.5): placed_buffer=false means "let
+     * Metal allocate and never look at the memory again".  That is fine for a
+     * 64-bit caller, but for a 32-bit guest the unix side would have to write
+     * [buffer contents] -- a pointer in Metal's own heap, outside the guest
+     * window -- back into info.memory, which has no 32-bit address, so
+     * _MTLDevice_newBuffer32 refuses the call and hands back a NULL buffer.
+     *
+     * The three placed_buffer=false rings are all on the D3D11 path and all
+     * CPU-visible (Managed, which DXMT_IOS remaps to Shared):
+     * CommandQueue::staging_allocator, MTLD3D11CommandList::staging_allocator
+     * and ResourceInitializer::gpu_command_heap_allocator.  Their contents are
+     * filled through MTLBuffer_updateContents, which memcpys into
+     * [buffer contents] -- so Private storage is not an alternative either.
+     * Supplying the backing from this PE module's own heap is: the allocation
+     * goes through the guest window chokepoint by construction, exactly as it
+     * does for Buffer::allocate's CpuPlaced (dxmt_buffer.cpp) and
+     * Texture::allocate (dxmt_texture.cpp).  Nothing reads mapped_address on
+     * these rings, so the only cost is the guest VA -- which is why
+     * kStagingBlockSize is already 8 MB rather than 32 MB on i386. */
+    placed = true;
+#endif
+    block.mapped_address = placed ? malloc(block_size) : nullptr;
     WMTBufferInfo info;
     info.options = buffer_info_;
     info.memory.set(block.mapped_address);
