@@ -183,9 +183,23 @@ against the same headers, not assumed:
   `IDirect3DSwapChain9Ex::GetPresentStats`.
 - **26 layout-identical** structs, pointed at in place after one `+B`.
 - **one padding-only** struct, `D3DADAPTER_IDENTIFIER9`: every field at the
-  same offset, but `sizeof()` is 1100 on i386 and 1104 on LP64. It is still
-  pointed at in place, its window check uses `D3D9SHIM_SIZE32_*`, and **the
-  native hook must not write past offset 1100**.
+  same offset, but `sizeof()` is 1100 on i386 and 1104 on LP64 —
+  `d3d9types.h` opens with `#pragma pack(push,4)`, which caps the
+  `LARGE_INTEGER DriverVersion` member's alignment at 4 on i386 and leaves it
+  at 8 on LP64, so the struct's tail padding differs. It **bounces**, exactly
+  like a mirror: the entry declares a host-layout local, the frontend writes
+  that, and `D3D9_COPY32_OUT` copies back `D3D9SHIM_SIZE32_*` bytes and not
+  one more. It used to be pointed at in place — which handed the frontend a
+  host-typed pointer into a 1100-byte guest buffer, and
+  `MTLD3D9Interface::GetAdapterIdentifier` opens with
+  `memset(pIdentifier, 0, sizeof(*pIdentifier))`. Four bytes past the end of
+  an application's stack local is its `/GS` cookie, so the title died of
+  `0xC0000409` in its own epilogue with no D3D9 frame anywhere near the
+  faulting address. `D3D9_COPY32_OUT`/`_IN` carry their own `_Static_assert`
+  and are the only copy path for these; `generator_self_check()` refuses any
+  `out_struct`/`inout_struct` whose target is not a mirror, a padding-only
+  bounce, or a declared layout-identical struct, so a new struct cannot be
+  written back at host size by default.
 
 The mirror wire form is the i386 *memory image*, so every mirror field is
 4 bytes wide and the two `LARGE_INTEGER`s cross as explicit lo/hi halves; a
@@ -274,7 +288,13 @@ The generator checks that the handle is the block's second 64-bit word, which
 is what the shim's one generic reader assumes.
 
 Arena (§7.5 / §8.2(c)): `d3d9shim_arena_alloc`, `d3d9shim_arena_free`,
-`d3d9shim_arena_grow`. Lock (§8.2(d)): `d3d9shim_lock` / `d3d9shim_unlock`,
+`d3d9shim_arena_grow`. `d3d9shim_arena_init()` reserves and registers the
+first 64 MB chunk from the transport handshake, before any D3D9 object can
+exist. It must: the arena's consumer is `dxmt::guest_alloc()` on the *native*
+side, and the only caller of `d3d9shim_arena_grow()` is the shim's answer to
+`D3D9SHIM_STATUS_ARENA_EXHAUSTED` — so an arena that starts empty stays empty,
+every app-visible allocation from the first `CreateDevice` onward returns NULL,
+and the create call it was made for still reports `S_OK`. Lock (§8.2(d)): `d3d9shim_lock` / `d3d9shim_unlock`,
 recursive, keyed by thread id; empty for a device without
 `D3DCREATE_MULTITHREADED`. Diagnostics: `d3d9shim_log_once`.
 
@@ -304,6 +324,7 @@ Macros `d3d9_unix.c` requires:
 | `D3D9_DEREF32(p)` | the `ULONG` at an already-converted pointer; **NULL- and window-safe**, because a size-inout count is read before that argument's own validation runs. |
 | `D3D9_SHARED_IN(slot, pool)` / `D3D9_SHARED_OUT(slot, h, pool)` | the `pSharedHandle` two-level rule: convert only for `D3DPOOL_SYSTEMMEM` with a non-NULL target (the user-memory idiom); otherwise opaque. `pool` is `D3D9_NO_POOL` for the four create paths that have no pool argument. |
 | `D3D9_LOG(msg)` | one-line diagnostic. |
+| `D3D9_ARENA_TAKE_STARVED()` | non-zero if an app-visible allocation on **this thread** could not be served since the last call; reading it clears it. Every entry whose method returns `HRESULT` takes it after the call and, if the call also failed, returns `D3D9SHIM_STATUS_ARENA_EXHAUSTED` so the shim grows the arena and retries the same block once. `dxmt::guest_alloc()` is reached from deep inside the frontend and can only answer NULL, so without this mark the grow-and-retry path of §8.2(c) was unreachable and an exhausted arena stayed exhausted. Only on a failed `HRESULT`, so a retry can never repeat work that succeeded. |
 | `NTSTATUS`, `STATUS_*` | as ntdll. |
 
 Variable-length input scanners (each walks GUEST memory, so each must
@@ -345,6 +366,27 @@ archive too, so with the native path on it counts them again on this side),
 while this counts CROSSINGS — the number §8.6's ring exists to reduce, and
 the one no per-method counter can produce. `MADEIRA_D3D9_NATIVE_CENSUS=0`
 disables it; `MADEIRA_D3D9_NATIVE_CENSUS_EVERY` overrides the interval.
+
+`[d3d9-last]`: the census summary only prints on a Present cadence, so a title
+that dies during device initialisation produces no census at all — and a fault
+in the *application's* own code (a `/GS` fast-fail, a bad pointer) carries no
+D3D9 frame, so nothing in the log says which call preceded it. The same
+counter site therefore also records a per-thread last opcode, printed by every
+census summary; `MADEIRA_D3D9_TRACE=1` prints one `[d3d9-last]` line per
+crossing, and the last one in the log is the call the guest was in when it
+died. That is the bisection tool for anything that faults on the guest side.
+
+`[d3d9-lockcheck]`: `MADEIRA_D3D9_LOCKCHECK=1` arms a check on every pointer
+written back to the guest — the two `pBits` and the two buffer `Lock()`s'
+`ppbData`, all of which funnel through `d3d9_guest_ptr32()`. In-window is not
+the same thing as writable: a reservation with no commit, a page an arena
+chunk never faulted in, or a range some other owner re-protected all pass the
+window test and then fault inside translated guest code with no provenance at
+all. Armed, the pointer is looked up in the arena (an app-visible allocation
+may come from nowhere else — a miss is a named line and a missed
+`dxmt::guest_alloc()` site) and the first and last byte of its allocation are
+read and written back unchanged, so a non-writable mapping faults *here*, on
+the guest's own thread, inside a named function, with the allocation printed.
 
 Ring replay: `NTSTATUS d3d9_ring_replay(base, bytes, seq_io)` walks
 `{u16 op; u16 len; u32 seq;}` records and calls the *same* `d3d9_call_*` the

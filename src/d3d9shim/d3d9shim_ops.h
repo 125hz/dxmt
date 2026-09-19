@@ -556,9 +556,15 @@ _Static_assert(sizeof(RECT) == 16, "RECT is not layout-identical");
 _Static_assert(sizeof(RGNDATA) == 36, "RGNDATA is not layout-identical");
 
 /* Field offsets identical, TAIL PADDING not: a LARGE_INTEGER member gives
- * the struct 8-byte alignment on LP64 and 4 on i386.  Still pointed at in
- * place -- but a copy must use the SMALLER size, so assert offsets, never
- * sizeof. */
+ * the struct 8-byte alignment on LP64 and 4 on i386.  So the fields may be
+ * read and written at the same offsets, but the struct MAY NOT be pointed at
+ * in place across the boundary: a host-typed write to a guest buffer runs
+ * sizeof() bytes, which is past the end of the i386 image.
+ * D3DADAPTER_IDENTIFIER9 lives on the stack in every title that calls
+ * GetAdapterIdentifier, and the frontend opens with
+ * memset(p, 0, sizeof(*p)) -- four bytes onto the caller's /GS cookie, which
+ * surfaces as a 0xC0000409 fast-fail in the application's own epilogue with
+ * no D3D9 frame anywhere near it.  Hence the bounce below. */
 #define D3D9SHIM_SIZE32_D3DADAPTER_IDENTIFIER9 1100
 #define D3D9SHIM_SIZE64_D3DADAPTER_IDENTIFIER9 1104
 _Static_assert(offsetof(D3DADAPTER_IDENTIFIER9, DriverVersion) == 1056, "D3DADAPTER_IDENTIFIER9.DriverVersion moved");
@@ -570,6 +576,29 @@ _Static_assert(sizeof(D3DADAPTER_IDENTIFIER9) == 1104, "D3DADAPTER_IDENTIFIER9")
 #else
 _Static_assert(sizeof(D3DADAPTER_IDENTIFIER9) == 1100, "D3DADAPTER_IDENTIFIER9");
 #endif
+_Static_assert(D3D9SHIM_SIZE32_D3DADAPTER_IDENTIFIER9 <= D3D9SHIM_SIZE64_D3DADAPTER_IDENTIFIER9, "the i386 image of D3DADAPTER_IDENTIFIER9 must fit in the host struct");
+
+/* The ONLY way a padding-only struct crosses.  Both directions copy exactly
+ * D3D9SHIM_SIZE32_<T> bytes -- the i386 image -- and the assert inside the
+ * macro is what makes "never touch a guest buffer with the host sizeof()" a
+ * build failure instead of a review item.  The generator refuses to emit an
+ * in-place pointer for one of these (generator_self_check), so these two
+ * macros are the whole copy surface. */
+#define D3D9_COPY32_OUT(T, guest, host_struct)                                \
+    do {                                                                      \
+        _Static_assert(D3D9SHIM_SIZE32_##T <= sizeof(T),                      \
+                       "the i386 image of " #T " must fit in the host struct");\
+        memcpy((void *)(guest), (const void *)(host_struct),                  \
+               (size_t)D3D9SHIM_SIZE32_##T);                                  \
+    } while (0)
+
+#define D3D9_COPY32_IN(T, host_struct, guest)                                 \
+    do {                                                                      \
+        _Static_assert(D3D9SHIM_SIZE32_##T <= sizeof(T),                      \
+                       "the i386 image of " #T " must fit in the host struct");\
+        memcpy((void *)(host_struct), (const void *)(guest),                  \
+               (size_t)D3D9SHIM_SIZE32_##T);                                  \
+    } while (0)
 
 /* ------------------------------------------------------------------------
  * Parameter blocks, one per vtable slot.  Also the ring record payloads for
@@ -4817,6 +4846,17 @@ _Static_assert(offsetof(struct d3d9_Query9_GetData_params, ret) == 20, "d3d9_Que
 #define D3D9SHIM_WINDOW_FOREGROUND     0x2u
 #define D3D9SHIM_WINDOW_FULLSCREEN     0x4u
 #define D3D9SHIM_WINDOW_GONE           0x8u
+
+/* The distinguished status a unix entry returns when THIS call could not be
+ * served because the guest arena is empty or full.  d3d9shim_native_call()
+ * answers it by growing the arena and retrying the same block exactly once
+ * (8.2(c): grow-and-retry, no upcall machinery).  It is emitted here rather
+ * than declared once per side so the two halves cannot disagree about the
+ * value; the entry only raises it on a call that already FAILED, so the retry
+ * can never double work that succeeded. */
+#ifndef D3D9SHIM_STATUS_ARENA_EXHAUSTED
+#define D3D9SHIM_STATUS_ARENA_EXHAUSTED  0xC0000017u  /* STATUS_NO_MEMORY */
+#endif
 
 /* slot 321 -- hands the native sub-allocator one VirtualAlloc'd guest arena chunk (WOW64_DESIGN.md 8.2(c)).  guest_base is a GUEST address the window chokepoint has already placed inside [B, B+4G); the native side owns the sub-allocation, so the entry does NOT convert it. */
 struct d3d9_arena_register_params {

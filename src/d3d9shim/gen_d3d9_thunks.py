@@ -176,6 +176,7 @@ def mirror_of(shape):
 
 MIRROR_BY_NAME = {s["name"]: s for s in api.MIRROR_STRUCTS}
 PADDING_ONLY = {p[0] for p in api.PADDING_ONLY_STRUCTS}
+IDENTICAL_BY_NAME = {s[0]: s[1] for s in api.IDENTICAL_STRUCTS}
 LOCKED = {"locked_rect_out": "D3DLOCKED_RECT", "locked_box_out": "D3DLOCKED_BOX"}
 
 
@@ -440,9 +441,15 @@ _Static_assert(sizeof(struct d3d9_init_params) == 32, "d3d9_init_params");
                  % (name, size, name))
     o.append("")
     o.append("""/* Field offsets identical, TAIL PADDING not: a LARGE_INTEGER member gives
- * the struct 8-byte alignment on LP64 and 4 on i386.  Still pointed at in
- * place -- but a copy must use the SMALLER size, so assert offsets, never
- * sizeof. */""")
+ * the struct 8-byte alignment on LP64 and 4 on i386.  So the fields may be
+ * read and written at the same offsets, but the struct MAY NOT be pointed at
+ * in place across the boundary: a host-typed write to a guest buffer runs
+ * sizeof() bytes, which is past the end of the i386 image.
+ * D3DADAPTER_IDENTIFIER9 lives on the stack in every title that calls
+ * GetAdapterIdentifier, and the frontend opens with
+ * memset(p, 0, sizeof(*p)) -- four bytes onto the caller's /GS cookie, which
+ * surfaces as a 0xC0000409 fast-fail in the application's own epilogue with
+ * no D3D9 frame anywhere near it.  Hence the bounce below. */""")
     for name, size32, size64, offs in api.PADDING_ONLY_STRUCTS:
         o.append("#define D3D9SHIM_SIZE32_%s %d" % (name, size32))
         o.append("#define D3D9SHIM_SIZE64_%s %d" % (name, size64))
@@ -454,7 +461,32 @@ _Static_assert(sizeof(struct d3d9_init_params) == 32, "d3d9_init_params");
         o.append("#else")
         o.append('_Static_assert(sizeof(%s) == %d, "%s");' % (name, size32, name))
         o.append("#endif")
+        o.append('_Static_assert(D3D9SHIM_SIZE32_%s <= D3D9SHIM_SIZE64_%s,'
+                 ' "the i386 image of %s must fit in the host struct");'
+                 % (name, name, name))
     o.append("")
+    o.append("""/* The ONLY way a padding-only struct crosses.  Both directions copy exactly
+ * D3D9SHIM_SIZE32_<T> bytes -- the i386 image -- and the assert inside the
+ * macro is what makes "never touch a guest buffer with the host sizeof()" a
+ * build failure instead of a review item.  The generator refuses to emit an
+ * in-place pointer for one of these (generator_self_check), so these two
+ * macros are the whole copy surface. */
+#define D3D9_COPY32_OUT(T, guest, host_struct)                                \\
+    do {                                                                      \\
+        _Static_assert(D3D9SHIM_SIZE32_##T <= sizeof(T),                      \\
+                       "the i386 image of " #T " must fit in the host struct");\\
+        memcpy((void *)(guest), (const void *)(host_struct),                  \\
+               (size_t)D3D9SHIM_SIZE32_##T);                                  \\
+    } while (0)
+
+#define D3D9_COPY32_IN(T, host_struct, guest)                                 \\
+    do {                                                                      \\
+        _Static_assert(D3D9SHIM_SIZE32_##T <= sizeof(T),                      \\
+                       "the i386 image of " #T " must fit in the host struct");\\
+        memcpy((void *)(host_struct), (const void *)(guest),                  \\
+               (size_t)D3D9SHIM_SIZE32_##T);                                  \\
+    } while (0)
+""")
 
     # ---- parameter blocks ---------------------------------------------
     o.append("""/* ------------------------------------------------------------------------
@@ -513,6 +545,17 @@ _Static_assert(sizeof(struct d3d9_ring_record) == 8, "d3d9_ring_record");
     for name, value in api.WINDOW_STATE_FLAGS:
         o.append("#define %-30s 0x%xu" % (name, value))
     o.append("")
+    o.append("""/* The distinguished status a unix entry returns when THIS call could not be
+ * served because the guest arena is empty or full.  d3d9shim_native_call()
+ * answers it by growing the arena and retrying the same block exactly once
+ * (8.2(c): grow-and-retry, no upcall machinery).  It is emitted here rather
+ * than declared once per side so the two halves cannot disagree about the
+ * value; the entry only raises it on a call that already FAILED, so the retry
+ * can never double work that succeeded. */
+#ifndef D3D9SHIM_STATUS_ARENA_EXHAUSTED
+#define D3D9SHIM_STATUS_ARENA_EXHAUSTED  0xC0000017u  /* STATUS_NO_MEMORY */
+#endif
+""")
     for i, t in enumerate(api.TRANSPORT_SLOTS):
         o.append("/* slot %d -- %s */" % (TRANSPORT_BASE + i,
                                           t["note"].replace("*/", "* /")))
@@ -1255,6 +1298,41 @@ def unix_convert(it, m):
                 post.append("    if (_%s_g)" % n)
                 post.append("        d3d9_mirror_out_%s(_%s_g, &_%s);"
                             % (host, n, n))
+        elif t in ("in_struct", "out_struct", "inout_struct") \
+                and arg_target(a) in PADDING_ONLY:
+            # A PADDING-ONLY struct: every field is at the same offset, but the
+            # host sizeof() is LARGER than the i386 image (D3DADAPTER_IDENTIFIER9
+            # is 1104 / 1100).  It used to be pointed at in place, which handed
+            # the frontend a host-typed pointer into a guest buffer that is
+            # short by the tail padding -- and MTLD3D9Interface::
+            # GetAdapterIdentifier opens with memset(p, 0, sizeof(*p)), so the
+            # application's D3DADAPTER_IDENTIFIER9 (a stack local in every title
+            # that calls it) lost four bytes past its end: the /GS cookie, i.e.
+            # a 0xC0000409 fast-fail in the caller's epilogue with no D3D9 call
+            # anywhere near the faulting address.
+            #
+            # So it BOUNCES, exactly like a mirror: the frontend writes a host
+            # struct and D3D9_COPY32_OUT copies back D3D9SHIM_SIZE32_<T> bytes
+            # and not one more.  That macro is the only copy path for these and
+            # carries its own _Static_assert (d3d9shim_ops.h).
+            host = arg_target(a)
+            decls.append("    %s _%s;" % (host, n))
+            decls.append("    void *_%s_g = D3D9_HOST_PTR(_p->%s);" % (n, n))
+            pre.append("    memset(&_%s, 0, sizeof(_%s));" % (n, n))
+            pre.append("    if (_%s_g) {" % n)
+            pre.append("        if (!D3D9_IN_WINDOW(_%s_g, D3D9SHIM_SIZE32_%s)) {"
+                       % (n, host))
+            pre += unix_bail(it, m, n, 12)
+            pre.append("        }")
+            if t in ("in_struct", "inout_struct"):
+                pre.append("        D3D9_COPY32_IN(%s, &_%s, _%s_g);"
+                           % (host, n, n))
+            pre.append("    }")
+            callargs.append("_%s_g ? &_%s : NULL" % (n, n))
+            if t in ("out_struct", "inout_struct"):
+                post.append("    if (_%s_g)" % n)
+                post.append("        D3D9_COPY32_OUT(%s, _%s_g, &_%s);"
+                            % (host, n, n))
         else:
             # layout-identical: point at the converted guest address in place
             target = arg_target(a) or "void"
@@ -1309,6 +1387,9 @@ def emit_unix_c():
  *   D3D9_DEREF32(p)           -> the ULONG at a validated guest address
  *   D3D9_SHARED_IN(slot, pool) / D3D9_SHARED_OUT(slot, h, pool)
  *   D3D9_NO_POOL, D3D9_LOG(msg)
+ *   D3D9_ARENA_TAKE_STARVED()  -> non-zero if an app-visible allocation on
+ *                                 THIS thread could not be served since the
+ *                                 last call; reading it clears it.
  *
  * EVERY embedded pointer is converted before any dereference and NULL stays
  * NULL (7.4 rule 1); every converted pointer is range-checked before it is
@@ -1479,8 +1560,25 @@ NTSTATUS _d3d9_init(void *args)
         o.append("")
         o.append("NTSTATUS _d3d9_%s(void *args)" % sym)
         o.append("{")
-        o.append("    d3d9_call_%s(args);" % sym)
-        o.append("    return STATUS_SUCCESS;")
+        if m["ret"] == "HRESULT":
+            # An app-visible allocation that could not be served leaves a
+            # per-thread mark.  If it also made THIS call fail, say so with
+            # the distinguished status instead of an opaque E_OUTOFMEMORY:
+            # the shim grows the arena and retries the same block once
+            # (8.2(c)).  The mark is taken unconditionally so it cannot leak
+            # into the next call, and acted on only on a failed HRESULT, so a
+            # retry can never repeat work that succeeded.
+            o.append("    struct d3d9_%s_params *_p = args;" % sym)
+            o.append("    int _starved;")
+            o.append("")
+            o.append("    d3d9_call_%s(_p);" % sym)
+            o.append("    _starved = D3D9_ARENA_TAKE_STARVED();")
+            o.append("    if (_starved && FAILED((HRESULT)_p->ret))")
+            o.append("        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;")
+            o.append("    return STATUS_SUCCESS;")
+        else:
+            o.append("    d3d9_call_%s(args);" % sym)
+            o.append("    return STATUS_SUCCESS;")
         o.append("}")
         o.append("")
 
@@ -1929,6 +2027,25 @@ def generator_self_check():
                 if iface not in KINDS:
                     bad.append("%s::%s: %s names an interface with no kind"
                                % (it["iface"], m["name"], a["shape"]))
+            # Every struct the native side WRITES into must be one the
+            # boundary knows the i386 size of, and the entry must write that
+            # many bytes and no more.  Three legal shapes:
+            #   mirror       -> d3d9_mirror_out_<T>, field by field
+            #   padding-only -> D3D9_COPY32_OUT, exactly D3D9SHIM_SIZE32_<T>
+            #   identical    -> in place, one size on both ABIs
+            # Anything else is a host-sized write into a guest buffer, which
+            # is the 0xC0000409 class of bug.
+            if a["tag"] in ("out_struct", "inout_struct"):
+                target = arg_target(a)
+                if target in MIRROR_BY_NAME or target in PADDING_ONLY:
+                    continue
+                if target in IDENTICAL_BY_NAME:
+                    continue
+                bad.append("%s::%s: %s is written back in place but its i386 "
+                           "size is not declared in d3d9_api.py -- add it to "
+                           "IDENTICAL_STRUCTS, MIRROR_STRUCTS or "
+                           "PADDING_ONLY_STRUCTS"
+                           % (it["iface"], m["name"], target))
         if m["disp"] in ("local", "resolve") and (m["local"] or "").startswith("identity"):
             if not any(a["tag"] == "iface_out" for a in m["args"]):
                 bad.append("%s::%s: identity local with no iface_out argument"

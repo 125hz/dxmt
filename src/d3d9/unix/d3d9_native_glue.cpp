@@ -168,6 +168,12 @@ arena() {
   return a;
 }
 
+/* Set by every guest_alloc() that could not be served, read and cleared by
+ * the generated unix entry's epilogue (D3D9_ARENA_TAKE_STARVED).  Per-thread
+ * so a starving DXMT worker cannot make an unrelated guest call on another
+ * thread look like an exhaustion. */
+thread_local unsigned g_arena_starved;
+
 size_t
 host_page_size() {
   static size_t page = []() -> size_t {
@@ -309,6 +315,90 @@ d3d9_native_arena_high_water(void) {
   return a.high_water;
 }
 
+/* Read-and-clear the per-thread starvation mark; see d3d9_unix_glue.h. */
+int
+d3d9_native_arena_take_starved(void) {
+  unsigned n = g_arena_starved;
+  g_arena_starved = 0;
+  return n != 0;
+}
+
+/* ---- MADEIRA_D3D9_LOCKCHECK=1 -------------------------------------------
+ *
+ * Every pointer this boundary hands back to the application -- the two
+ * pBits and the two buffer Lock()s' ppbData -- must be memory the guest can
+ * WRITE.  In-window is not enough: a reservation with no commit, a page the
+ * arena chunk never faulted in, or a range some other owner re-protected all
+ * pass the window test and then fault inside translated guest code, where
+ * the log says only "a store faulted at some guest address".
+ *
+ * So under the knob the pointer is (a) looked up in the arena, which is the
+ * only place an app-visible allocation may come from, and (b) touched: the
+ * first and last byte of the allocation are read and written back unchanged.
+ * A non-writable page then faults HERE, on the guest's own thread, inside a
+ * named function, with the allocation printed -- instead of several thousand
+ * instructions later with no provenance at all. */
+int d3d9_native_lockcheck_on;
+
+void
+d3d9_native_lockcheck(const void *host) {
+  static std::atomic<uint32_t> reported;
+  uint64_t p = (uint64_t)(uintptr_t)host;
+  uint64_t base = 0, size = 0;
+
+  if (!host)
+    return;
+
+  {
+    Arena &a = arena();
+    std::lock_guard<std::mutex> guard(a.mutex);
+    auto exact = a.live.find(const_cast<void *>(host));
+    if (exact != a.live.end()) {
+      base = p;
+      size = exact->second.size;
+    } else {
+      /* An interior pointer: a Lock() of a sub-rectangle answers base+offset,
+       * so the allocation is the one that CONTAINS it. */
+      for (const auto &kv : a.live) {
+        uint64_t lo = (uint64_t)(uintptr_t)kv.first;
+        if (p >= lo && p < lo + kv.second.size) {
+          base = lo;
+          size = kv.second.size;
+          break;
+        }
+      }
+    }
+  }
+
+  if (!size) {
+    if (reported.fetch_add(1, std::memory_order_relaxed) < 8)
+      std::fprintf(stderr,
+                   "[d3d9-lockcheck] %p is about to be handed to the guest "
+                   "but the arena never allocated it -- an app-visible "
+                   "allocation site is not going through dxmt::guest_alloc "
+                   "(WOW64_DESIGN.md 8.2(c))\n",
+                   host);
+    return;
+  }
+
+  /* Read-modify-write with the same value: it proves the page is writable
+   * without changing a byte of the application's data. */
+  volatile unsigned char *first = (volatile unsigned char *)(uintptr_t)base;
+  volatile unsigned char *last =
+      (volatile unsigned char *)(uintptr_t)(base + size - 1);
+  unsigned char a0 = *first;
+  *first = a0;
+  unsigned char a1 = *last;
+  *last = a1;
+
+  if (reported.fetch_add(1, std::memory_order_relaxed) < 8)
+    std::fprintf(stderr,
+                 "[d3d9-lockcheck] ok %p (allocation %p + %llu, offset %llu) "
+                 "writable\n",
+                 host, (void *)(uintptr_t)base, (unsigned long long)size,
+                 (unsigned long long)(p - base));
+}
+
 } // extern "C"
 
 namespace dxmt {
@@ -349,6 +439,7 @@ guest_alloc(size_t size, size_t alignment) {
                    "not called d3d9_native_arena_register yet, so every "
                    "app-visible allocation fails (WOW64_DESIGN.md 8.2(c))\n");
     }
+    g_arena_starved++;
     return nullptr;
   }
 
@@ -390,6 +481,7 @@ guest_alloc(size_t size, size_t alignment) {
                "[d3d9-native] arena: exhausted at %llu bytes in use -- grow it "
                "(WOW64_DESIGN.md 8.9-6)\n",
                (unsigned long long)a.in_use);
+  g_arena_starved++;
   return nullptr;
 }
 
@@ -949,8 +1041,31 @@ unsigned g_census_seq;
 
 void census_report(); /* below d3d9_native_gen.inc: it names the op table */
 
+/* ---- [d3d9-last]: what was the last crossing before the guest died ------
+ *
+ * A fault in the APPLICATION's own code -- a /GS fast-fail, a bad pointer --
+ * carries no D3D9 frame, so the log has to name the last crossing on that
+ * thread separately.  The census summary cannot: it only prints on a Present
+ * cadence, and a title that dies during device init never presents at all.
+ *
+ * Always-on: a per-thread last opcode, printed by the teardown line and by
+ * every census summary.  MADEIRA_D3D9_TRACE=1 additionally prints one
+ * [d3d9-last] line per crossing, which is what bisects a guest-side fault to
+ * the call that preceded it. */
+bool g_trace_on = false;
+thread_local unsigned g_last_op = ~0u;
+thread_local unsigned long long g_last_seq;
+std::atomic<unsigned> g_last_op_any{~0u};
+
+void trace_line(unsigned op); /* below: it names the op table */
+
 inline void
 census_tick(unsigned op) {
+  g_last_op = op;
+  g_last_seq++;
+  g_last_op_any.store(op, std::memory_order_relaxed);
+  if (g_trace_on)
+    trace_line(op);
   if (!g_census_on || op >= D3D9SHIM_OP_COUNT)
     return;
   g_census_calls[op].fetch_add(1, std::memory_order_relaxed);
@@ -1417,6 +1532,29 @@ d3d9_native_Surface9_ReleaseDC(d3d9_native_handle self, HANDLE hdc) {
 
 namespace {
 
+const char *
+op_name(unsigned op) {
+  return op < D3D9SHIM_OP_COUNT ? d3d9_native_op_names[op] : "(none)";
+}
+
+/* One line per crossing under MADEIRA_D3D9_TRACE=1.  Deliberately the last
+ * thing printed before the frontend runs, so a guest-side fault with no D3D9
+ * frame in it still says which call it followed. */
+void
+trace_line(unsigned op) {
+  std::fprintf(stderr, "[d3d9-last] #%llu %s\n",
+               (unsigned long long)g_last_seq, op_name(op));
+}
+
+void
+last_call_line(const char *why) {
+  std::fprintf(stderr,
+               "[d3d9-last] %s: this thread %llu crossings, last %s; any "
+               "thread last %s\n",
+               why, (unsigned long long)g_last_seq, op_name(g_last_op),
+               op_name(g_last_op_any.load(std::memory_order_relaxed)));
+}
+
 void
 census_report() {
   uint32_t frames = g_census_frames.load(std::memory_order_relaxed);
@@ -1481,6 +1619,7 @@ census_report() {
 
   std::fprintf(stderr, "[d3d9-native-census] arena: %llu bytes high water\n",
                (unsigned long long)d3d9_native_arena_high_water());
+  last_call_line("census");
 }
 
 } // namespace
@@ -1499,5 +1638,27 @@ d3d9_native_census_configure(void) {
     long value = std::strtol(every, nullptr, 10);
     if (value > 0)
       g_census_interval = (unsigned)value;
+  }
+
+  const char *trace = std::getenv("MADEIRA_D3D9_TRACE");
+  if (trace && std::strcmp(trace, "0") && std::strcmp(trace, "off")
+      && std::strcmp(trace, "no") && std::strcmp(trace, "false")) {
+    g_trace_on = true;
+    std::fprintf(stderr,
+                 "[d3d9-last] MADEIRA_D3D9_TRACE=%s: one line per crossing. "
+                 "The last one printed is the call the guest was in when it "
+                 "died.\n",
+                 trace);
+  }
+
+  const char *lockcheck = std::getenv("MADEIRA_D3D9_LOCKCHECK");
+  if (lockcheck && std::strcmp(lockcheck, "0") && std::strcmp(lockcheck, "off")
+      && std::strcmp(lockcheck, "no") && std::strcmp(lockcheck, "false")) {
+    d3d9_native_lockcheck_on = 1;
+    std::fprintf(stderr,
+                 "[d3d9-lockcheck] armed: every pointer handed back to the "
+                 "guest (pBits, ppbData) is looked up in the arena and its "
+                 "first and last byte are read-modify-written before the "
+                 "application sees it (WOW64_DESIGN.md 8.2(c))\n");
   }
 }

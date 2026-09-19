@@ -99,6 +99,17 @@ d3d9_host_ptr(uint32_t addr) {
  * than truncating is the point: see d3d9_guest_ptr32() below. */
 extern void d3d9_guest_ptr32_refused(const void *host);
 
+/* MADEIRA_D3D9_LOCKCHECK=1 (read once in d3d9_native_census_configure).  In
+ * window is not the same thing as writable: a reservation with no commit, a
+ * page the arena chunk never faulted in, or a range some other owner
+ * re-protected all pass the window test and then fault inside translated
+ * guest code with no provenance.  When armed, every pointer written back to
+ * the guest is looked up in the arena and its first and last byte are
+ * read-modify-written, so a non-writable mapping faults here, named, instead
+ * of thousands of instructions later inside the application. */
+extern int d3d9_native_lockcheck_on;
+extern void d3d9_native_lockcheck(const void *host);
+
 /* Forward declaration: the window check below is what makes the write-back
  * safe, and it is defined a few lines down. */
 static inline int d3d9_in_window(const void *p, size_t bytes);
@@ -124,6 +135,8 @@ d3d9_guest_ptr32(const void *host) {
     d3d9_guest_ptr32_refused(host);
     return 0;
   }
+  if (d3d9_native_lockcheck_on)
+    d3d9_native_lockcheck(host);
   return (ULONG)((uint64_t)(uintptr_t)host - (uint64_t)base);
 }
 
@@ -198,6 +211,22 @@ d3d9_shared_out(ULONG *slot, HANDLE handle, D3DPOOL pool) {
 
 #define D3D9_SHARED_IN(slot, pool) d3d9_shared_in((const ULONG *)(slot), (D3DPOOL)(pool))
 #define D3D9_SHARED_OUT(slot, h, pool) d3d9_shared_out((ULONG *)(slot), (HANDLE)(h), (D3DPOOL)(pool))
+
+/* ---- the arena's starvation mark ---------------------------------------- */
+
+/* dxmt::guest_alloc() has no way to say "grow the arena": it is reached from
+ * deep inside the frontend and its contract is a NULL return.  So a failure
+ * leaves a per-thread mark, and the generated unix entry turns
+ * "this call failed AND the arena starved on this thread" into
+ * D3D9SHIM_STATUS_ARENA_EXHAUSTED.  The shim answers that by growing the
+ * arena and retrying the same block once (8.2(c)).
+ *
+ * Per-thread on purpose: a DXMT worker pthread that starves must not make an
+ * unrelated guest call on another thread look like an exhaustion.  Reading it
+ * clears it, so a mark can never survive into the next call. */
+extern int d3d9_native_arena_take_starved(void);
+
+#define D3D9_ARENA_TAKE_STARVED() d3d9_native_arena_take_starved()
 
 /* ---- diagnostics ------------------------------------------------------- */
 

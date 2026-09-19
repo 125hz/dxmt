@@ -81,11 +81,39 @@ arena_unlock(void)
     LeaveCriticalSection(&arena_cs);
 }
 
+static HRESULT arena_add_chunk(size_t need);
+
+/* Reserve and register the FIRST chunk, now, from the transport handshake.
+ *
+ * This used to do nothing but construct the critical section, on the reading
+ * that the arena grows on demand.  It cannot: the consumer is
+ * dxmt::guest_alloc() on the NATIVE side, and the only thing that ever calls
+ * d3d9shim_arena_grow() is d3d9shim_native_call()'s answer to
+ * D3D9SHIM_STATUS_ARENA_EXHAUSTED.  With no chunk registered, guest_alloc()
+ * returns NULL for every app-visible allocation from the very first
+ * CreateDevice -- the native side says so once ("arena: no chunk registered")
+ * and then every Lock mirror, every MANAGED/SYSTEMMEM mirror and every
+ * backing-pool block is a failed allocation, while the create call it was
+ * made for still reports S_OK.  The first thing the application writes
+ * through is then not memory it owns.
+ *
+ * So the arena is established before the first D3D9 object can exist.  One
+ * 64 MB chunk, the size 8.2(c) specifies; growth still happens on demand.
+ * A failure here is not fatal -- the native side still names it -- but it is
+ * said out loud at the point it can still be understood. */
 int
 d3d9shim_arena_init(void)
 {
+    HRESULT hr;
+
     arena_lock();
+    hr = arena_chunks ? D3D_OK : arena_add_chunk(0);
     arena_unlock();
+    if (FAILED(hr)) {
+        d3d9shim_log_once("[d3d9-arena] could not reserve the first chunk; "
+                          "every app-visible allocation will fail");
+        return 0;
+    }
     return 1;
 }
 

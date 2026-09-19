@@ -42,6 +42,9 @@
  *   D3D9_DEREF32(p)           -> the ULONG at a validated guest address
  *   D3D9_SHARED_IN(slot, pool) / D3D9_SHARED_OUT(slot, h, pool)
  *   D3D9_NO_POOL, D3D9_LOG(msg)
+ *   D3D9_ARENA_TAKE_STARVED()  -> non-zero if an app-visible allocation on
+ *                                 THIS thread could not be served since the
+ *                                 last call; reading it clears it.
  *
  * EVERY embedded pointer is converted before any dereference and NULL stays
  * NULL (7.4 rule 1); every converted pointer is range-checked before it is
@@ -229,19 +232,31 @@ NTSTATUS _d3d9_D3D9Ex_GetAdapterCount(void *args)
 /* IDirect3D9Ex::GetAdapterIdentifier -- slot 5, sync */
 static void d3d9_call_D3D9Ex_GetAdapterIdentifier(struct d3d9_D3D9Ex_GetAdapterIdentifier_params *_p)
 {
-    D3DADAPTER_IDENTIFIER9 *_identifier = D3D9_HOST_PTR(_p->identifier);
+    D3DADAPTER_IDENTIFIER9 _identifier;
+    void *_identifier_g = D3D9_HOST_PTR(_p->identifier);
 
-    if (_identifier && !D3D9_IN_WINDOW(_identifier, D3D9SHIM_SIZE32_D3DADAPTER_IDENTIFIER9)) {
-        D3D9_LOG("IDirect3D9Ex::GetAdapterIdentifier: identifier is not a usable guest pointer");
-        _p->ret = D3DERR_INVALIDCALL;
-        return;
+    memset(&_identifier, 0, sizeof(_identifier));
+    if (_identifier_g) {
+        if (!D3D9_IN_WINDOW(_identifier_g, D3D9SHIM_SIZE32_D3DADAPTER_IDENTIFIER9)) {
+            D3D9_LOG("IDirect3D9Ex::GetAdapterIdentifier: identifier is not a usable guest pointer");
+            _p->ret = D3DERR_INVALIDCALL;
+            return;
+        }
     }
-    _p->ret = d3d9_native_D3D9Ex_GetAdapterIdentifier(_p->self, (UINT)_p->adapter_idx, (DWORD)_p->flags, _identifier);
+    _p->ret = d3d9_native_D3D9Ex_GetAdapterIdentifier(_p->self, (UINT)_p->adapter_idx, (DWORD)_p->flags, _identifier_g ? &_identifier : NULL);
+    if (_identifier_g)
+        D3D9_COPY32_OUT(D3DADAPTER_IDENTIFIER9, _identifier_g, &_identifier);
 }
 
 NTSTATUS _d3d9_D3D9Ex_GetAdapterIdentifier(void *args)
 {
-    d3d9_call_D3D9Ex_GetAdapterIdentifier(args);
+    struct d3d9_D3D9Ex_GetAdapterIdentifier_params *_p = args;
+    int _starved;
+
+    d3d9_call_D3D9Ex_GetAdapterIdentifier(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -272,7 +287,13 @@ static void d3d9_call_D3D9Ex_EnumAdapterModes(struct d3d9_D3D9Ex_EnumAdapterMode
 
 NTSTATUS _d3d9_D3D9Ex_EnumAdapterModes(void *args)
 {
-    d3d9_call_D3D9Ex_EnumAdapterModes(args);
+    struct d3d9_D3D9Ex_EnumAdapterModes_params *_p = args;
+    int _starved;
+
+    d3d9_call_D3D9Ex_EnumAdapterModes(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -291,7 +312,13 @@ static void d3d9_call_D3D9Ex_GetAdapterDisplayMode(struct d3d9_D3D9Ex_GetAdapter
 
 NTSTATUS _d3d9_D3D9Ex_GetAdapterDisplayMode(void *args)
 {
-    d3d9_call_D3D9Ex_GetAdapterDisplayMode(args);
+    struct d3d9_D3D9Ex_GetAdapterDisplayMode_params *_p = args;
+    int _starved;
+
+    d3d9_call_D3D9Ex_GetAdapterDisplayMode(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -303,7 +330,13 @@ static void d3d9_call_D3D9Ex_CheckDeviceType(struct d3d9_D3D9Ex_CheckDeviceType_
 
 NTSTATUS _d3d9_D3D9Ex_CheckDeviceType(void *args)
 {
-    d3d9_call_D3D9Ex_CheckDeviceType(args);
+    struct d3d9_D3D9Ex_CheckDeviceType_params *_p = args;
+    int _starved;
+
+    d3d9_call_D3D9Ex_CheckDeviceType(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -315,7 +348,13 @@ static void d3d9_call_D3D9Ex_CheckDeviceFormat(struct d3d9_D3D9Ex_CheckDeviceFor
 
 NTSTATUS _d3d9_D3D9Ex_CheckDeviceFormat(void *args)
 {
-    d3d9_call_D3D9Ex_CheckDeviceFormat(args);
+    struct d3d9_D3D9Ex_CheckDeviceFormat_params *_p = args;
+    int _starved;
+
+    d3d9_call_D3D9Ex_CheckDeviceFormat(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -334,7 +373,13 @@ static void d3d9_call_D3D9Ex_CheckDeviceMultiSampleType(struct d3d9_D3D9Ex_Check
 
 NTSTATUS _d3d9_D3D9Ex_CheckDeviceMultiSampleType(void *args)
 {
-    d3d9_call_D3D9Ex_CheckDeviceMultiSampleType(args);
+    struct d3d9_D3D9Ex_CheckDeviceMultiSampleType_params *_p = args;
+    int _starved;
+
+    d3d9_call_D3D9Ex_CheckDeviceMultiSampleType(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -346,7 +391,13 @@ static void d3d9_call_D3D9Ex_CheckDepthStencilMatch(struct d3d9_D3D9Ex_CheckDept
 
 NTSTATUS _d3d9_D3D9Ex_CheckDepthStencilMatch(void *args)
 {
-    d3d9_call_D3D9Ex_CheckDepthStencilMatch(args);
+    struct d3d9_D3D9Ex_CheckDepthStencilMatch_params *_p = args;
+    int _starved;
+
+    d3d9_call_D3D9Ex_CheckDepthStencilMatch(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -358,7 +409,13 @@ static void d3d9_call_D3D9Ex_CheckDeviceFormatConversion(struct d3d9_D3D9Ex_Chec
 
 NTSTATUS _d3d9_D3D9Ex_CheckDeviceFormatConversion(void *args)
 {
-    d3d9_call_D3D9Ex_CheckDeviceFormatConversion(args);
+    struct d3d9_D3D9Ex_CheckDeviceFormatConversion_params *_p = args;
+    int _starved;
+
+    d3d9_call_D3D9Ex_CheckDeviceFormatConversion(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -377,7 +434,13 @@ static void d3d9_call_D3D9Ex_GetDeviceCaps(struct d3d9_D3D9Ex_GetDeviceCaps_para
 
 NTSTATUS _d3d9_D3D9Ex_GetDeviceCaps(void *args)
 {
-    d3d9_call_D3D9Ex_GetDeviceCaps(args);
+    struct d3d9_D3D9Ex_GetDeviceCaps_params *_p = args;
+    int _starved;
+
+    d3d9_call_D3D9Ex_GetDeviceCaps(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -417,7 +480,13 @@ static void d3d9_call_D3D9Ex_CreateDevice(struct d3d9_D3D9Ex_CreateDevice_params
 
 NTSTATUS _d3d9_D3D9Ex_CreateDevice(void *args)
 {
-    d3d9_call_D3D9Ex_CreateDevice(args);
+    struct d3d9_D3D9Ex_CreateDevice_params *_p = args;
+    int _starved;
+
+    d3d9_call_D3D9Ex_CreateDevice(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -461,7 +530,13 @@ static void d3d9_call_D3D9Ex_EnumAdapterModesEx(struct d3d9_D3D9Ex_EnumAdapterMo
 
 NTSTATUS _d3d9_D3D9Ex_EnumAdapterModesEx(void *args)
 {
-    d3d9_call_D3D9Ex_EnumAdapterModesEx(args);
+    struct d3d9_D3D9Ex_EnumAdapterModesEx_params *_p = args;
+    int _starved;
+
+    d3d9_call_D3D9Ex_EnumAdapterModesEx(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -486,7 +561,13 @@ static void d3d9_call_D3D9Ex_GetAdapterDisplayModeEx(struct d3d9_D3D9Ex_GetAdapt
 
 NTSTATUS _d3d9_D3D9Ex_GetAdapterDisplayModeEx(void *args)
 {
-    d3d9_call_D3D9Ex_GetAdapterDisplayModeEx(args);
+    struct d3d9_D3D9Ex_GetAdapterDisplayModeEx_params *_p = args;
+    int _starved;
+
+    d3d9_call_D3D9Ex_GetAdapterDisplayModeEx(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -520,7 +601,13 @@ static void d3d9_call_D3D9Ex_CreateDeviceEx(struct d3d9_D3D9Ex_CreateDeviceEx_pa
 
 NTSTATUS _d3d9_D3D9Ex_CreateDeviceEx(void *args)
 {
-    d3d9_call_D3D9Ex_CreateDeviceEx(args);
+    struct d3d9_D3D9Ex_CreateDeviceEx_params *_p = args;
+    int _starved;
+
+    d3d9_call_D3D9Ex_CreateDeviceEx(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -539,7 +626,13 @@ static void d3d9_call_D3D9Ex_GetAdapterLUID(struct d3d9_D3D9Ex_GetAdapterLUID_pa
 
 NTSTATUS _d3d9_D3D9Ex_GetAdapterLUID(void *args)
 {
-    d3d9_call_D3D9Ex_GetAdapterLUID(args);
+    struct d3d9_D3D9Ex_GetAdapterLUID_params *_p = args;
+    int _starved;
+
+    d3d9_call_D3D9Ex_GetAdapterLUID(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -583,7 +676,13 @@ static void d3d9_call_Device9Ex_TestCooperativeLevel(struct d3d9_Device9Ex_TestC
 
 NTSTATUS _d3d9_Device9Ex_TestCooperativeLevel(void *args)
 {
-    d3d9_call_Device9Ex_TestCooperativeLevel(args);
+    struct d3d9_Device9Ex_TestCooperativeLevel_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_TestCooperativeLevel(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -607,7 +706,13 @@ static void d3d9_call_Device9Ex_EvictManagedResources(struct d3d9_Device9Ex_Evic
 
 NTSTATUS _d3d9_Device9Ex_EvictManagedResources(void *args)
 {
-    d3d9_call_Device9Ex_EvictManagedResources(args);
+    struct d3d9_Device9Ex_EvictManagedResources_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_EvictManagedResources(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -636,7 +741,13 @@ static void d3d9_call_Device9Ex_GetDeviceCaps(struct d3d9_Device9Ex_GetDeviceCap
 
 NTSTATUS _d3d9_Device9Ex_GetDeviceCaps(void *args)
 {
-    d3d9_call_Device9Ex_GetDeviceCaps(args);
+    struct d3d9_Device9Ex_GetDeviceCaps_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetDeviceCaps(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -655,7 +766,13 @@ static void d3d9_call_Device9Ex_GetDisplayMode(struct d3d9_Device9Ex_GetDisplayM
 
 NTSTATUS _d3d9_Device9Ex_GetDisplayMode(void *args)
 {
-    d3d9_call_Device9Ex_GetDisplayMode(args);
+    struct d3d9_Device9Ex_GetDisplayMode_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetDisplayMode(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -680,7 +797,13 @@ static void d3d9_call_Device9Ex_GetCreationParameters(struct d3d9_Device9Ex_GetC
 
 NTSTATUS _d3d9_Device9Ex_GetCreationParameters(void *args)
 {
-    d3d9_call_Device9Ex_GetCreationParameters(args);
+    struct d3d9_Device9Ex_GetCreationParameters_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetCreationParameters(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -692,7 +815,13 @@ static void d3d9_call_Device9Ex_SetCursorProperties(struct d3d9_Device9Ex_SetCur
 
 NTSTATUS _d3d9_Device9Ex_SetCursorProperties(void *args)
 {
-    d3d9_call_Device9Ex_SetCursorProperties(args);
+    struct d3d9_Device9Ex_SetCursorProperties_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetCursorProperties(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -740,7 +869,13 @@ static void d3d9_call_Device9Ex_CreateAdditionalSwapChain(struct d3d9_Device9Ex_
 
 NTSTATUS _d3d9_Device9Ex_CreateAdditionalSwapChain(void *args)
 {
-    d3d9_call_Device9Ex_CreateAdditionalSwapChain(args);
+    struct d3d9_Device9Ex_CreateAdditionalSwapChain_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateAdditionalSwapChain(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -757,7 +892,13 @@ static void d3d9_call_Device9Ex_GetSwapChain(struct d3d9_Device9Ex_GetSwapChain_
 
 NTSTATUS _d3d9_Device9Ex_GetSwapChain(void *args)
 {
-    d3d9_call_Device9Ex_GetSwapChain(args);
+    struct d3d9_Device9Ex_GetSwapChain_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetSwapChain(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -795,7 +936,13 @@ static void d3d9_call_Device9Ex_Reset(struct d3d9_Device9Ex_Reset_params *_p)
 
 NTSTATUS _d3d9_Device9Ex_Reset(void *args)
 {
-    d3d9_call_Device9Ex_Reset(args);
+    struct d3d9_Device9Ex_Reset_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_Reset(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -826,7 +973,13 @@ static void d3d9_call_Device9Ex_Present(struct d3d9_Device9Ex_Present_params *_p
 
 NTSTATUS _d3d9_Device9Ex_Present(void *args)
 {
-    d3d9_call_Device9Ex_Present(args);
+    struct d3d9_Device9Ex_Present_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_Present(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -843,7 +996,13 @@ static void d3d9_call_Device9Ex_GetBackBuffer(struct d3d9_Device9Ex_GetBackBuffe
 
 NTSTATUS _d3d9_Device9Ex_GetBackBuffer(void *args)
 {
-    d3d9_call_Device9Ex_GetBackBuffer(args);
+    struct d3d9_Device9Ex_GetBackBuffer_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetBackBuffer(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -862,7 +1021,13 @@ static void d3d9_call_Device9Ex_GetRasterStatus(struct d3d9_Device9Ex_GetRasterS
 
 NTSTATUS _d3d9_Device9Ex_GetRasterStatus(void *args)
 {
-    d3d9_call_Device9Ex_GetRasterStatus(args);
+    struct d3d9_Device9Ex_GetRasterStatus_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetRasterStatus(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -874,7 +1039,13 @@ static void d3d9_call_Device9Ex_SetDialogBoxMode(struct d3d9_Device9Ex_SetDialog
 
 NTSTATUS _d3d9_Device9Ex_SetDialogBoxMode(void *args)
 {
-    d3d9_call_Device9Ex_SetDialogBoxMode(args);
+    struct d3d9_Device9Ex_SetDialogBoxMode_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetDialogBoxMode(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -937,7 +1108,13 @@ static void d3d9_call_Device9Ex_CreateTexture(struct d3d9_Device9Ex_CreateTextur
 
 NTSTATUS _d3d9_Device9Ex_CreateTexture(void *args)
 {
-    d3d9_call_Device9Ex_CreateTexture(args);
+    struct d3d9_Device9Ex_CreateTexture_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateTexture(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -964,7 +1141,13 @@ static void d3d9_call_Device9Ex_CreateVolumeTexture(struct d3d9_Device9Ex_Create
 
 NTSTATUS _d3d9_Device9Ex_CreateVolumeTexture(void *args)
 {
-    d3d9_call_Device9Ex_CreateVolumeTexture(args);
+    struct d3d9_Device9Ex_CreateVolumeTexture_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateVolumeTexture(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -991,7 +1174,13 @@ static void d3d9_call_Device9Ex_CreateCubeTexture(struct d3d9_Device9Ex_CreateCu
 
 NTSTATUS _d3d9_Device9Ex_CreateCubeTexture(void *args)
 {
-    d3d9_call_Device9Ex_CreateCubeTexture(args);
+    struct d3d9_Device9Ex_CreateCubeTexture_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateCubeTexture(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1018,7 +1207,13 @@ static void d3d9_call_Device9Ex_CreateVertexBuffer(struct d3d9_Device9Ex_CreateV
 
 NTSTATUS _d3d9_Device9Ex_CreateVertexBuffer(void *args)
 {
-    d3d9_call_Device9Ex_CreateVertexBuffer(args);
+    struct d3d9_Device9Ex_CreateVertexBuffer_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateVertexBuffer(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1045,7 +1240,13 @@ static void d3d9_call_Device9Ex_CreateIndexBuffer(struct d3d9_Device9Ex_CreateIn
 
 NTSTATUS _d3d9_Device9Ex_CreateIndexBuffer(void *args)
 {
-    d3d9_call_Device9Ex_CreateIndexBuffer(args);
+    struct d3d9_Device9Ex_CreateIndexBuffer_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateIndexBuffer(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1072,7 +1273,13 @@ static void d3d9_call_Device9Ex_CreateRenderTarget(struct d3d9_Device9Ex_CreateR
 
 NTSTATUS _d3d9_Device9Ex_CreateRenderTarget(void *args)
 {
-    d3d9_call_Device9Ex_CreateRenderTarget(args);
+    struct d3d9_Device9Ex_CreateRenderTarget_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateRenderTarget(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1099,7 +1306,13 @@ static void d3d9_call_Device9Ex_CreateDepthStencilSurface(struct d3d9_Device9Ex_
 
 NTSTATUS _d3d9_Device9Ex_CreateDepthStencilSurface(void *args)
 {
-    d3d9_call_Device9Ex_CreateDepthStencilSurface(args);
+    struct d3d9_Device9Ex_CreateDepthStencilSurface_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateDepthStencilSurface(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1124,7 +1337,13 @@ static void d3d9_call_Device9Ex_UpdateSurface(struct d3d9_Device9Ex_UpdateSurfac
 
 NTSTATUS _d3d9_Device9Ex_UpdateSurface(void *args)
 {
-    d3d9_call_Device9Ex_UpdateSurface(args);
+    struct d3d9_Device9Ex_UpdateSurface_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_UpdateSurface(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1136,7 +1355,13 @@ static void d3d9_call_Device9Ex_UpdateTexture(struct d3d9_Device9Ex_UpdateTextur
 
 NTSTATUS _d3d9_Device9Ex_UpdateTexture(void *args)
 {
-    d3d9_call_Device9Ex_UpdateTexture(args);
+    struct d3d9_Device9Ex_UpdateTexture_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_UpdateTexture(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1148,7 +1373,13 @@ static void d3d9_call_Device9Ex_GetRenderTargetData(struct d3d9_Device9Ex_GetRen
 
 NTSTATUS _d3d9_Device9Ex_GetRenderTargetData(void *args)
 {
-    d3d9_call_Device9Ex_GetRenderTargetData(args);
+    struct d3d9_Device9Ex_GetRenderTargetData_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetRenderTargetData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1160,7 +1391,13 @@ static void d3d9_call_Device9Ex_GetFrontBufferData(struct d3d9_Device9Ex_GetFron
 
 NTSTATUS _d3d9_Device9Ex_GetFrontBufferData(void *args)
 {
-    d3d9_call_Device9Ex_GetFrontBufferData(args);
+    struct d3d9_Device9Ex_GetFrontBufferData_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetFrontBufferData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1185,7 +1422,13 @@ static void d3d9_call_Device9Ex_StretchRect(struct d3d9_Device9Ex_StretchRect_pa
 
 NTSTATUS _d3d9_Device9Ex_StretchRect(void *args)
 {
-    d3d9_call_Device9Ex_StretchRect(args);
+    struct d3d9_Device9Ex_StretchRect_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_StretchRect(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1204,7 +1447,13 @@ static void d3d9_call_Device9Ex_ColorFill(struct d3d9_Device9Ex_ColorFill_params
 
 NTSTATUS _d3d9_Device9Ex_ColorFill(void *args)
 {
-    d3d9_call_Device9Ex_ColorFill(args);
+    struct d3d9_Device9Ex_ColorFill_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_ColorFill(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1231,7 +1480,13 @@ static void d3d9_call_Device9Ex_CreateOffscreenPlainSurface(struct d3d9_Device9E
 
 NTSTATUS _d3d9_Device9Ex_CreateOffscreenPlainSurface(void *args)
 {
-    d3d9_call_Device9Ex_CreateOffscreenPlainSurface(args);
+    struct d3d9_Device9Ex_CreateOffscreenPlainSurface_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateOffscreenPlainSurface(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1243,7 +1498,13 @@ static void d3d9_call_Device9Ex_SetRenderTarget(struct d3d9_Device9Ex_SetRenderT
 
 NTSTATUS _d3d9_Device9Ex_SetRenderTarget(void *args)
 {
-    d3d9_call_Device9Ex_SetRenderTarget(args);
+    struct d3d9_Device9Ex_SetRenderTarget_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetRenderTarget(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1260,7 +1521,13 @@ static void d3d9_call_Device9Ex_GetRenderTarget(struct d3d9_Device9Ex_GetRenderT
 
 NTSTATUS _d3d9_Device9Ex_GetRenderTarget(void *args)
 {
-    d3d9_call_Device9Ex_GetRenderTarget(args);
+    struct d3d9_Device9Ex_GetRenderTarget_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetRenderTarget(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1272,7 +1539,13 @@ static void d3d9_call_Device9Ex_SetDepthStencilSurface(struct d3d9_Device9Ex_Set
 
 NTSTATUS _d3d9_Device9Ex_SetDepthStencilSurface(void *args)
 {
-    d3d9_call_Device9Ex_SetDepthStencilSurface(args);
+    struct d3d9_Device9Ex_SetDepthStencilSurface_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetDepthStencilSurface(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1289,7 +1562,13 @@ static void d3d9_call_Device9Ex_GetDepthStencilSurface(struct d3d9_Device9Ex_Get
 
 NTSTATUS _d3d9_Device9Ex_GetDepthStencilSurface(void *args)
 {
-    d3d9_call_Device9Ex_GetDepthStencilSurface(args);
+    struct d3d9_Device9Ex_GetDepthStencilSurface_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetDepthStencilSurface(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1301,7 +1580,13 @@ static void d3d9_call_Device9Ex_BeginScene(struct d3d9_Device9Ex_BeginScene_para
 
 NTSTATUS _d3d9_Device9Ex_BeginScene(void *args)
 {
-    d3d9_call_Device9Ex_BeginScene(args);
+    struct d3d9_Device9Ex_BeginScene_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_BeginScene(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1313,7 +1598,13 @@ static void d3d9_call_Device9Ex_EndScene(struct d3d9_Device9Ex_EndScene_params *
 
 NTSTATUS _d3d9_Device9Ex_EndScene(void *args)
 {
-    d3d9_call_Device9Ex_EndScene(args);
+    struct d3d9_Device9Ex_EndScene_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_EndScene(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1332,7 +1623,13 @@ static void d3d9_call_Device9Ex_Clear(struct d3d9_Device9Ex_Clear_params *_p)
 
 NTSTATUS _d3d9_Device9Ex_Clear(void *args)
 {
-    d3d9_call_Device9Ex_Clear(args);
+    struct d3d9_Device9Ex_Clear_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_Clear(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1351,7 +1648,13 @@ static void d3d9_call_Device9Ex_SetTransform(struct d3d9_Device9Ex_SetTransform_
 
 NTSTATUS _d3d9_Device9Ex_SetTransform(void *args)
 {
-    d3d9_call_Device9Ex_SetTransform(args);
+    struct d3d9_Device9Ex_SetTransform_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetTransform(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1370,7 +1673,13 @@ static void d3d9_call_Device9Ex_GetTransform(struct d3d9_Device9Ex_GetTransform_
 
 NTSTATUS _d3d9_Device9Ex_GetTransform(void *args)
 {
-    d3d9_call_Device9Ex_GetTransform(args);
+    struct d3d9_Device9Ex_GetTransform_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetTransform(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1389,7 +1698,13 @@ static void d3d9_call_Device9Ex_MultiplyTransform(struct d3d9_Device9Ex_Multiply
 
 NTSTATUS _d3d9_Device9Ex_MultiplyTransform(void *args)
 {
-    d3d9_call_Device9Ex_MultiplyTransform(args);
+    struct d3d9_Device9Ex_MultiplyTransform_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_MultiplyTransform(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1408,7 +1723,13 @@ static void d3d9_call_Device9Ex_SetViewport(struct d3d9_Device9Ex_SetViewport_pa
 
 NTSTATUS _d3d9_Device9Ex_SetViewport(void *args)
 {
-    d3d9_call_Device9Ex_SetViewport(args);
+    struct d3d9_Device9Ex_SetViewport_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetViewport(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1427,7 +1748,13 @@ static void d3d9_call_Device9Ex_GetViewport(struct d3d9_Device9Ex_GetViewport_pa
 
 NTSTATUS _d3d9_Device9Ex_GetViewport(void *args)
 {
-    d3d9_call_Device9Ex_GetViewport(args);
+    struct d3d9_Device9Ex_GetViewport_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetViewport(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1446,7 +1773,13 @@ static void d3d9_call_Device9Ex_SetMaterial(struct d3d9_Device9Ex_SetMaterial_pa
 
 NTSTATUS _d3d9_Device9Ex_SetMaterial(void *args)
 {
-    d3d9_call_Device9Ex_SetMaterial(args);
+    struct d3d9_Device9Ex_SetMaterial_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetMaterial(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1465,7 +1798,13 @@ static void d3d9_call_Device9Ex_GetMaterial(struct d3d9_Device9Ex_GetMaterial_pa
 
 NTSTATUS _d3d9_Device9Ex_GetMaterial(void *args)
 {
-    d3d9_call_Device9Ex_GetMaterial(args);
+    struct d3d9_Device9Ex_GetMaterial_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetMaterial(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1484,7 +1823,13 @@ static void d3d9_call_Device9Ex_SetLight(struct d3d9_Device9Ex_SetLight_params *
 
 NTSTATUS _d3d9_Device9Ex_SetLight(void *args)
 {
-    d3d9_call_Device9Ex_SetLight(args);
+    struct d3d9_Device9Ex_SetLight_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetLight(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1503,7 +1848,13 @@ static void d3d9_call_Device9Ex_GetLight(struct d3d9_Device9Ex_GetLight_params *
 
 NTSTATUS _d3d9_Device9Ex_GetLight(void *args)
 {
-    d3d9_call_Device9Ex_GetLight(args);
+    struct d3d9_Device9Ex_GetLight_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetLight(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1515,7 +1866,13 @@ static void d3d9_call_Device9Ex_LightEnable(struct d3d9_Device9Ex_LightEnable_pa
 
 NTSTATUS _d3d9_Device9Ex_LightEnable(void *args)
 {
-    d3d9_call_Device9Ex_LightEnable(args);
+    struct d3d9_Device9Ex_LightEnable_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_LightEnable(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1534,7 +1891,13 @@ static void d3d9_call_Device9Ex_GetLightEnable(struct d3d9_Device9Ex_GetLightEna
 
 NTSTATUS _d3d9_Device9Ex_GetLightEnable(void *args)
 {
-    d3d9_call_Device9Ex_GetLightEnable(args);
+    struct d3d9_Device9Ex_GetLightEnable_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetLightEnable(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1553,7 +1916,13 @@ static void d3d9_call_Device9Ex_SetClipPlane(struct d3d9_Device9Ex_SetClipPlane_
 
 NTSTATUS _d3d9_Device9Ex_SetClipPlane(void *args)
 {
-    d3d9_call_Device9Ex_SetClipPlane(args);
+    struct d3d9_Device9Ex_SetClipPlane_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetClipPlane(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1572,7 +1941,13 @@ static void d3d9_call_Device9Ex_GetClipPlane(struct d3d9_Device9Ex_GetClipPlane_
 
 NTSTATUS _d3d9_Device9Ex_GetClipPlane(void *args)
 {
-    d3d9_call_Device9Ex_GetClipPlane(args);
+    struct d3d9_Device9Ex_GetClipPlane_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetClipPlane(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1584,7 +1959,13 @@ static void d3d9_call_Device9Ex_SetRenderState(struct d3d9_Device9Ex_SetRenderSt
 
 NTSTATUS _d3d9_Device9Ex_SetRenderState(void *args)
 {
-    d3d9_call_Device9Ex_SetRenderState(args);
+    struct d3d9_Device9Ex_SetRenderState_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetRenderState(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1603,7 +1984,13 @@ static void d3d9_call_Device9Ex_GetRenderState(struct d3d9_Device9Ex_GetRenderSt
 
 NTSTATUS _d3d9_Device9Ex_GetRenderState(void *args)
 {
-    d3d9_call_Device9Ex_GetRenderState(args);
+    struct d3d9_Device9Ex_GetRenderState_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetRenderState(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1618,7 +2005,13 @@ static void d3d9_call_Device9Ex_CreateStateBlock(struct d3d9_Device9Ex_CreateSta
 
 NTSTATUS _d3d9_Device9Ex_CreateStateBlock(void *args)
 {
-    d3d9_call_Device9Ex_CreateStateBlock(args);
+    struct d3d9_Device9Ex_CreateStateBlock_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateStateBlock(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1630,7 +2023,13 @@ static void d3d9_call_Device9Ex_BeginStateBlock(struct d3d9_Device9Ex_BeginState
 
 NTSTATUS _d3d9_Device9Ex_BeginStateBlock(void *args)
 {
-    d3d9_call_Device9Ex_BeginStateBlock(args);
+    struct d3d9_Device9Ex_BeginStateBlock_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_BeginStateBlock(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1645,7 +2044,13 @@ static void d3d9_call_Device9Ex_EndStateBlock(struct d3d9_Device9Ex_EndStateBloc
 
 NTSTATUS _d3d9_Device9Ex_EndStateBlock(void *args)
 {
-    d3d9_call_Device9Ex_EndStateBlock(args);
+    struct d3d9_Device9Ex_EndStateBlock_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_EndStateBlock(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1664,7 +2069,13 @@ static void d3d9_call_Device9Ex_SetClipStatus(struct d3d9_Device9Ex_SetClipStatu
 
 NTSTATUS _d3d9_Device9Ex_SetClipStatus(void *args)
 {
-    d3d9_call_Device9Ex_SetClipStatus(args);
+    struct d3d9_Device9Ex_SetClipStatus_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetClipStatus(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1683,7 +2094,13 @@ static void d3d9_call_Device9Ex_GetClipStatus(struct d3d9_Device9Ex_GetClipStatu
 
 NTSTATUS _d3d9_Device9Ex_GetClipStatus(void *args)
 {
-    d3d9_call_Device9Ex_GetClipStatus(args);
+    struct d3d9_Device9Ex_GetClipStatus_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetClipStatus(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1705,7 +2122,13 @@ static void d3d9_call_Device9Ex_SetTexture(struct d3d9_Device9Ex_SetTexture_para
 
 NTSTATUS _d3d9_Device9Ex_SetTexture(void *args)
 {
-    d3d9_call_Device9Ex_SetTexture(args);
+    struct d3d9_Device9Ex_SetTexture_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetTexture(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1724,7 +2147,13 @@ static void d3d9_call_Device9Ex_GetTextureStageState(struct d3d9_Device9Ex_GetTe
 
 NTSTATUS _d3d9_Device9Ex_GetTextureStageState(void *args)
 {
-    d3d9_call_Device9Ex_GetTextureStageState(args);
+    struct d3d9_Device9Ex_GetTextureStageState_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetTextureStageState(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1736,7 +2165,13 @@ static void d3d9_call_Device9Ex_SetTextureStageState(struct d3d9_Device9Ex_SetTe
 
 NTSTATUS _d3d9_Device9Ex_SetTextureStageState(void *args)
 {
-    d3d9_call_Device9Ex_SetTextureStageState(args);
+    struct d3d9_Device9Ex_SetTextureStageState_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetTextureStageState(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1755,7 +2190,13 @@ static void d3d9_call_Device9Ex_GetSamplerState(struct d3d9_Device9Ex_GetSampler
 
 NTSTATUS _d3d9_Device9Ex_GetSamplerState(void *args)
 {
-    d3d9_call_Device9Ex_GetSamplerState(args);
+    struct d3d9_Device9Ex_GetSamplerState_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetSamplerState(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1767,7 +2208,13 @@ static void d3d9_call_Device9Ex_SetSamplerState(struct d3d9_Device9Ex_SetSampler
 
 NTSTATUS _d3d9_Device9Ex_SetSamplerState(void *args)
 {
-    d3d9_call_Device9Ex_SetSamplerState(args);
+    struct d3d9_Device9Ex_SetSamplerState_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetSamplerState(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1786,7 +2233,13 @@ static void d3d9_call_Device9Ex_ValidateDevice(struct d3d9_Device9Ex_ValidateDev
 
 NTSTATUS _d3d9_Device9Ex_ValidateDevice(void *args)
 {
-    d3d9_call_Device9Ex_ValidateDevice(args);
+    struct d3d9_Device9Ex_ValidateDevice_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_ValidateDevice(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1805,7 +2258,13 @@ static void d3d9_call_Device9Ex_SetPaletteEntries(struct d3d9_Device9Ex_SetPalet
 
 NTSTATUS _d3d9_Device9Ex_SetPaletteEntries(void *args)
 {
-    d3d9_call_Device9Ex_SetPaletteEntries(args);
+    struct d3d9_Device9Ex_SetPaletteEntries_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetPaletteEntries(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1824,7 +2283,13 @@ static void d3d9_call_Device9Ex_GetPaletteEntries(struct d3d9_Device9Ex_GetPalet
 
 NTSTATUS _d3d9_Device9Ex_GetPaletteEntries(void *args)
 {
-    d3d9_call_Device9Ex_GetPaletteEntries(args);
+    struct d3d9_Device9Ex_GetPaletteEntries_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetPaletteEntries(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1836,7 +2301,13 @@ static void d3d9_call_Device9Ex_SetCurrentTexturePalette(struct d3d9_Device9Ex_S
 
 NTSTATUS _d3d9_Device9Ex_SetCurrentTexturePalette(void *args)
 {
-    d3d9_call_Device9Ex_SetCurrentTexturePalette(args);
+    struct d3d9_Device9Ex_SetCurrentTexturePalette_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetCurrentTexturePalette(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1855,7 +2326,13 @@ static void d3d9_call_Device9Ex_GetCurrentTexturePalette(struct d3d9_Device9Ex_G
 
 NTSTATUS _d3d9_Device9Ex_GetCurrentTexturePalette(void *args)
 {
-    d3d9_call_Device9Ex_GetCurrentTexturePalette(args);
+    struct d3d9_Device9Ex_GetCurrentTexturePalette_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetCurrentTexturePalette(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1874,7 +2351,13 @@ static void d3d9_call_Device9Ex_SetScissorRect(struct d3d9_Device9Ex_SetScissorR
 
 NTSTATUS _d3d9_Device9Ex_SetScissorRect(void *args)
 {
-    d3d9_call_Device9Ex_SetScissorRect(args);
+    struct d3d9_Device9Ex_SetScissorRect_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetScissorRect(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1893,7 +2376,13 @@ static void d3d9_call_Device9Ex_GetScissorRect(struct d3d9_Device9Ex_GetScissorR
 
 NTSTATUS _d3d9_Device9Ex_GetScissorRect(void *args)
 {
-    d3d9_call_Device9Ex_GetScissorRect(args);
+    struct d3d9_Device9Ex_GetScissorRect_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetScissorRect(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1905,7 +2394,13 @@ static void d3d9_call_Device9Ex_SetSoftwareVertexProcessing(struct d3d9_Device9E
 
 NTSTATUS _d3d9_Device9Ex_SetSoftwareVertexProcessing(void *args)
 {
-    d3d9_call_Device9Ex_SetSoftwareVertexProcessing(args);
+    struct d3d9_Device9Ex_SetSoftwareVertexProcessing_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetSoftwareVertexProcessing(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1929,7 +2424,13 @@ static void d3d9_call_Device9Ex_SetNPatchMode(struct d3d9_Device9Ex_SetNPatchMod
 
 NTSTATUS _d3d9_Device9Ex_SetNPatchMode(void *args)
 {
-    d3d9_call_Device9Ex_SetNPatchMode(args);
+    struct d3d9_Device9Ex_SetNPatchMode_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetNPatchMode(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1953,7 +2454,13 @@ static void d3d9_call_Device9Ex_DrawPrimitive(struct d3d9_Device9Ex_DrawPrimitiv
 
 NTSTATUS _d3d9_Device9Ex_DrawPrimitive(void *args)
 {
-    d3d9_call_Device9Ex_DrawPrimitive(args);
+    struct d3d9_Device9Ex_DrawPrimitive_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_DrawPrimitive(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1965,7 +2472,13 @@ static void d3d9_call_Device9Ex_DrawIndexedPrimitive(struct d3d9_Device9Ex_DrawI
 
 NTSTATUS _d3d9_Device9Ex_DrawIndexedPrimitive(void *args)
 {
-    d3d9_call_Device9Ex_DrawIndexedPrimitive(args);
+    struct d3d9_Device9Ex_DrawIndexedPrimitive_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_DrawIndexedPrimitive(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -1984,7 +2497,13 @@ static void d3d9_call_Device9Ex_DrawPrimitiveUP(struct d3d9_Device9Ex_DrawPrimit
 
 NTSTATUS _d3d9_Device9Ex_DrawPrimitiveUP(void *args)
 {
-    d3d9_call_Device9Ex_DrawPrimitiveUP(args);
+    struct d3d9_Device9Ex_DrawPrimitiveUP_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_DrawPrimitiveUP(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2009,7 +2528,13 @@ static void d3d9_call_Device9Ex_DrawIndexedPrimitiveUP(struct d3d9_Device9Ex_Dra
 
 NTSTATUS _d3d9_Device9Ex_DrawIndexedPrimitiveUP(void *args)
 {
-    d3d9_call_Device9Ex_DrawIndexedPrimitiveUP(args);
+    struct d3d9_Device9Ex_DrawIndexedPrimitiveUP_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_DrawIndexedPrimitiveUP(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2021,7 +2546,13 @@ static void d3d9_call_Device9Ex_ProcessVertices(struct d3d9_Device9Ex_ProcessVer
 
 NTSTATUS _d3d9_Device9Ex_ProcessVertices(void *args)
 {
-    d3d9_call_Device9Ex_ProcessVertices(args);
+    struct d3d9_Device9Ex_ProcessVertices_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_ProcessVertices(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2042,7 +2573,13 @@ static void d3d9_call_Device9Ex_CreateVertexDeclaration(struct d3d9_Device9Ex_Cr
 
 NTSTATUS _d3d9_Device9Ex_CreateVertexDeclaration(void *args)
 {
-    d3d9_call_Device9Ex_CreateVertexDeclaration(args);
+    struct d3d9_Device9Ex_CreateVertexDeclaration_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateVertexDeclaration(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2054,7 +2591,13 @@ static void d3d9_call_Device9Ex_SetVertexDeclaration(struct d3d9_Device9Ex_SetVe
 
 NTSTATUS _d3d9_Device9Ex_SetVertexDeclaration(void *args)
 {
-    d3d9_call_Device9Ex_SetVertexDeclaration(args);
+    struct d3d9_Device9Ex_SetVertexDeclaration_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetVertexDeclaration(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2076,7 +2619,13 @@ static void d3d9_call_Device9Ex_SetFVF(struct d3d9_Device9Ex_SetFVF_params *_p)
 
 NTSTATUS _d3d9_Device9Ex_SetFVF(void *args)
 {
-    d3d9_call_Device9Ex_SetFVF(args);
+    struct d3d9_Device9Ex_SetFVF_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetFVF(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2095,7 +2644,13 @@ static void d3d9_call_Device9Ex_GetFVF(struct d3d9_Device9Ex_GetFVF_params *_p)
 
 NTSTATUS _d3d9_Device9Ex_GetFVF(void *args)
 {
-    d3d9_call_Device9Ex_GetFVF(args);
+    struct d3d9_Device9Ex_GetFVF_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetFVF(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2116,7 +2671,13 @@ static void d3d9_call_Device9Ex_CreateVertexShader(struct d3d9_Device9Ex_CreateV
 
 NTSTATUS _d3d9_Device9Ex_CreateVertexShader(void *args)
 {
-    d3d9_call_Device9Ex_CreateVertexShader(args);
+    struct d3d9_Device9Ex_CreateVertexShader_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateVertexShader(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2128,7 +2689,13 @@ static void d3d9_call_Device9Ex_SetVertexShader(struct d3d9_Device9Ex_SetVertexS
 
 NTSTATUS _d3d9_Device9Ex_SetVertexShader(void *args)
 {
-    d3d9_call_Device9Ex_SetVertexShader(args);
+    struct d3d9_Device9Ex_SetVertexShader_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetVertexShader(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2157,7 +2724,13 @@ static void d3d9_call_Device9Ex_SetVertexShaderConstantF(struct d3d9_Device9Ex_S
 
 NTSTATUS _d3d9_Device9Ex_SetVertexShaderConstantF(void *args)
 {
-    d3d9_call_Device9Ex_SetVertexShaderConstantF(args);
+    struct d3d9_Device9Ex_SetVertexShaderConstantF_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetVertexShaderConstantF(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2176,7 +2749,13 @@ static void d3d9_call_Device9Ex_GetVertexShaderConstantF(struct d3d9_Device9Ex_G
 
 NTSTATUS _d3d9_Device9Ex_GetVertexShaderConstantF(void *args)
 {
-    d3d9_call_Device9Ex_GetVertexShaderConstantF(args);
+    struct d3d9_Device9Ex_GetVertexShaderConstantF_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetVertexShaderConstantF(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2195,7 +2774,13 @@ static void d3d9_call_Device9Ex_SetVertexShaderConstantI(struct d3d9_Device9Ex_S
 
 NTSTATUS _d3d9_Device9Ex_SetVertexShaderConstantI(void *args)
 {
-    d3d9_call_Device9Ex_SetVertexShaderConstantI(args);
+    struct d3d9_Device9Ex_SetVertexShaderConstantI_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetVertexShaderConstantI(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2214,7 +2799,13 @@ static void d3d9_call_Device9Ex_GetVertexShaderConstantI(struct d3d9_Device9Ex_G
 
 NTSTATUS _d3d9_Device9Ex_GetVertexShaderConstantI(void *args)
 {
-    d3d9_call_Device9Ex_GetVertexShaderConstantI(args);
+    struct d3d9_Device9Ex_GetVertexShaderConstantI_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetVertexShaderConstantI(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2233,7 +2824,13 @@ static void d3d9_call_Device9Ex_SetVertexShaderConstantB(struct d3d9_Device9Ex_S
 
 NTSTATUS _d3d9_Device9Ex_SetVertexShaderConstantB(void *args)
 {
-    d3d9_call_Device9Ex_SetVertexShaderConstantB(args);
+    struct d3d9_Device9Ex_SetVertexShaderConstantB_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetVertexShaderConstantB(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2252,7 +2849,13 @@ static void d3d9_call_Device9Ex_GetVertexShaderConstantB(struct d3d9_Device9Ex_G
 
 NTSTATUS _d3d9_Device9Ex_GetVertexShaderConstantB(void *args)
 {
-    d3d9_call_Device9Ex_GetVertexShaderConstantB(args);
+    struct d3d9_Device9Ex_GetVertexShaderConstantB_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetVertexShaderConstantB(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2264,7 +2867,13 @@ static void d3d9_call_Device9Ex_SetStreamSource(struct d3d9_Device9Ex_SetStreamS
 
 NTSTATUS _d3d9_Device9Ex_SetStreamSource(void *args)
 {
-    d3d9_call_Device9Ex_SetStreamSource(args);
+    struct d3d9_Device9Ex_SetStreamSource_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetStreamSource(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2286,7 +2895,13 @@ static void d3d9_call_Device9Ex_SetStreamSourceFreq(struct d3d9_Device9Ex_SetStr
 
 NTSTATUS _d3d9_Device9Ex_SetStreamSourceFreq(void *args)
 {
-    d3d9_call_Device9Ex_SetStreamSourceFreq(args);
+    struct d3d9_Device9Ex_SetStreamSourceFreq_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetStreamSourceFreq(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2305,7 +2920,13 @@ static void d3d9_call_Device9Ex_GetStreamSourceFreq(struct d3d9_Device9Ex_GetStr
 
 NTSTATUS _d3d9_Device9Ex_GetStreamSourceFreq(void *args)
 {
-    d3d9_call_Device9Ex_GetStreamSourceFreq(args);
+    struct d3d9_Device9Ex_GetStreamSourceFreq_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetStreamSourceFreq(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2317,7 +2938,13 @@ static void d3d9_call_Device9Ex_SetIndices(struct d3d9_Device9Ex_SetIndices_para
 
 NTSTATUS _d3d9_Device9Ex_SetIndices(void *args)
 {
-    d3d9_call_Device9Ex_SetIndices(args);
+    struct d3d9_Device9Ex_SetIndices_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetIndices(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2348,7 +2975,13 @@ static void d3d9_call_Device9Ex_CreatePixelShader(struct d3d9_Device9Ex_CreatePi
 
 NTSTATUS _d3d9_Device9Ex_CreatePixelShader(void *args)
 {
-    d3d9_call_Device9Ex_CreatePixelShader(args);
+    struct d3d9_Device9Ex_CreatePixelShader_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreatePixelShader(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2360,7 +2993,13 @@ static void d3d9_call_Device9Ex_SetPixelShader(struct d3d9_Device9Ex_SetPixelSha
 
 NTSTATUS _d3d9_Device9Ex_SetPixelShader(void *args)
 {
-    d3d9_call_Device9Ex_SetPixelShader(args);
+    struct d3d9_Device9Ex_SetPixelShader_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetPixelShader(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2389,7 +3028,13 @@ static void d3d9_call_Device9Ex_SetPixelShaderConstantF(struct d3d9_Device9Ex_Se
 
 NTSTATUS _d3d9_Device9Ex_SetPixelShaderConstantF(void *args)
 {
-    d3d9_call_Device9Ex_SetPixelShaderConstantF(args);
+    struct d3d9_Device9Ex_SetPixelShaderConstantF_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetPixelShaderConstantF(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2408,7 +3053,13 @@ static void d3d9_call_Device9Ex_GetPixelShaderConstantF(struct d3d9_Device9Ex_Ge
 
 NTSTATUS _d3d9_Device9Ex_GetPixelShaderConstantF(void *args)
 {
-    d3d9_call_Device9Ex_GetPixelShaderConstantF(args);
+    struct d3d9_Device9Ex_GetPixelShaderConstantF_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetPixelShaderConstantF(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2427,7 +3078,13 @@ static void d3d9_call_Device9Ex_SetPixelShaderConstantI(struct d3d9_Device9Ex_Se
 
 NTSTATUS _d3d9_Device9Ex_SetPixelShaderConstantI(void *args)
 {
-    d3d9_call_Device9Ex_SetPixelShaderConstantI(args);
+    struct d3d9_Device9Ex_SetPixelShaderConstantI_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetPixelShaderConstantI(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2446,7 +3103,13 @@ static void d3d9_call_Device9Ex_GetPixelShaderConstantI(struct d3d9_Device9Ex_Ge
 
 NTSTATUS _d3d9_Device9Ex_GetPixelShaderConstantI(void *args)
 {
-    d3d9_call_Device9Ex_GetPixelShaderConstantI(args);
+    struct d3d9_Device9Ex_GetPixelShaderConstantI_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetPixelShaderConstantI(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2465,7 +3128,13 @@ static void d3d9_call_Device9Ex_SetPixelShaderConstantB(struct d3d9_Device9Ex_Se
 
 NTSTATUS _d3d9_Device9Ex_SetPixelShaderConstantB(void *args)
 {
-    d3d9_call_Device9Ex_SetPixelShaderConstantB(args);
+    struct d3d9_Device9Ex_SetPixelShaderConstantB_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetPixelShaderConstantB(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2484,7 +3153,13 @@ static void d3d9_call_Device9Ex_GetPixelShaderConstantB(struct d3d9_Device9Ex_Ge
 
 NTSTATUS _d3d9_Device9Ex_GetPixelShaderConstantB(void *args)
 {
-    d3d9_call_Device9Ex_GetPixelShaderConstantB(args);
+    struct d3d9_Device9Ex_GetPixelShaderConstantB_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetPixelShaderConstantB(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2509,7 +3184,13 @@ static void d3d9_call_Device9Ex_DrawRectPatch(struct d3d9_Device9Ex_DrawRectPatc
 
 NTSTATUS _d3d9_Device9Ex_DrawRectPatch(void *args)
 {
-    d3d9_call_Device9Ex_DrawRectPatch(args);
+    struct d3d9_Device9Ex_DrawRectPatch_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_DrawRectPatch(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2534,7 +3215,13 @@ static void d3d9_call_Device9Ex_DrawTriPatch(struct d3d9_Device9Ex_DrawTriPatch_
 
 NTSTATUS _d3d9_Device9Ex_DrawTriPatch(void *args)
 {
-    d3d9_call_Device9Ex_DrawTriPatch(args);
+    struct d3d9_Device9Ex_DrawTriPatch_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_DrawTriPatch(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2546,7 +3233,13 @@ static void d3d9_call_Device9Ex_DeletePatch(struct d3d9_Device9Ex_DeletePatch_pa
 
 NTSTATUS _d3d9_Device9Ex_DeletePatch(void *args)
 {
-    d3d9_call_Device9Ex_DeletePatch(args);
+    struct d3d9_Device9Ex_DeletePatch_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_DeletePatch(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2561,7 +3254,13 @@ static void d3d9_call_Device9Ex_CreateQuery(struct d3d9_Device9Ex_CreateQuery_pa
 
 NTSTATUS _d3d9_Device9Ex_CreateQuery(void *args)
 {
-    d3d9_call_Device9Ex_CreateQuery(args);
+    struct d3d9_Device9Ex_CreateQuery_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateQuery(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2586,7 +3285,13 @@ static void d3d9_call_Device9Ex_SetConvolutionMonoKernel(struct d3d9_Device9Ex_S
 
 NTSTATUS _d3d9_Device9Ex_SetConvolutionMonoKernel(void *args)
 {
-    d3d9_call_Device9Ex_SetConvolutionMonoKernel(args);
+    struct d3d9_Device9Ex_SetConvolutionMonoKernel_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetConvolutionMonoKernel(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2598,7 +3303,13 @@ static void d3d9_call_Device9Ex_ComposeRects(struct d3d9_Device9Ex_ComposeRects_
 
 NTSTATUS _d3d9_Device9Ex_ComposeRects(void *args)
 {
-    d3d9_call_Device9Ex_ComposeRects(args);
+    struct d3d9_Device9Ex_ComposeRects_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_ComposeRects(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2629,7 +3340,13 @@ static void d3d9_call_Device9Ex_PresentEx(struct d3d9_Device9Ex_PresentEx_params
 
 NTSTATUS _d3d9_Device9Ex_PresentEx(void *args)
 {
-    d3d9_call_Device9Ex_PresentEx(args);
+    struct d3d9_Device9Ex_PresentEx_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_PresentEx(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2648,7 +3365,13 @@ static void d3d9_call_Device9Ex_GetGPUThreadPriority(struct d3d9_Device9Ex_GetGP
 
 NTSTATUS _d3d9_Device9Ex_GetGPUThreadPriority(void *args)
 {
-    d3d9_call_Device9Ex_GetGPUThreadPriority(args);
+    struct d3d9_Device9Ex_GetGPUThreadPriority_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetGPUThreadPriority(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2660,7 +3383,13 @@ static void d3d9_call_Device9Ex_SetGPUThreadPriority(struct d3d9_Device9Ex_SetGP
 
 NTSTATUS _d3d9_Device9Ex_SetGPUThreadPriority(void *args)
 {
-    d3d9_call_Device9Ex_SetGPUThreadPriority(args);
+    struct d3d9_Device9Ex_SetGPUThreadPriority_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetGPUThreadPriority(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2672,7 +3401,13 @@ static void d3d9_call_Device9Ex_WaitForVBlank(struct d3d9_Device9Ex_WaitForVBlan
 
 NTSTATUS _d3d9_Device9Ex_WaitForVBlank(void *args)
 {
-    d3d9_call_Device9Ex_WaitForVBlank(args);
+    struct d3d9_Device9Ex_WaitForVBlank_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_WaitForVBlank(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2691,7 +3426,13 @@ static void d3d9_call_Device9Ex_CheckResourceResidency(struct d3d9_Device9Ex_Che
 
 NTSTATUS _d3d9_Device9Ex_CheckResourceResidency(void *args)
 {
-    d3d9_call_Device9Ex_CheckResourceResidency(args);
+    struct d3d9_Device9Ex_CheckResourceResidency_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CheckResourceResidency(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2703,7 +3444,13 @@ static void d3d9_call_Device9Ex_SetMaximumFrameLatency(struct d3d9_Device9Ex_Set
 
 NTSTATUS _d3d9_Device9Ex_SetMaximumFrameLatency(void *args)
 {
-    d3d9_call_Device9Ex_SetMaximumFrameLatency(args);
+    struct d3d9_Device9Ex_SetMaximumFrameLatency_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_SetMaximumFrameLatency(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2722,7 +3469,13 @@ static void d3d9_call_Device9Ex_GetMaximumFrameLatency(struct d3d9_Device9Ex_Get
 
 NTSTATUS _d3d9_Device9Ex_GetMaximumFrameLatency(void *args)
 {
-    d3d9_call_Device9Ex_GetMaximumFrameLatency(args);
+    struct d3d9_Device9Ex_GetMaximumFrameLatency_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetMaximumFrameLatency(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2734,7 +3487,13 @@ static void d3d9_call_Device9Ex_CheckDeviceState(struct d3d9_Device9Ex_CheckDevi
 
 NTSTATUS _d3d9_Device9Ex_CheckDeviceState(void *args)
 {
-    d3d9_call_Device9Ex_CheckDeviceState(args);
+    struct d3d9_Device9Ex_CheckDeviceState_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CheckDeviceState(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2761,7 +3520,13 @@ static void d3d9_call_Device9Ex_CreateRenderTargetEx(struct d3d9_Device9Ex_Creat
 
 NTSTATUS _d3d9_Device9Ex_CreateRenderTargetEx(void *args)
 {
-    d3d9_call_Device9Ex_CreateRenderTargetEx(args);
+    struct d3d9_Device9Ex_CreateRenderTargetEx_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateRenderTargetEx(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2788,7 +3553,13 @@ static void d3d9_call_Device9Ex_CreateOffscreenPlainSurfaceEx(struct d3d9_Device
 
 NTSTATUS _d3d9_Device9Ex_CreateOffscreenPlainSurfaceEx(void *args)
 {
-    d3d9_call_Device9Ex_CreateOffscreenPlainSurfaceEx(args);
+    struct d3d9_Device9Ex_CreateOffscreenPlainSurfaceEx_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateOffscreenPlainSurfaceEx(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2815,7 +3586,13 @@ static void d3d9_call_Device9Ex_CreateDepthStencilSurfaceEx(struct d3d9_Device9E
 
 NTSTATUS _d3d9_Device9Ex_CreateDepthStencilSurfaceEx(void *args)
 {
-    d3d9_call_Device9Ex_CreateDepthStencilSurfaceEx(args);
+    struct d3d9_Device9Ex_CreateDepthStencilSurfaceEx_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_CreateDepthStencilSurfaceEx(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2847,7 +3624,13 @@ static void d3d9_call_Device9Ex_ResetEx(struct d3d9_Device9Ex_ResetEx_params *_p
 
 NTSTATUS _d3d9_Device9Ex_ResetEx(void *args)
 {
-    d3d9_call_Device9Ex_ResetEx(args);
+    struct d3d9_Device9Ex_ResetEx_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_ResetEx(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2872,7 +3655,13 @@ static void d3d9_call_Device9Ex_GetDisplayModeEx(struct d3d9_Device9Ex_GetDispla
 
 NTSTATUS _d3d9_Device9Ex_GetDisplayModeEx(void *args)
 {
-    d3d9_call_Device9Ex_GetDisplayModeEx(args);
+    struct d3d9_Device9Ex_GetDisplayModeEx_params *_p = args;
+    int _starved;
+
+    d3d9_call_Device9Ex_GetDisplayModeEx(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2935,7 +3724,13 @@ static void d3d9_call_SwapChain9Ex_Present(struct d3d9_SwapChain9Ex_Present_para
 
 NTSTATUS _d3d9_SwapChain9Ex_Present(void *args)
 {
-    d3d9_call_SwapChain9Ex_Present(args);
+    struct d3d9_SwapChain9Ex_Present_params *_p = args;
+    int _starved;
+
+    d3d9_call_SwapChain9Ex_Present(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2947,7 +3742,13 @@ static void d3d9_call_SwapChain9Ex_GetFrontBufferData(struct d3d9_SwapChain9Ex_G
 
 NTSTATUS _d3d9_SwapChain9Ex_GetFrontBufferData(void *args)
 {
-    d3d9_call_SwapChain9Ex_GetFrontBufferData(args);
+    struct d3d9_SwapChain9Ex_GetFrontBufferData_params *_p = args;
+    int _starved;
+
+    d3d9_call_SwapChain9Ex_GetFrontBufferData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2964,7 +3765,13 @@ static void d3d9_call_SwapChain9Ex_GetBackBuffer(struct d3d9_SwapChain9Ex_GetBac
 
 NTSTATUS _d3d9_SwapChain9Ex_GetBackBuffer(void *args)
 {
-    d3d9_call_SwapChain9Ex_GetBackBuffer(args);
+    struct d3d9_SwapChain9Ex_GetBackBuffer_params *_p = args;
+    int _starved;
+
+    d3d9_call_SwapChain9Ex_GetBackBuffer(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -2983,7 +3790,13 @@ static void d3d9_call_SwapChain9Ex_GetRasterStatus(struct d3d9_SwapChain9Ex_GetR
 
 NTSTATUS _d3d9_SwapChain9Ex_GetRasterStatus(void *args)
 {
-    d3d9_call_SwapChain9Ex_GetRasterStatus(args);
+    struct d3d9_SwapChain9Ex_GetRasterStatus_params *_p = args;
+    int _starved;
+
+    d3d9_call_SwapChain9Ex_GetRasterStatus(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3002,7 +3815,13 @@ static void d3d9_call_SwapChain9Ex_GetDisplayMode(struct d3d9_SwapChain9Ex_GetDi
 
 NTSTATUS _d3d9_SwapChain9Ex_GetDisplayMode(void *args)
 {
-    d3d9_call_SwapChain9Ex_GetDisplayMode(args);
+    struct d3d9_SwapChain9Ex_GetDisplayMode_params *_p = args;
+    int _starved;
+
+    d3d9_call_SwapChain9Ex_GetDisplayMode(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3037,7 +3856,13 @@ static void d3d9_call_SwapChain9Ex_GetPresentParameters(struct d3d9_SwapChain9Ex
 
 NTSTATUS _d3d9_SwapChain9Ex_GetPresentParameters(void *args)
 {
-    d3d9_call_SwapChain9Ex_GetPresentParameters(args);
+    struct d3d9_SwapChain9Ex_GetPresentParameters_params *_p = args;
+    int _starved;
+
+    d3d9_call_SwapChain9Ex_GetPresentParameters(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3056,7 +3881,13 @@ static void d3d9_call_SwapChain9Ex_GetLastPresentCount(struct d3d9_SwapChain9Ex_
 
 NTSTATUS _d3d9_SwapChain9Ex_GetLastPresentCount(void *args)
 {
-    d3d9_call_SwapChain9Ex_GetLastPresentCount(args);
+    struct d3d9_SwapChain9Ex_GetLastPresentCount_params *_p = args;
+    int _starved;
+
+    d3d9_call_SwapChain9Ex_GetLastPresentCount(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3081,7 +3912,13 @@ static void d3d9_call_SwapChain9Ex_GetPresentStats(struct d3d9_SwapChain9Ex_GetP
 
 NTSTATUS _d3d9_SwapChain9Ex_GetPresentStats(void *args)
 {
-    d3d9_call_SwapChain9Ex_GetPresentStats(args);
+    struct d3d9_SwapChain9Ex_GetPresentStats_params *_p = args;
+    int _starved;
+
+    d3d9_call_SwapChain9Ex_GetPresentStats(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3106,7 +3943,13 @@ static void d3d9_call_SwapChain9Ex_GetDisplayModeEx(struct d3d9_SwapChain9Ex_Get
 
 NTSTATUS _d3d9_SwapChain9Ex_GetDisplayModeEx(void *args)
 {
-    d3d9_call_SwapChain9Ex_GetDisplayModeEx(args);
+    struct d3d9_SwapChain9Ex_GetDisplayModeEx_params *_p = args;
+    int _starved;
+
+    d3d9_call_SwapChain9Ex_GetDisplayModeEx(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3173,7 +4016,13 @@ static void d3d9_call_Surface9_SetPrivateData(struct d3d9_Surface9_SetPrivateDat
 
 NTSTATUS _d3d9_Surface9_SetPrivateData(void *args)
 {
-    d3d9_call_Surface9_SetPrivateData(args);
+    struct d3d9_Surface9_SetPrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_Surface9_SetPrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3204,7 +4053,13 @@ static void d3d9_call_Surface9_GetPrivateData(struct d3d9_Surface9_GetPrivateDat
 
 NTSTATUS _d3d9_Surface9_GetPrivateData(void *args)
 {
-    d3d9_call_Surface9_GetPrivateData(args);
+    struct d3d9_Surface9_GetPrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_Surface9_GetPrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3223,7 +4078,13 @@ static void d3d9_call_Surface9_FreePrivateData(struct d3d9_Surface9_FreePrivateD
 
 NTSTATUS _d3d9_Surface9_FreePrivateData(void *args)
 {
-    d3d9_call_Surface9_FreePrivateData(args);
+    struct d3d9_Surface9_FreePrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_Surface9_FreePrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3298,7 +4159,13 @@ static void d3d9_call_Surface9_GetDesc(struct d3d9_Surface9_GetDesc_params *_p)
 
 NTSTATUS _d3d9_Surface9_GetDesc(void *args)
 {
-    d3d9_call_Surface9_GetDesc(args);
+    struct d3d9_Surface9_GetDesc_params *_p = args;
+    int _starved;
+
+    d3d9_call_Surface9_GetDesc(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3327,7 +4194,13 @@ static void d3d9_call_Surface9_LockRect(struct d3d9_Surface9_LockRect_params *_p
 
 NTSTATUS _d3d9_Surface9_LockRect(void *args)
 {
-    d3d9_call_Surface9_LockRect(args);
+    struct d3d9_Surface9_LockRect_params *_p = args;
+    int _starved;
+
+    d3d9_call_Surface9_LockRect(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3339,7 +4212,13 @@ static void d3d9_call_Surface9_UnlockRect(struct d3d9_Surface9_UnlockRect_params
 
 NTSTATUS _d3d9_Surface9_UnlockRect(void *args)
 {
-    d3d9_call_Surface9_UnlockRect(args);
+    struct d3d9_Surface9_UnlockRect_params *_p = args;
+    int _starved;
+
+    d3d9_call_Surface9_UnlockRect(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3351,7 +4230,13 @@ static void d3d9_call_Surface9_GetDC(struct d3d9_Surface9_GetDC_params *_p)
 
 NTSTATUS _d3d9_Surface9_GetDC(void *args)
 {
-    d3d9_call_Surface9_GetDC(args);
+    struct d3d9_Surface9_GetDC_params *_p = args;
+    int _starved;
+
+    d3d9_call_Surface9_GetDC(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3363,7 +4248,13 @@ static void d3d9_call_Surface9_ReleaseDC(struct d3d9_Surface9_ReleaseDC_params *
 
 NTSTATUS _d3d9_Surface9_ReleaseDC(void *args)
 {
-    d3d9_call_Surface9_ReleaseDC(args);
+    struct d3d9_Surface9_ReleaseDC_params *_p = args;
+    int _starved;
+
+    d3d9_call_Surface9_ReleaseDC(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3430,7 +4321,13 @@ static void d3d9_call_Texture9_SetPrivateData(struct d3d9_Texture9_SetPrivateDat
 
 NTSTATUS _d3d9_Texture9_SetPrivateData(void *args)
 {
-    d3d9_call_Texture9_SetPrivateData(args);
+    struct d3d9_Texture9_SetPrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_Texture9_SetPrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3461,7 +4358,13 @@ static void d3d9_call_Texture9_GetPrivateData(struct d3d9_Texture9_GetPrivateDat
 
 NTSTATUS _d3d9_Texture9_GetPrivateData(void *args)
 {
-    d3d9_call_Texture9_GetPrivateData(args);
+    struct d3d9_Texture9_GetPrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_Texture9_GetPrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3480,7 +4383,13 @@ static void d3d9_call_Texture9_FreePrivateData(struct d3d9_Texture9_FreePrivateD
 
 NTSTATUS _d3d9_Texture9_FreePrivateData(void *args)
 {
-    d3d9_call_Texture9_FreePrivateData(args);
+    struct d3d9_Texture9_FreePrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_Texture9_FreePrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3574,7 +4483,13 @@ static void d3d9_call_Texture9_SetAutoGenFilterType(struct d3d9_Texture9_SetAuto
 
 NTSTATUS _d3d9_Texture9_SetAutoGenFilterType(void *args)
 {
-    d3d9_call_Texture9_SetAutoGenFilterType(args);
+    struct d3d9_Texture9_SetAutoGenFilterType_params *_p = args;
+    int _starved;
+
+    d3d9_call_Texture9_SetAutoGenFilterType(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3617,7 +4532,13 @@ static void d3d9_call_Texture9_GetLevelDesc(struct d3d9_Texture9_GetLevelDesc_pa
 
 NTSTATUS _d3d9_Texture9_GetLevelDesc(void *args)
 {
-    d3d9_call_Texture9_GetLevelDesc(args);
+    struct d3d9_Texture9_GetLevelDesc_params *_p = args;
+    int _starved;
+
+    d3d9_call_Texture9_GetLevelDesc(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3634,7 +4555,13 @@ static void d3d9_call_Texture9_GetSurfaceLevel(struct d3d9_Texture9_GetSurfaceLe
 
 NTSTATUS _d3d9_Texture9_GetSurfaceLevel(void *args)
 {
-    d3d9_call_Texture9_GetSurfaceLevel(args);
+    struct d3d9_Texture9_GetSurfaceLevel_params *_p = args;
+    int _starved;
+
+    d3d9_call_Texture9_GetSurfaceLevel(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3663,7 +4590,13 @@ static void d3d9_call_Texture9_LockRect(struct d3d9_Texture9_LockRect_params *_p
 
 NTSTATUS _d3d9_Texture9_LockRect(void *args)
 {
-    d3d9_call_Texture9_LockRect(args);
+    struct d3d9_Texture9_LockRect_params *_p = args;
+    int _starved;
+
+    d3d9_call_Texture9_LockRect(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3675,7 +4608,13 @@ static void d3d9_call_Texture9_UnlockRect(struct d3d9_Texture9_UnlockRect_params
 
 NTSTATUS _d3d9_Texture9_UnlockRect(void *args)
 {
-    d3d9_call_Texture9_UnlockRect(args);
+    struct d3d9_Texture9_UnlockRect_params *_p = args;
+    int _starved;
+
+    d3d9_call_Texture9_UnlockRect(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3694,7 +4633,13 @@ static void d3d9_call_Texture9_AddDirtyRect(struct d3d9_Texture9_AddDirtyRect_pa
 
 NTSTATUS _d3d9_Texture9_AddDirtyRect(void *args)
 {
-    d3d9_call_Texture9_AddDirtyRect(args);
+    struct d3d9_Texture9_AddDirtyRect_params *_p = args;
+    int _starved;
+
+    d3d9_call_Texture9_AddDirtyRect(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3761,7 +4706,13 @@ static void d3d9_call_CubeTexture9_SetPrivateData(struct d3d9_CubeTexture9_SetPr
 
 NTSTATUS _d3d9_CubeTexture9_SetPrivateData(void *args)
 {
-    d3d9_call_CubeTexture9_SetPrivateData(args);
+    struct d3d9_CubeTexture9_SetPrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_CubeTexture9_SetPrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3792,7 +4743,13 @@ static void d3d9_call_CubeTexture9_GetPrivateData(struct d3d9_CubeTexture9_GetPr
 
 NTSTATUS _d3d9_CubeTexture9_GetPrivateData(void *args)
 {
-    d3d9_call_CubeTexture9_GetPrivateData(args);
+    struct d3d9_CubeTexture9_GetPrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_CubeTexture9_GetPrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3811,7 +4768,13 @@ static void d3d9_call_CubeTexture9_FreePrivateData(struct d3d9_CubeTexture9_Free
 
 NTSTATUS _d3d9_CubeTexture9_FreePrivateData(void *args)
 {
-    d3d9_call_CubeTexture9_FreePrivateData(args);
+    struct d3d9_CubeTexture9_FreePrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_CubeTexture9_FreePrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3905,7 +4868,13 @@ static void d3d9_call_CubeTexture9_SetAutoGenFilterType(struct d3d9_CubeTexture9
 
 NTSTATUS _d3d9_CubeTexture9_SetAutoGenFilterType(void *args)
 {
-    d3d9_call_CubeTexture9_SetAutoGenFilterType(args);
+    struct d3d9_CubeTexture9_SetAutoGenFilterType_params *_p = args;
+    int _starved;
+
+    d3d9_call_CubeTexture9_SetAutoGenFilterType(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3948,7 +4917,13 @@ static void d3d9_call_CubeTexture9_GetLevelDesc(struct d3d9_CubeTexture9_GetLeve
 
 NTSTATUS _d3d9_CubeTexture9_GetLevelDesc(void *args)
 {
-    d3d9_call_CubeTexture9_GetLevelDesc(args);
+    struct d3d9_CubeTexture9_GetLevelDesc_params *_p = args;
+    int _starved;
+
+    d3d9_call_CubeTexture9_GetLevelDesc(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3965,7 +4940,13 @@ static void d3d9_call_CubeTexture9_GetCubeMapSurface(struct d3d9_CubeTexture9_Ge
 
 NTSTATUS _d3d9_CubeTexture9_GetCubeMapSurface(void *args)
 {
-    d3d9_call_CubeTexture9_GetCubeMapSurface(args);
+    struct d3d9_CubeTexture9_GetCubeMapSurface_params *_p = args;
+    int _starved;
+
+    d3d9_call_CubeTexture9_GetCubeMapSurface(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -3994,7 +4975,13 @@ static void d3d9_call_CubeTexture9_LockRect(struct d3d9_CubeTexture9_LockRect_pa
 
 NTSTATUS _d3d9_CubeTexture9_LockRect(void *args)
 {
-    d3d9_call_CubeTexture9_LockRect(args);
+    struct d3d9_CubeTexture9_LockRect_params *_p = args;
+    int _starved;
+
+    d3d9_call_CubeTexture9_LockRect(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4006,7 +4993,13 @@ static void d3d9_call_CubeTexture9_UnlockRect(struct d3d9_CubeTexture9_UnlockRec
 
 NTSTATUS _d3d9_CubeTexture9_UnlockRect(void *args)
 {
-    d3d9_call_CubeTexture9_UnlockRect(args);
+    struct d3d9_CubeTexture9_UnlockRect_params *_p = args;
+    int _starved;
+
+    d3d9_call_CubeTexture9_UnlockRect(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4025,7 +5018,13 @@ static void d3d9_call_CubeTexture9_AddDirtyRect(struct d3d9_CubeTexture9_AddDirt
 
 NTSTATUS _d3d9_CubeTexture9_AddDirtyRect(void *args)
 {
-    d3d9_call_CubeTexture9_AddDirtyRect(args);
+    struct d3d9_CubeTexture9_AddDirtyRect_params *_p = args;
+    int _starved;
+
+    d3d9_call_CubeTexture9_AddDirtyRect(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4092,7 +5091,13 @@ static void d3d9_call_VolumeTexture9_SetPrivateData(struct d3d9_VolumeTexture9_S
 
 NTSTATUS _d3d9_VolumeTexture9_SetPrivateData(void *args)
 {
-    d3d9_call_VolumeTexture9_SetPrivateData(args);
+    struct d3d9_VolumeTexture9_SetPrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_VolumeTexture9_SetPrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4123,7 +5128,13 @@ static void d3d9_call_VolumeTexture9_GetPrivateData(struct d3d9_VolumeTexture9_G
 
 NTSTATUS _d3d9_VolumeTexture9_GetPrivateData(void *args)
 {
-    d3d9_call_VolumeTexture9_GetPrivateData(args);
+    struct d3d9_VolumeTexture9_GetPrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_VolumeTexture9_GetPrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4142,7 +5153,13 @@ static void d3d9_call_VolumeTexture9_FreePrivateData(struct d3d9_VolumeTexture9_
 
 NTSTATUS _d3d9_VolumeTexture9_FreePrivateData(void *args)
 {
-    d3d9_call_VolumeTexture9_FreePrivateData(args);
+    struct d3d9_VolumeTexture9_FreePrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_VolumeTexture9_FreePrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4236,7 +5253,13 @@ static void d3d9_call_VolumeTexture9_SetAutoGenFilterType(struct d3d9_VolumeText
 
 NTSTATUS _d3d9_VolumeTexture9_SetAutoGenFilterType(void *args)
 {
-    d3d9_call_VolumeTexture9_SetAutoGenFilterType(args);
+    struct d3d9_VolumeTexture9_SetAutoGenFilterType_params *_p = args;
+    int _starved;
+
+    d3d9_call_VolumeTexture9_SetAutoGenFilterType(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4279,7 +5302,13 @@ static void d3d9_call_VolumeTexture9_GetLevelDesc(struct d3d9_VolumeTexture9_Get
 
 NTSTATUS _d3d9_VolumeTexture9_GetLevelDesc(void *args)
 {
-    d3d9_call_VolumeTexture9_GetLevelDesc(args);
+    struct d3d9_VolumeTexture9_GetLevelDesc_params *_p = args;
+    int _starved;
+
+    d3d9_call_VolumeTexture9_GetLevelDesc(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4296,7 +5325,13 @@ static void d3d9_call_VolumeTexture9_GetVolumeLevel(struct d3d9_VolumeTexture9_G
 
 NTSTATUS _d3d9_VolumeTexture9_GetVolumeLevel(void *args)
 {
-    d3d9_call_VolumeTexture9_GetVolumeLevel(args);
+    struct d3d9_VolumeTexture9_GetVolumeLevel_params *_p = args;
+    int _starved;
+
+    d3d9_call_VolumeTexture9_GetVolumeLevel(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4325,7 +5360,13 @@ static void d3d9_call_VolumeTexture9_LockBox(struct d3d9_VolumeTexture9_LockBox_
 
 NTSTATUS _d3d9_VolumeTexture9_LockBox(void *args)
 {
-    d3d9_call_VolumeTexture9_LockBox(args);
+    struct d3d9_VolumeTexture9_LockBox_params *_p = args;
+    int _starved;
+
+    d3d9_call_VolumeTexture9_LockBox(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4337,7 +5378,13 @@ static void d3d9_call_VolumeTexture9_UnlockBox(struct d3d9_VolumeTexture9_Unlock
 
 NTSTATUS _d3d9_VolumeTexture9_UnlockBox(void *args)
 {
-    d3d9_call_VolumeTexture9_UnlockBox(args);
+    struct d3d9_VolumeTexture9_UnlockBox_params *_p = args;
+    int _starved;
+
+    d3d9_call_VolumeTexture9_UnlockBox(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4356,7 +5403,13 @@ static void d3d9_call_VolumeTexture9_AddDirtyBox(struct d3d9_VolumeTexture9_AddD
 
 NTSTATUS _d3d9_VolumeTexture9_AddDirtyBox(void *args)
 {
-    d3d9_call_VolumeTexture9_AddDirtyBox(args);
+    struct d3d9_VolumeTexture9_AddDirtyBox_params *_p = args;
+    int _starved;
+
+    d3d9_call_VolumeTexture9_AddDirtyBox(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4423,7 +5476,13 @@ static void d3d9_call_Volume9_SetPrivateData(struct d3d9_Volume9_SetPrivateData_
 
 NTSTATUS _d3d9_Volume9_SetPrivateData(void *args)
 {
-    d3d9_call_Volume9_SetPrivateData(args);
+    struct d3d9_Volume9_SetPrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_Volume9_SetPrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4454,7 +5513,13 @@ static void d3d9_call_Volume9_GetPrivateData(struct d3d9_Volume9_GetPrivateData_
 
 NTSTATUS _d3d9_Volume9_GetPrivateData(void *args)
 {
-    d3d9_call_Volume9_GetPrivateData(args);
+    struct d3d9_Volume9_GetPrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_Volume9_GetPrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4473,7 +5538,13 @@ static void d3d9_call_Volume9_FreePrivateData(struct d3d9_Volume9_FreePrivateDat
 
 NTSTATUS _d3d9_Volume9_FreePrivateData(void *args)
 {
-    d3d9_call_Volume9_FreePrivateData(args);
+    struct d3d9_Volume9_FreePrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_Volume9_FreePrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4502,7 +5573,13 @@ static void d3d9_call_Volume9_GetDesc(struct d3d9_Volume9_GetDesc_params *_p)
 
 NTSTATUS _d3d9_Volume9_GetDesc(void *args)
 {
-    d3d9_call_Volume9_GetDesc(args);
+    struct d3d9_Volume9_GetDesc_params *_p = args;
+    int _starved;
+
+    d3d9_call_Volume9_GetDesc(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4531,7 +5608,13 @@ static void d3d9_call_Volume9_LockBox(struct d3d9_Volume9_LockBox_params *_p)
 
 NTSTATUS _d3d9_Volume9_LockBox(void *args)
 {
-    d3d9_call_Volume9_LockBox(args);
+    struct d3d9_Volume9_LockBox_params *_p = args;
+    int _starved;
+
+    d3d9_call_Volume9_LockBox(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4543,7 +5626,13 @@ static void d3d9_call_Volume9_UnlockBox(struct d3d9_Volume9_UnlockBox_params *_p
 
 NTSTATUS _d3d9_Volume9_UnlockBox(void *args)
 {
-    d3d9_call_Volume9_UnlockBox(args);
+    struct d3d9_Volume9_UnlockBox_params *_p = args;
+    int _starved;
+
+    d3d9_call_Volume9_UnlockBox(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4610,7 +5699,13 @@ static void d3d9_call_VertexBuffer9_SetPrivateData(struct d3d9_VertexBuffer9_Set
 
 NTSTATUS _d3d9_VertexBuffer9_SetPrivateData(void *args)
 {
-    d3d9_call_VertexBuffer9_SetPrivateData(args);
+    struct d3d9_VertexBuffer9_SetPrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_VertexBuffer9_SetPrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4641,7 +5736,13 @@ static void d3d9_call_VertexBuffer9_GetPrivateData(struct d3d9_VertexBuffer9_Get
 
 NTSTATUS _d3d9_VertexBuffer9_GetPrivateData(void *args)
 {
-    d3d9_call_VertexBuffer9_GetPrivateData(args);
+    struct d3d9_VertexBuffer9_GetPrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_VertexBuffer9_GetPrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4660,7 +5761,13 @@ static void d3d9_call_VertexBuffer9_FreePrivateData(struct d3d9_VertexBuffer9_Fr
 
 NTSTATUS _d3d9_VertexBuffer9_FreePrivateData(void *args)
 {
-    d3d9_call_VertexBuffer9_FreePrivateData(args);
+    struct d3d9_VertexBuffer9_FreePrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_VertexBuffer9_FreePrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4721,7 +5828,13 @@ static void d3d9_call_VertexBuffer9_Lock(struct d3d9_VertexBuffer9_Lock_params *
 
 NTSTATUS _d3d9_VertexBuffer9_Lock(void *args)
 {
-    d3d9_call_VertexBuffer9_Lock(args);
+    struct d3d9_VertexBuffer9_Lock_params *_p = args;
+    int _starved;
+
+    d3d9_call_VertexBuffer9_Lock(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4733,7 +5846,13 @@ static void d3d9_call_VertexBuffer9_Unlock(struct d3d9_VertexBuffer9_Unlock_para
 
 NTSTATUS _d3d9_VertexBuffer9_Unlock(void *args)
 {
-    d3d9_call_VertexBuffer9_Unlock(args);
+    struct d3d9_VertexBuffer9_Unlock_params *_p = args;
+    int _starved;
+
+    d3d9_call_VertexBuffer9_Unlock(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4752,7 +5871,13 @@ static void d3d9_call_VertexBuffer9_GetDesc(struct d3d9_VertexBuffer9_GetDesc_pa
 
 NTSTATUS _d3d9_VertexBuffer9_GetDesc(void *args)
 {
-    d3d9_call_VertexBuffer9_GetDesc(args);
+    struct d3d9_VertexBuffer9_GetDesc_params *_p = args;
+    int _starved;
+
+    d3d9_call_VertexBuffer9_GetDesc(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4819,7 +5944,13 @@ static void d3d9_call_IndexBuffer9_SetPrivateData(struct d3d9_IndexBuffer9_SetPr
 
 NTSTATUS _d3d9_IndexBuffer9_SetPrivateData(void *args)
 {
-    d3d9_call_IndexBuffer9_SetPrivateData(args);
+    struct d3d9_IndexBuffer9_SetPrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_IndexBuffer9_SetPrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4850,7 +5981,13 @@ static void d3d9_call_IndexBuffer9_GetPrivateData(struct d3d9_IndexBuffer9_GetPr
 
 NTSTATUS _d3d9_IndexBuffer9_GetPrivateData(void *args)
 {
-    d3d9_call_IndexBuffer9_GetPrivateData(args);
+    struct d3d9_IndexBuffer9_GetPrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_IndexBuffer9_GetPrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4869,7 +6006,13 @@ static void d3d9_call_IndexBuffer9_FreePrivateData(struct d3d9_IndexBuffer9_Free
 
 NTSTATUS _d3d9_IndexBuffer9_FreePrivateData(void *args)
 {
-    d3d9_call_IndexBuffer9_FreePrivateData(args);
+    struct d3d9_IndexBuffer9_FreePrivateData_params *_p = args;
+    int _starved;
+
+    d3d9_call_IndexBuffer9_FreePrivateData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4930,7 +6073,13 @@ static void d3d9_call_IndexBuffer9_Lock(struct d3d9_IndexBuffer9_Lock_params *_p
 
 NTSTATUS _d3d9_IndexBuffer9_Lock(void *args)
 {
-    d3d9_call_IndexBuffer9_Lock(args);
+    struct d3d9_IndexBuffer9_Lock_params *_p = args;
+    int _starved;
+
+    d3d9_call_IndexBuffer9_Lock(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4942,7 +6091,13 @@ static void d3d9_call_IndexBuffer9_Unlock(struct d3d9_IndexBuffer9_Unlock_params
 
 NTSTATUS _d3d9_IndexBuffer9_Unlock(void *args)
 {
-    d3d9_call_IndexBuffer9_Unlock(args);
+    struct d3d9_IndexBuffer9_Unlock_params *_p = args;
+    int _starved;
+
+    d3d9_call_IndexBuffer9_Unlock(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -4961,7 +6116,13 @@ static void d3d9_call_IndexBuffer9_GetDesc(struct d3d9_IndexBuffer9_GetDesc_para
 
 NTSTATUS _d3d9_IndexBuffer9_GetDesc(void *args)
 {
-    d3d9_call_IndexBuffer9_GetDesc(args);
+    struct d3d9_IndexBuffer9_GetDesc_params *_p = args;
+    int _starved;
+
+    d3d9_call_IndexBuffer9_GetDesc(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -5028,7 +6189,13 @@ static void d3d9_call_VertexDeclaration9_GetDeclaration(struct d3d9_VertexDeclar
 
 NTSTATUS _d3d9_VertexDeclaration9_GetDeclaration(void *args)
 {
-    d3d9_call_VertexDeclaration9_GetDeclaration(args);
+    struct d3d9_VertexDeclaration9_GetDeclaration_params *_p = args;
+    int _starved;
+
+    d3d9_call_VertexDeclaration9_GetDeclaration(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -5095,7 +6262,13 @@ static void d3d9_call_VertexShader9_GetFunction(struct d3d9_VertexShader9_GetFun
 
 NTSTATUS _d3d9_VertexShader9_GetFunction(void *args)
 {
-    d3d9_call_VertexShader9_GetFunction(args);
+    struct d3d9_VertexShader9_GetFunction_params *_p = args;
+    int _starved;
+
+    d3d9_call_VertexShader9_GetFunction(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -5162,7 +6335,13 @@ static void d3d9_call_PixelShader9_GetFunction(struct d3d9_PixelShader9_GetFunct
 
 NTSTATUS _d3d9_PixelShader9_GetFunction(void *args)
 {
-    d3d9_call_PixelShader9_GetFunction(args);
+    struct d3d9_PixelShader9_GetFunction_params *_p = args;
+    int _starved;
+
+    d3d9_call_PixelShader9_GetFunction(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -5216,7 +6395,13 @@ static void d3d9_call_StateBlock9_Capture(struct d3d9_StateBlock9_Capture_params
 
 NTSTATUS _d3d9_StateBlock9_Capture(void *args)
 {
-    d3d9_call_StateBlock9_Capture(args);
+    struct d3d9_StateBlock9_Capture_params *_p = args;
+    int _starved;
+
+    d3d9_call_StateBlock9_Capture(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -5228,7 +6413,13 @@ static void d3d9_call_StateBlock9_Apply(struct d3d9_StateBlock9_Apply_params *_p
 
 NTSTATUS _d3d9_StateBlock9_Apply(void *args)
 {
-    d3d9_call_StateBlock9_Apply(args);
+    struct d3d9_StateBlock9_Apply_params *_p = args;
+    int _starved;
+
+    d3d9_call_StateBlock9_Apply(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -5304,7 +6495,13 @@ static void d3d9_call_Query9_Issue(struct d3d9_Query9_Issue_params *_p)
 
 NTSTATUS _d3d9_Query9_Issue(void *args)
 {
-    d3d9_call_Query9_Issue(args);
+    struct d3d9_Query9_Issue_params *_p = args;
+    int _starved;
+
+    d3d9_call_Query9_Issue(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 
@@ -5323,7 +6520,13 @@ static void d3d9_call_Query9_GetData(struct d3d9_Query9_GetData_params *_p)
 
 NTSTATUS _d3d9_Query9_GetData(void *args)
 {
-    d3d9_call_Query9_GetData(args);
+    struct d3d9_Query9_GetData_params *_p = args;
+    int _starved;
+
+    d3d9_call_Query9_GetData(_p);
+    _starved = D3D9_ARENA_TAKE_STARVED();
+    if (_starved && FAILED((HRESULT)_p->ret))
+        return (NTSTATUS)D3D9SHIM_STATUS_ARENA_EXHAUSTED;
     return STATUS_SUCCESS;
 }
 

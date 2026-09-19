@@ -64,8 +64,12 @@ _Static_assert(D3D9SHIM_OP_arena_register == 321
 
 /* The distinguished status the native sub-allocator returns when the arena is
  * exhausted; d3d9shim_native_call() grows and retries exactly once rather than
- * turning it into an opaque E_OUTOFMEMORY (8.9-6). */
+ * turning it into an opaque E_OUTOFMEMORY (8.9-6).  Generated into
+ * d3d9shim_ops.h so both halves read it from one place; kept here as a
+ * fallback so this header still stands alone. */
+#ifndef D3D9SHIM_STATUS_ARENA_EXHAUSTED
 #define D3D9SHIM_STATUS_ARENA_EXHAUSTED  0xC0000017u  /* STATUS_NO_MEMORY */
+#endif
 
 /* ------------------------------------------------------------------------
  * The object allocation.
