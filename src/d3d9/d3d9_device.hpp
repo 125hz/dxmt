@@ -144,6 +144,24 @@ public:
   metalDevice() const {
     return m_metalDevice;
   }
+  // MADEIRA: does this GPU sample BC (DXTn / 3Dc) textures natively?
+  //
+  // FALSE on every pre-Apple9 GPU, which is most of the installed base. On
+  // such a device to_metal_pixel_format (winemetal_unix.c remap_unsupported_bc)
+  // silently creates a BC descriptor as RGBA8 / R8 / RG8 of the SAME texel
+  // extent, so the resource is real and samplable but its bytes have to be
+  // supplied decoded. Everything above this line -- the D3DFORMAT, the reported
+  // LockRect pitch, the mirror layout, CheckDeviceFormat -- keeps speaking BC,
+  // because surfacing the physical format to the application would break D3D9
+  // semantics for anything that computes its own pitches. The ONE place the
+  // physical layout is used is stageTextureUpload.
+  //
+  // Cached at device construction: it is a fixed property of the adapter, and
+  // the query is a wine_unix_call that the upload path must not pay per level.
+  bool
+  bcTexturesSupported() const {
+    return m_bcSupported;
+  }
   // Size of the vertex float constant register file this device exposes: 256
   // on a hardware-VP device, 8192 on a software / mixed-VP device. The shader
   // compile path threads it into the DXSO codegen so the constant ceiling and
@@ -1548,6 +1566,8 @@ private:
   // GetMaximumFrameLatency expect their last Set value back.
   UINT m_frameLatency = 3;
   WMT::Reference<WMT::Device> m_metalDevice;
+  // See bcTexturesSupported(). Set once in the constructor body, never again.
+  bool m_bcSupported = true;
   // COW snapshot cache for BatchedDraw::pod_snapshot. m_encShadowDirty
   // bitmask; setters OR category on value-change. Fresh snapshot copies
   // only dirty axes; consecutive draws with no setters share one snapshot.

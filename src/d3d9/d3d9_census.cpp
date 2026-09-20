@@ -35,6 +35,7 @@
 #include "util_env.hpp"
 #include "util_string.hpp"
 
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -54,18 +55,59 @@ thread_local ThreadCounters *g_tls_calls = nullptr;
 
 namespace {
 std::atomic<ThreadCounters *> g_tls_list{nullptr};
-}
 
-void countSlow(unsigned code) {
+/* This thread's block, allocated and linked on first use. Out of line and
+ * never on the counting fast path; every counting site tests g_tls_calls
+ * first. Returns null only when the allocation fails, in which case that
+ * thread simply stops contributing (a census that cannot allocate must not
+ * take the process down with it). */
+ThreadCounters *ensureBlock() {
+  if (ThreadCounters *c = g_tls_calls)
+    return c;
   ThreadCounters *c = static_cast<ThreadCounters *>(std::calloc(1, sizeof(ThreadCounters)));
   if (!c)
-    return; /* a census that cannot allocate simply stops counting on this thread */
+    return nullptr;
   ThreadCounters *head = g_tls_list.load(std::memory_order_relaxed);
   do {
     c->next = head;
   } while (!g_tls_list.compare_exchange_weak(head, c, std::memory_order_release, std::memory_order_relaxed));
   g_tls_calls = c;
-  c->n[code].store(1, std::memory_order_relaxed);
+  return c;
+}
+
+/* ml1013: the non-atomic relaxed increment the whole per-thread scheme exists
+ * for. Only the owning thread ever writes its own block, so a plain
+ * load/add/store cannot lose a count, and on i386 it is three instructions
+ * with no lock prefix instead of an emulated exclusive-monitor sequence. */
+inline void bump(std::atomic<uint32_t> &slot) {
+  slot.store(slot.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+}
+
+/* Sum one per-thread slot across every registered block. Report path only.
+ * `member` is a pointer-to-member so the three histogram sums share one walk
+ * shape rather than three near-identical loops. */
+template <typename Slot>
+uint32_t sumBlocks(Slot ThreadCounters::*member) {
+  uint32_t sum = 0;
+  for (ThreadCounters *c = g_tls_list.load(std::memory_order_acquire); c; c = c->next)
+    sum += (c->*member).load(std::memory_order_relaxed);
+  return sum;
+}
+
+template <typename Slot, size_t N>
+uint32_t sumBlocks(Slot (ThreadCounters::*member)[N], size_t index) {
+  uint32_t sum = 0;
+  for (ThreadCounters *c = g_tls_list.load(std::memory_order_acquire); c; c = c->next)
+    sum += (c->*member)[index].load(std::memory_order_relaxed);
+  return sum;
+}
+} // namespace
+
+void countSlow(unsigned code) {
+  ThreadCounters *c = ensureBlock();
+  if (!c)
+    return;
+  bump(c->n[code]);
 }
 
 uint32_t callCount(unsigned code) {
@@ -79,14 +121,15 @@ namespace {
 
 /* Coarse on purpose: the question is "are constant uploads small enough to
  * batch", not the exact distribution. */
-constexpr int kHistBuckets = 10;
+constexpr int kHistBuckets = kCensusHistBuckets;
 const char *const kConstLabels[kHistBuckets] = {"1",     "2",     "3-4",    "5-8",     "9-16",
                                                 "17-32", "33-64", "65-128", "129-256", ">256"};
 const char *const kLockLabels[kHistBuckets] = {"whole",  "1-64",    "65-256",  "257-1K", "1K-4K",
                                                "4K-16K", "16K-64K", "64K-256K", "256K-1M", ">1M"};
 
-std::atomic<uint32_t> g_hist_const[kHistBuckets];
-std::atomic<uint32_t> g_hist_lock[kHistBuckets];
+/* ml1013: both histograms now live in the per-thread block (see
+ * d3d9_census.hpp); the summary sums them the same way it sums the method
+ * counters. No file-scope atomic remains on either counting path. */
 
 std::atomic<uint32_t> g_presents;
 std::atomic<bool> g_reporting;
@@ -94,12 +137,29 @@ std::atomic<bool> g_reporting;
 /* MADEIRA [d3d9-query]: see d3d9_census.hpp. */
 std::atomic<uint32_t> g_q_issued;
 std::atomic<uint32_t> g_q_flushed;
-std::atomic<uint32_t> g_q_polls;
-std::atomic<uint32_t> g_q_polls_complete;
-std::atomic<uint32_t> g_q_polls_parked;
+/* ml1013: g_q_polls* moved into ThreadCounters; only the issue-rate counters
+ * are still file-scope atomics. */
 std::atomic<uint32_t> g_q_completions;
 std::atomic<uint64_t> g_q_latency_ns;
 std::atomic<uint32_t> g_q_latency_max_us;
+
+/* MADEIRA [bc-decode]: see d3d9_census.hpp. Global relaxed atomics rather than
+ * the per-thread block the 317 method counters use: a decode is a whole
+ * subresource of pixel work, so one relaxed add beside it is unmeasurable,
+ * and the shared totals keep the reporter to a single read. */
+std::atomic<uint64_t> g_bc_levels;
+std::atomic<uint64_t> g_bc_base_levels;
+std::atomic<uint64_t> g_bc_in_bytes;
+std::atomic<uint64_t> g_bc_out_bytes;
+std::atomic<uint64_t> g_bc_ns;
+/* Last wall-clock tick a [bc-decode] line was printed at; 0 = never. */
+std::atomic<uint32_t> g_bc_last_tick;
+
+uint64_t g_prev_bc_levels;
+uint64_t g_prev_bc_base_levels;
+uint64_t g_prev_bc_in_bytes;
+uint64_t g_prev_bc_out_bytes;
+uint64_t g_prev_bc_ns;
 
 uint32_t g_prev_q_issued;
 uint32_t g_prev_q_flushed;
@@ -157,15 +217,73 @@ void qline(const char *fmt, ...) {
   Logger::info(std::string("[d3d9-query] ") + buf);
 }
 
+/* MADEIRA [bc-decode]: own tag, same reason as [d3d9-query]. */
+void bline(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void bline(const char *fmt, ...) {
+  char buf[512];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  Logger::info(std::string("[bc-decode] ") + buf);
+}
+
+/* One window's worth of the CPU BC decode cost. `why` names the clock that
+ * fired it, because the two windows are different lengths and averaging across
+ * them would be wrong. Silent when nothing was decoded, so a BC-capable
+ * adapter never prints this at all -- its absence IS the statement that the
+ * decode path did not run. */
+void reportBcDecode(const char *why) {
+  /* Two clocks can fire this (the census summary on the presenting thread, the
+   * 10-second wall clock on whichever thread was uploading). The g_prev_bc_*
+   * snapshot is plain storage and a torn read-modify-write of it would report
+   * one window twice or lose one entirely, so exactly one caller is admitted
+   * at a time; a loser simply skips its line, and the next window covers it. */
+  static std::atomic_flag in_report = ATOMIC_FLAG_INIT;
+  if (in_report.test_and_set(std::memory_order_acquire))
+    return;
+  struct Clear {
+    std::atomic_flag *f;
+    ~Clear() { f->clear(std::memory_order_release); }
+  } clear{&in_report};
+
+  uint64_t levels = g_bc_levels.load(std::memory_order_relaxed);
+  uint64_t base = g_bc_base_levels.load(std::memory_order_relaxed);
+  uint64_t in_b = g_bc_in_bytes.load(std::memory_order_relaxed);
+  uint64_t out_b = g_bc_out_bytes.load(std::memory_order_relaxed);
+  uint64_t ns = g_bc_ns.load(std::memory_order_relaxed);
+
+  uint64_t w_levels = levels - g_prev_bc_levels;
+  uint64_t w_base = base - g_prev_bc_base_levels;
+  uint64_t w_in = in_b - g_prev_bc_in_bytes;
+  uint64_t w_out = out_b - g_prev_bc_out_bytes;
+  uint64_t w_ns = ns - g_prev_bc_ns;
+
+  g_prev_bc_levels = levels;
+  g_prev_bc_base_levels = base;
+  g_prev_bc_in_bytes = in_b;
+  g_prev_bc_out_bytes = out_b;
+  g_prev_bc_ns = ns;
+
+  if (!w_levels)
+    return;
+  bline("textures=%llu levels=%llu MB_in=%.1f MB_out=%.1f ms=%.1f (x%.1f expansion, %.0f MB/s out) window=%s | "
+        "total levels=%llu MB_out=%.0f ms=%.0f",
+        (unsigned long long)w_base, (unsigned long long)w_levels, (double)w_in / 1048576.0,
+        (double)w_out / 1048576.0, (double)w_ns / 1e6, w_in ? (double)w_out / (double)w_in : 0.0,
+        w_ns ? (double)w_out / 1048576.0 / ((double)w_ns / 1e9) : 0.0, why, (unsigned long long)levels,
+        (double)out_b / 1048576.0, (double)ns / 1e6);
+}
+
 /* MADEIRA: one window's worth of the query-poll instrument. Same windowing
  * rule as the census itself -- unsigned wrap arithmetic against the previous
  * summary's snapshot, so a wrapped counter still yields the right delta. */
 void reportQueries(uint32_t frames) {
   uint32_t issued = g_q_issued.load(std::memory_order_relaxed);
   uint32_t flushed = g_q_flushed.load(std::memory_order_relaxed);
-  uint32_t polls = g_q_polls.load(std::memory_order_relaxed);
-  uint32_t hits = g_q_polls_complete.load(std::memory_order_relaxed);
-  uint32_t parked = g_q_polls_parked.load(std::memory_order_relaxed);
+  uint32_t polls = sumBlocks(&ThreadCounters::q_polls);
+  uint32_t hits = sumBlocks(&ThreadCounters::q_polls_complete);
+  uint32_t parked = sumBlocks(&ThreadCounters::q_polls_parked);
   uint32_t done = g_q_completions.load(std::memory_order_relaxed);
   uint64_t latency = g_q_latency_ns.load(std::memory_order_relaxed);
   uint32_t worst = g_q_latency_max_us.load(std::memory_order_relaxed);
@@ -250,7 +368,7 @@ void report() {
     char buf[512];
     int off = 0;
     for (int i = 0; i < kHistBuckets; i++) {
-      uint32_t n = g_hist_const[i].load(std::memory_order_relaxed);
+      uint32_t n = sumBlocks(&ThreadCounters::hist_const, (size_t)i);
       off += snprintf(buf + off, sizeof(buf) - (size_t)off, " %s=%u", kConstLabels[i],
                       (uint32_t)(n - g_prev_hist_const[i]));
       g_prev_hist_const[i] = n;
@@ -258,7 +376,7 @@ void report() {
     line("setshaderconstf vec4 regs:%s", buf);
     off = 0;
     for (int i = 0; i < kHistBuckets; i++) {
-      uint32_t n = g_hist_lock[i].load(std::memory_order_relaxed);
+      uint32_t n = sumBlocks(&ThreadCounters::hist_lock, (size_t)i);
       off += snprintf(buf + off, sizeof(buf) - (size_t)off, " %s=%u", kLockLabels[i],
                       (uint32_t)(n - g_prev_hist_lock[i]));
       g_prev_hist_lock[i] = n;
@@ -267,6 +385,7 @@ void report() {
   }
 
   reportQueries(frames);
+  reportBcDecode("census-summary");
 
   line("---- end summary %u ----", g_summary_seq);
 
@@ -422,7 +541,53 @@ void shaderConstF(unsigned n) {
       b = i;
       break;
     }
-  g_hist_const[b].fetch_add(1, std::memory_order_relaxed);
+  /* ml1013: the hottest instrument call in the frontend -- 2602 + 2428 per
+   * frame in one measured title. A per-thread relaxed increment, not a
+   * file-scope fetch_add. */
+  ThreadCounters *c = g_tls_calls;
+  if (__builtin_expect(c == nullptr, 0)) {
+    c = ensureBlock();
+    if (!c)
+      return;
+  }
+  bump(c->hist_const[b]);
+}
+
+/* MADEIRA [bc-decode]. Not gated on g_on: the decode cost is a property of the
+ * adapter, not of the measurement build, and a device log that has the census
+ * turned off is exactly the log where an unexplained stall needs this line. */
+uint64_t bcDecodeClockNs() {
+  return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch()
+  )
+      .count();
+}
+
+void bcDecode(bool is_base_level, uint64_t in_bytes, uint64_t out_bytes, uint64_t ns) {
+  g_bc_levels.fetch_add(1, std::memory_order_relaxed);
+  if (is_base_level)
+    g_bc_base_levels.fetch_add(1, std::memory_order_relaxed);
+  g_bc_in_bytes.fetch_add(in_bytes, std::memory_order_relaxed);
+  g_bc_out_bytes.fetch_add(out_bytes, std::memory_order_relaxed);
+  g_bc_ns.fetch_add(ns, std::memory_order_relaxed);
+
+  /* The 10-second wall clock. Deliberately NOT now_ms(): that one is
+   * GetTickCount and returns a constant 0 off Windows, which would leave the
+   * native ARM64 build of this same frontend with no 10-second line at all.
+   * steady_clock costs nothing next to the decode that just ran. The CAS
+   * admits exactly one thread per interval; a wrap makes the unsigned
+   * difference small rather than negative, so it only ever skips a line. */
+  const uint32_t now = (uint32_t)(bcDecodeClockNs() / 1000000ull);
+  uint32_t last = g_bc_last_tick.load(std::memory_order_relaxed);
+  if (last == 0) {
+    g_bc_last_tick.compare_exchange_strong(last, now, std::memory_order_relaxed);
+    return;
+  }
+  if ((uint32_t)(now - last) < 10000u)
+    return;
+  if (!g_bc_last_tick.compare_exchange_strong(last, now, std::memory_order_relaxed))
+    return;
+  reportBcDecode("10s");
 }
 
 /* MADEIRA [d3d9-query] counters. Unconditional on g_on like the histograms:
@@ -435,12 +600,22 @@ void queryFlushed() {
   g_q_flushed.fetch_add(1, std::memory_order_relaxed);
 }
 
+/* ml1013: the poll counters move per-thread too. GetData spins, so this is a
+ * spin-path instrument: 97.5 polls per frame in one measured title, three
+ * locked RMWs each. The issue / completion counters below stay file-scope
+ * atomics -- they run at issue rate, not poll rate. */
 void queryPoll(bool complete, bool parked) {
-  g_q_polls.fetch_add(1, std::memory_order_relaxed);
+  ThreadCounters *c = g_tls_calls;
+  if (__builtin_expect(c == nullptr, 0)) {
+    c = ensureBlock();
+    if (!c)
+      return;
+  }
+  bump(c->q_polls);
   if (complete)
-    g_q_polls_complete.fetch_add(1, std::memory_order_relaxed);
+    bump(c->q_polls_complete);
   if (parked)
-    g_q_polls_parked.fetch_add(1, std::memory_order_relaxed);
+    bump(c->q_polls_parked);
 }
 
 void queryCompleted(uint64_t issue_to_complete_ns, uint32_t polls) {
@@ -574,7 +749,13 @@ void lockBytes(unsigned n) {
       b = i;
       break;
     }
-  g_hist_lock[b].fetch_add(1, std::memory_order_relaxed);
+  ThreadCounters *c = g_tls_calls;
+  if (__builtin_expect(c == nullptr, 0)) {
+    c = ensureBlock();
+    if (!c)
+      return;
+  }
+  bump(c->hist_lock[b]);
 }
 
 } // namespace dxmt::census

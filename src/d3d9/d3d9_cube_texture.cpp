@@ -195,6 +195,12 @@ void
 MTLD3D9CubeTexture::dropMirror() {
   if (m_mirrorBacking == nullptr)
     return;
+  // MADEIRA: same sole-copy rule as the 2D leaf (d3d9_texture.cpp
+  // mirrorIsSoleCopy). On an adapter with no BC support the Metal faces hold
+  // decoded texels and nothing can re-encode them, so the mirror is the only
+  // surviving copy of the blocks and must not be reclaimed.
+  if (!m_device->bcTexturesSupported() && (IsCompressedFormat(m_format) || Is3DcFormat(m_format)))
+    return;
   // The face surfaces share one backing and may hold concurrent locks;
   // freeing under a live pBits would dangle it. Skip; the next
   // write-Unlock retries.

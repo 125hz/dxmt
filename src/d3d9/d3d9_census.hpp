@@ -66,8 +66,36 @@ extern bool g_on;
  * plain instructions with no lock prefix, which is the entire point.  Only the
  * owning thread ever writes its own block, so the non-atomic RMW cannot lose a
  * count. */
+/* Buckets in the two shape histograms. Named here rather than only in the .cpp
+ * because the per-thread block below has to size them. */
+constexpr int kCensusHistBuckets = 10;
+
+/* MADEIRA ml1013: THE HISTOGRAMS WERE STILL PAYING WHAT THE COUNTERS STOPPED
+ * PAYING.
+ *
+ * ml999 moved the 317 method counters off `lock xadd' because an emulated
+ * locked RMW is expensive, and then left shaderConstF(), lockBytes() and
+ * queryPoll() doing exactly that to file-scope atomics. Those are not rare
+ * calls: [d3d9-census] measures Set{Vertex,Pixel}ShaderConstantF at 2602 +
+ * 2428 per frame in one open-world title and 1569 + 1087 in another, and
+ * shaderConstF runs on every one of them, ahead of the device lock and ahead of
+ * the unchanged-value short-circuit that makes the rest of the call cheap. At
+ * 5030 per frame that is ~150k emulated locked read-modify-writes a second
+ * inside the DLL [prof] puts at 17.4 % of all CPU, spent entirely on a
+ * histogram nothing reads until the next summary.
+ *
+ * Same fix as ml999, same reasoning: these are monotone event tallies summed
+ * once per window, so they move into the per-thread block and the writes become
+ * a relaxed load/add/store with no lock prefix. The type stays std::atomic so
+ * that the summing read and the counting write remain a well-defined relaxed
+ * pair rather than a data race. */
 struct ThreadCounters {
   std::atomic<uint32_t> n[D3D9_CENSUS_COUNT];
+  std::atomic<uint32_t> hist_const[kCensusHistBuckets];
+  std::atomic<uint32_t> hist_lock[kCensusHistBuckets];
+  std::atomic<uint32_t> q_polls;
+  std::atomic<uint32_t> q_polls_complete;
+  std::atomic<uint32_t> q_polls_parked;
   ThreadCounters *next;
 };
 
@@ -131,6 +159,26 @@ void lockBytes(unsigned size_bytes); /* 0 means "to the end of the buffer" */
  * queryPoll is the only one on the spin path, so it is a single relaxed
  * uint32 add like D3D9_CENSUS; the completion counters run at issue rate
  * (hundreds per frame, not tens of thousands) and can afford 64 bits. */
+/* MADEIRA [bc-decode]: what CPU BC decompression costs, on its own line beside
+ * the census summary AND on a 10-second wall clock of its own.
+ *
+ * Two clocks because the two questions differ. The census summary's clock is
+ * presented frames (every 5000 by default), which at 30 fps is minutes apart --
+ * far too coarse to see a streaming burst. Decode events run at hundreds per
+ * second at worst, so a GetTickCount comparison per event is free, and a
+ * 10-second line puts the cost next to the frame-rate evidence in the same log.
+ *
+ * Counted, not sampled: MB_in is what the application handed us in BC form,
+ * MB_out is what went to the GPU, and their ratio is the memory multiplier the
+ * adapter is paying. ms is wall time spent inside the decoder on the calling
+ * thread, which is the number that competes with the frame budget.
+ *
+ * bcDecodeClockNs is exposed so the caller times the decode itself rather than
+ * the census guessing: a caller that is not decoding must not pay for a clock
+ * read, and this way the timing brackets exactly the loop. */
+uint64_t bcDecodeClockNs();
+void bcDecode(bool is_base_level, uint64_t in_bytes, uint64_t out_bytes, uint64_t ns);
+
 void queryIssued();                   /* Issue(D3DISSUE_END) on EVENT/OCCLUSION */
 void queryFlushed();                  /* GetData committed the issuing chunk  */
 void queryPoll(bool complete, bool parked);

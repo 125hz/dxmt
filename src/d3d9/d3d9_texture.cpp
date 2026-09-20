@@ -305,9 +305,28 @@ MTLD3D9Texture::ensureMirror() {
 // wins arrives much sooner.
 static constexpr uint32_t kMirrorReadEvictThreshold = 4;
 
+// MADEIRA: is this resource's sysmem mirror the ONLY copy of its bytes?
+//
+// True for a block-compressed format on an adapter that cannot sample BC. The
+// Metal texture there holds DECODED texels (see stageTextureUpload), and
+// nothing re-encodes them, so the mirror is a one-way master: evicting it
+// would discard the BC blocks permanently and the next read-Lock would hand
+// the application whatever a failed readback left behind. Pinning it costs the
+// compressed footprint -- an eighth to a quarter of what the decoded GPU copy
+// already costs -- which is the cheaper half of the trade.
+//
+// On a BC-capable adapter this is false for every format and the eviction
+// machinery is byte-for-byte what it was.
+static bool
+mirrorIsSoleCopy(MTLD3D9Device *device, D3DFORMAT format) {
+  return !device->bcTexturesSupported() && (IsCompressedFormat(format) || Is3DcFormat(format));
+}
+
 void
 MTLD3D9Texture::dropMirror() {
   if (m_userMemory || m_mirrorBacking == nullptr)
+    return;
+  if (mirrorIsSoleCopy(m_device, m_format))
     return;
   // The level surfaces share one backing, and D3D9 lets an app hold two mip
   // levels locked at once: freeing while any level is locked would yank the

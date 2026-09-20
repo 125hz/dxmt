@@ -33,9 +33,11 @@
 #include "d3d9_viewport.hpp"
 #include "d3d9_validation.hpp"
 #include "d3d9_vertex_declaration.hpp"
+#include "dxmt_bcn.hpp"
 #include "dxmt_command_queue.hpp"
 #include "dxmt_context.hpp"
 #include "dxmt_format.hpp"
+#include "dxmt_resource_initializer.hpp"
 #include "dxso_header.hpp"
 #include "log/log.hpp"
 #include "wsi_platform.hpp"
@@ -560,6 +562,11 @@ MTLD3D9Device::MTLD3D9Device(
   // device work; D3DCREATE_FPU_PRESERVE opts out (wined3d / DXVK gate the same).
   if (!(behaviorFlags & D3DCREATE_FPU_PRESERVE))
     setupFpu();
+  // MADEIRA: one query, once. See bcTexturesSupported() in the header for why
+  // the answer never reaches the D3D-visible side of the frontend.
+  m_bcSupported = m_metalDevice.supportsBCTextureCompression();
+  if (!m_bcSupported)
+    Logger::info("d3d9: adapter has no BC texture support; DXTn/3Dc uploads are decoded on the CPU");
   m_completionEvent = m_metalDevice.newSharedEvent();
   // Pre-allocate 2 blocks per ring: first-touch of a fresh
   // Metal-registered block page-faults expensively under Rosetta
@@ -1428,6 +1435,38 @@ MTLD3D9Device::stageTextureUpload(
     is_compressed = true;
   }
 
+  // MADEIRA: BC DECODE FOR AN ADAPTER THAT CANNOT SAMPLE BC.
+  //
+  // remap_unsupported_bc (winemetal_unix.c) already turned this texture's
+  // descriptor into RGBA8 / R8 / RG8 of the same texel extent when it was
+  // created, and nothing has ever supplied it decoded texels. The two block
+  // sizes then failed DIFFERENTLY, which is why the symptom looked like two
+  // bugs: the blit encoder's texture_upload_pitch_ok guard drops a copy whose
+  // bytesPerRow is below width * bpp, and an 8-byte-block format's BC pitch is
+  // ceil(w/4)*8 = 2w against a required 4w -- dropped, leaving the zero fill --
+  // while a 16-byte-block format's is ceil(w/4)*16 = 4w, which passes exactly,
+  // so its block bytes reached the texture and were sampled as RGBA8 noise.
+  // Decode instead, and both stop being special cases.
+  //
+  // dst_alloc->pixelFormat() is the LOGICAL format: WMTTextureInfo is built on
+  // this side and the remap happens below the unix boundary, which never
+  // writes the field back. That is what makes bc_decode_kind answer here at
+  // all, and it is the same property the D3D11 initial-data path relies on
+  // (dxmt_resource_initializer.cpp). BC6H has no tag and cannot reach a D3D9
+  // resource; it is left to fall through as a no-decode.
+  //
+  // Everything downstream then speaks the PHYSICAL layout -- tight RGBA8 rows,
+  // is_compressed false, block-row rounding off -- while origin and size stay
+  // in texels and are therefore unchanged. That is the whole conversion.
+  const int bc_kind = (is_compressed && !m_bcSupported) ? bc_decode_kind(dst_alloc->pixelFormat()) : 0;
+  const uint32_t bc_src_pitch = src_pitch;
+  if (bc_kind) {
+    // Tightly packed destination rows at the physical texel size. The source
+    // keeps its BC pitch for the decode read; only the staged copy changes.
+    src_pitch = static_cast<uint32_t>(size.width) * bcn_texel_size(bc_kind);
+    is_compressed = false;
+  }
+
   // Per-destination-slice + total staging bytes (texture_upload_layout
   // handles the compressed block-row rounding and the depth scaling).
   // Volume (3D) textures stage every depth slice, not just one; source
@@ -1441,7 +1480,13 @@ MTLD3D9Device::stageTextureUpload(
   const uint32_t depth = size.depth ? static_cast<uint32_t>(size.depth) : 1u;
   const auto layout = texture_upload_layout(src_pitch, static_cast<uint32_t>(size.height), depth, is_compressed);
   const uint32_t bytes_per_image = layout.bytes_per_image;
-  const uint32_t src_slice = src_slice_pitch ? src_slice_pitch : bytes_per_image;
+  // The source stride between depth slices. Without a decode this is the
+  // staged slice size; with one the source is still BC, so it is the BC
+  // slice size, and the two are no longer interchangeable.
+  const uint32_t bc_src_bytes_per_image =
+      bc_kind ? texture_upload_layout(bc_src_pitch, static_cast<uint32_t>(size.height), 1u, true).bytes_per_image
+              : bytes_per_image;
+  const uint32_t src_slice = src_slice_pitch ? src_slice_pitch : bc_src_bytes_per_image;
   const size_t total_bytes = layout.total_bytes;
 
   // Coherent_id reads the GPU's last signalled cmdbuf seq so the ring
@@ -1459,7 +1504,22 @@ MTLD3D9Device::stageTextureUpload(
   if (!span)
     return;
   char *staged = static_cast<char *>(span.host);
-  if (src_slice == bytes_per_image) {
+  if (bc_kind) {
+    // Decode straight into the ring block: no scratch buffer, no per-block
+    // allocation, one pass over the source. This runs on the thread that
+    // called Unlock / UpdateTexture, which is where the bytes already are.
+    const uint64_t t0 = census::bcDecodeClockNs();
+    for (uint32_t z = 0; z < depth; ++z)
+      bcn_decode_image(
+          reinterpret_cast<const uint8_t *>(src) + static_cast<size_t>(z) * src_slice, bc_src_pitch,
+          reinterpret_cast<uint8_t *>(staged) + static_cast<size_t>(z) * bytes_per_image, src_pitch,
+          static_cast<uint32_t>(size.width), static_cast<uint32_t>(size.height), bc_kind
+      );
+    census::bcDecode(
+        /*is_base_level=*/mip_level == 0 && slice == 0, static_cast<uint64_t>(bc_src_bytes_per_image) * depth,
+        static_cast<uint64_t>(bytes_per_image) * depth, census::bcDecodeClockNs() - t0
+    );
+  } else if (src_slice == bytes_per_image) {
     std::memcpy(staged, src, total_bytes);
   } else {
     // Sub-box 3D upload: copy slice by slice, the staged slices packed
@@ -1509,6 +1569,15 @@ MTLD3D9Device::readbackSurfaceMirror(MTLD3D9Surface *surface) {
   // main thread has no outer NSAutoreleasePool.
   auto pool = WMT::MakeAutoreleasePool();
   const D3DSURFACE_DESC &desc = surface->desc();
+  // MADEIRA: a decoded BC texture has NO readback. Its Metal storage is RGBA8
+  // texels while the mirror this would fill is BC blocks, and there is no
+  // re-encoder -- so the copy below would be refused by the blit guard
+  // (texture_upload_pitch_ok) and then memcpy whatever the ring block happened
+  // to hold into the application's pixels. The mirror is the authoritative
+  // copy for these resources (see the eviction gate in d3d9_texture.cpp), so
+  // leaving it untouched is not a degradation, it is the correct answer.
+  if (!m_bcSupported && (IsCompressedFormat(desc.Format) || Is3DcFormat(desc.Format)))
+    return;
   // 3Dc reads back through the real BC geometry into the fiction mirror's
   // head; every other format uses the mirror's own layout pitch.
   const uint32_t pitch =
