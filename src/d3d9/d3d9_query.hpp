@@ -103,6 +103,9 @@ private:
   // kPollsBeforePark ramp and is reported as polls_per_completion on the
   // [d3d9-query] line.
   uint32_t m_polls_since_issue = 0;
+  // ml1150: readiness checks spread across frames are not a busy loop.
+  uint64_t m_last_pending_poll_ns = 0;
+  uint32_t m_poll_burst = 0;
   // MADEIRA: steady_clock ns at Issue(D3DISSUE_END), so the instrument can
   // report the real Issue -> completion latency (the number that says whether
   // the poll loop is waiting on the GPU or on dxmt's own submission policy).

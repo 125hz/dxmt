@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 
 #include "d3d9_census.hpp"
 
@@ -184,6 +185,8 @@ MTLD3D9Query::Issue(DWORD dwIssueFlags) {
     // m_flushed_since_issue / kPollsBeforePark comments in the header.
     m_flushed_since_issue = false;
     m_polls_since_issue = 0;
+    m_last_pending_poll_ns = 0;
+    m_poll_burst = 0;
     if (m_type == D3DQUERYTYPE_EVENT || m_type == D3DQUERYTYPE_OCCLUSION) {
       m_issue_ns =
           std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
@@ -272,10 +275,30 @@ MTLD3D9Query::GetData(void *pData, DWORD dwSize, DWORD dwGetDataFlags) {
       return hr;
     }
     m_polls_since_issue++;
+    // ml1150: the old lifetime count penalized an asynchronous culling loop
+    // after its third check, even if those checks were a frame apart. Keep
+    // cooperative back-pressure for tight polling only. A 250us gap starts
+    // a new burst; completed queries never pay for this clock read.
+    static const bool adaptive = [] {
+      const char *value = std::getenv("DXMT_D9_QUERY_ADAPTIVE");
+      bool enabled = !value || std::strcmp(value, "0");
+      Logger::warn(str::format("[query-pacing] ml1150 burst-aware=", enabled,
+                              " (DXMT_D9_QUERY_ADAPTIVE=0 restores lifetime polling)"));
+      return enabled;
+    }();
+    uint32_t pending_polls = m_polls_since_issue;
+    if (adaptive) {
+      uint64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
+      m_poll_burst = m_last_pending_poll_ns && now - m_last_pending_poll_ns <= 250000
+          ? std::min(m_poll_burst + 1, kPollsBeforePark + 1) : 1;
+      m_last_pending_poll_ns = now;
+      pending_polls = m_poll_burst;
+    }
     // Only the two GPU-backed types have a fence to park on. m_event_seq == 0
     // means Issue(END) never ran for this type (TIMESTAMP and friends resolve
     // on the calling thread), so there is nothing to wait for.
-    if (m_polls_since_issue <= kPollsBeforePark || !m_event_seq ||
+    if (pending_polls <= kPollsBeforePark || !m_event_seq ||
         (m_type != D3DQUERYTYPE_EVENT && m_type != D3DQUERYTYPE_OCCLUSION)) {
       census::queryPoll(false, false);
       return S_FALSE;
