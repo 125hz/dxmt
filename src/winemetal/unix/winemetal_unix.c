@@ -69,8 +69,9 @@ extern void ios_frame_limiter(unsigned long long ns);
  * queue depth, which is the number the `[frame]` line reports as qdepth.  Both
  * ends are visible from this file and from nowhere else -- DXMT's own
  * chunk_ongoing counter is PE-side emulated state. */
-static _Atomic uint64_t g_madeira_cmdbuf_commits;
-static _Atomic uint64_t g_madeira_cmdbuf_retires;
+static _Atomic uint64_t g_madeira_cmdbuf_inflight;
+extern int ios_frame_stats_on;
+extern void ios_frame_pass(unsigned kind, unsigned loads, unsigned stores, unsigned clears);
 
 typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
@@ -260,7 +261,17 @@ _MTLCommandBuffer_commit(void *obj) {
     wmtr_call(RM_OP_COMMIT, &a, sizeof a, 0, 0, 0);
     return STATUS_SUCCESS;
   }
-  atomic_fetch_add_explicit(&g_madeira_cmdbuf_commits, 1, memory_order_relaxed);
+  /* ml1140: retirement belongs to the GPU completion, not waitUntilCompleted.
+   * The finish thread skips that wait for buffers already completed, so the
+   * old subtraction counted them as queued forever and omitted their GPU time. */
+  if (ios_frame_stats_on) {
+    atomic_fetch_add_explicit(&g_madeira_cmdbuf_inflight, 1, memory_order_relaxed);
+    [(id<MTLCommandBuffer>)params->handle addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+      uint64_t depth = atomic_fetch_sub_explicit(&g_madeira_cmdbuf_inflight, 1, memory_order_relaxed);
+      double span = buffer.GPUEndTime - buffer.GPUStartTime;
+      ios_frame_gpu(buffer.GPUStartTime > 0.0 && span > 0.0 ? (unsigned long long)(span * 1e9) : 0, depth);
+    }];
+  }
   [(id<MTLCommandBuffer>)params->handle commit];
   return STATUS_SUCCESS;
 }
@@ -274,26 +285,6 @@ _MTLCommandBuffer_waitUntilCompleted(void *obj) {
     return STATUS_SUCCESS;
   }
   [(id<MTLCommandBuffer>)params->handle waitUntilCompleted];
-  /* ml1050: GPU TIME, MEASURED BY THE DRIVER RATHER THAN INFERRED.
-   *
-   * DXMT's finish thread calls this for EVERY chunk (dxmt_command_queue.cpp
-   * WaitForFinishThread), so this is the one place in the image that sees
-   * every command buffer AFTER it has retired -- which is the only moment
-   * GPUStartTime/GPUEndTime are meaningful.  Both are CFTimeInterval seconds
-   * on the mach_absolute_time base; Metal leaves them 0 when it has no
-   * timestamps, and a 0 or negative span is dropped rather than charged.
-   *
-   * `inflight` is sampled BEFORE the retire is published so the reported
-   * depth is the depth this buffer actually waited behind. */
-  {
-    unsigned long long commits = atomic_load_explicit(&g_madeira_cmdbuf_commits, memory_order_relaxed);
-    unsigned long long retires = atomic_fetch_add_explicit(&g_madeira_cmdbuf_retires, 1, memory_order_relaxed);
-    double t0 = [(id<MTLCommandBuffer>)params->handle GPUStartTime];
-    double t1 = [(id<MTLCommandBuffer>)params->handle GPUEndTime];
-    double span = t1 - t0;
-    ios_frame_gpu((t0 > 0.0 && span > 0.0) ? (unsigned long long)(span * 1e9) : 0,
-                  commits > retires ? commits - retires : 0);
-  }
   return STATUS_SUCCESS;
 }
 
@@ -971,6 +962,7 @@ _MTLCommandBuffer_blitCommandEncoder(void *obj) {
     return STATUS_SUCCESS;
   }
   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle blitCommandEncoder];
+  if (params->ret) ios_frame_pass(1, 0, 0, 0);
   return STATUS_SUCCESS;
 }
 
@@ -979,6 +971,7 @@ _MTLCommandBuffer_computeCommandEncoder(void *obj) {
   struct unixcall_generic_obj_uint64_obj_ret *params = obj;
   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle
       computeCommandEncoderWithDispatchType:params->arg ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial];
+  if (params->ret) ios_frame_pass(2, 0, 0, 0);
   return STATUS_SUCCESS;
 }
 
@@ -1044,6 +1037,28 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
   descriptor.visibilityResultBuffer = (id<MTLBuffer>)info->visibility_buffer;
 
   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor];
+
+  /* Count realized native passes, including clears and the final present.
+   * No new PE ABI or emulated hot-path counters are needed. */
+  if (params->ret && ios_frame_stats_on) {
+    unsigned loads = 0, stores = 0, clears = 0;
+    for (unsigned i = 0; i < 8; ++i) if (info->colors[i].texture) {
+      loads += info->colors[i].load_action == WMTLoadActionLoad;
+      clears += info->colors[i].load_action == WMTLoadActionClear;
+      stores += info->colors[i].store_action != WMTStoreActionDontCare;
+    }
+    if (info->depth.texture) {
+      loads += info->depth.load_action == WMTLoadActionLoad;
+      clears += info->depth.load_action == WMTLoadActionClear;
+      stores += info->depth.store_action != WMTStoreActionDontCare;
+    }
+    if (info->stencil.texture) {
+      loads += info->stencil.load_action == WMTLoadActionLoad;
+      clears += info->stencil.load_action == WMTLoadActionClear;
+      stores += info->stencil.store_action != WMTStoreActionDontCare;
+    }
+    ios_frame_pass(0, loads, stores, clears);
+  }
 
   [descriptor release];
   return STATUS_SUCCESS;
@@ -2830,6 +2845,19 @@ _MetalLayer_getProps(void *obj) {
   props->framebuffer_only = layer.framebufferOnly;
   props->contents_scale = layer.contentsScale;
 #if TARGET_OS_IOS
+  /* ml1140: WSI window extents are Windows pixels, not UIKit points. Applying
+   * the phone's 3x scale again made a 720p present render into a 4K drawable.
+   * Core Animation already maps that drawable onto the host view in points.
+   * Keep the correction at the iOS boundary so macOS Retina is unchanged. */
+  {
+    const char *e = getenv("MADEIRA_PRESENT_PIXELS");
+    int enabled = !e || strcmp(e, "0");
+    static _Atomic int announced;
+    if (!atomic_exchange_explicit(&announced, 1, memory_order_relaxed))
+      fprintf(stderr, "[present-size] ml1140 guest-pixels=%d host-scale=%.1f (MADEIRA_PRESENT_PIXELS=0 reverts)\n",
+              enabled, (double)layer.contentsScale);
+    if (enabled) props->contents_scale = 1.0;
+  }
   props->display_sync_enabled = true; /* iOS always syncs to display refresh. */
 #else
   props->display_sync_enabled = layer.displaySyncEnabled;

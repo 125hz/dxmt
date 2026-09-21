@@ -1528,6 +1528,9 @@ private:
   LONG m_savedWindowStyle = 0;
   LONG m_savedWindowExStyle = 0;
   RECT m_savedWindowRect = {};
+  // The iOS virtual display has no physical mode switch. Keep its coordinates
+  // in step with exclusive fullscreen, and restore the prior mode on exit.
+  uint32_t m_savedVirtualWidth = 0, m_savedVirtualHeight = 0;
   // Output the device window went fullscreen on, kept because the focus-gain
   // reposition runs while that window is minimized. Written on the device
   // thread at fullscreen entry, read on the focus-window thread, so atomic for

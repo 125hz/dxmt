@@ -193,13 +193,15 @@ bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode *pMode) {
 
   uint32_t cw, ch;
   getDefaultScreenSize(&cw, &ch);
+  const char *extended = ::getenv("MADEIRA_EXTENDED_MODES");
+  const uint64_t budget_scale = extended && extended[0] == '1' && !extended[1] ? 4 : 1;
 
   uint32_t n = 0;
   for (size_t i = 0; i < sizeof(kStandardModes) / sizeof(kStandardModes[0]); i++) {
     const uint32_t mw = kStandardModes[i].w, mh = kStandardModes[i].h;
     if (mw == sw && mh == sh)
       continue;                                                   /* already index 0 */
-    if ((uint64_t)mw * mh > 4ull * (uint64_t)cw * ch)
+    if ((uint64_t)mw * mh > budget_scale * (uint64_t)cw * ch)
       continue;                                                   /* too big to drive */
     if (++n != modeNumber)
       continue;

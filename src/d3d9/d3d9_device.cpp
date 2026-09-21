@@ -2098,6 +2098,25 @@ MTLD3D9Device::enterFullscreenWindow(HWND window, UINT width, UINT height) {
 #else
 
   // Fullscreen rect: the window's monitor origin plus the backbuffer extent.
+  // ml1140: on iOS the old borderless-only path left a large fullscreen
+  // window on a smaller virtual desktop, so pointer clamping stopped short.
+  // This is a virtual win32u mode, not a physical winemac display switch.
+  if (!env::getEnvVar("MADEIRA_SCREEN_W").empty() && env::getEnvVar("DXMT_D9_VIRTUAL_MODE") != "0") {
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode)) {
+      if (!m_savedVirtualWidth) {
+        m_savedVirtualWidth = mode.dmPelsWidth;
+        m_savedVirtualHeight = mode.dmPelsHeight;
+      }
+      mode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
+      mode.dmPelsWidth = width;
+      mode.dmPelsHeight = height;
+      auto result = ChangeDisplaySettingsW(&mode, CDS_FULLSCREEN);
+      Logger::warn(str::format("[d9-display] ml1140 virtual fullscreen ", width, "x", height,
+                              " result=", result, " (DXMT_D9_VIRTUAL_MODE=0 disables)"));
+    }
+  }
   // Single-monitor desktops sit at (0, 0); a read-only MonitorFromWindow keeps
   // multi-monitor correct without a display-mode switch.
   LONG x = 0, y = 0;
@@ -2155,6 +2174,16 @@ MTLD3D9Device::leaveFullscreenWindow() {
 #else
 
   LONG liveStyle = GetWindowLongW(window, GWL_STYLE);
+  if (m_savedVirtualWidth) {
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    mode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
+    mode.dmPelsWidth = m_savedVirtualWidth;
+    mode.dmPelsHeight = m_savedVirtualHeight;
+    auto result = ChangeDisplaySettingsW(&mode, 0);
+    Logger::warn(str::format("[d9-display] ml1140 restored virtual mode result=", result));
+    m_savedVirtualWidth = m_savedVirtualHeight = 0;
+  }
   LONG liveExStyle = GetWindowLongW(window, GWL_EXSTYLE);
   LONG style = (m_savedWindowStyle & ~WS_VISIBLE) | (liveStyle & WS_VISIBLE);
   LONG exStyle = (m_savedWindowExStyle & ~WS_EX_TOPMOST) | (liveExStyle & WS_EX_TOPMOST);
