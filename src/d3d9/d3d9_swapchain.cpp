@@ -116,7 +116,10 @@ allocLockableBackBufferMirror(
 // statement about the parameters rather than about the mode.
 static void
 logSwapParams(const D3DPRESENT_PARAMETERS &params, const char *when) {
-  if (!d9PresentDbgEnabled())
+  /* ml1100: always on with the extent line — the back buffer's extent is the
+   * other half of the blit-vs-crop arithmetic, and this fires once per
+   * swapchain create/reset, not per frame. DXMT_D9_EXTENTLOG=0 silences both. */
+  if (!d9ExtentLogEnabled())
     return;
   const UINT count = std::max<UINT>(1u, params.BackBufferCount);
   Logger::warn(
@@ -229,7 +232,7 @@ layerDrawableExtent(
   // difference matters because the drawable extent decides both which present
   // pipeline runs (1:1 blit or scaled) and, when it moves, whether the layer
   // rebuilds its drawable pool underneath presents already in flight.
-  if (d9PresentDbgEnabled()) {
+  if (d9ExtentLogEnabled()) {   /* ml1100: always on, deduped — see d3d9_debug.hpp */
     static uint32_t last_win_w = 0, last_win_h = 0;
     static uint64_t last_out_w = 0, last_out_h = 0;
     static uint32_t last_bb_w = 0, last_bb_h = 0;

@@ -44,6 +44,18 @@ struct D9LazyMirrorHost {
   deferManagedNoDirtyUpload() const {
     return false;
   }
+  // ml1110 - the other half of the deferral above. Deferring the upload only
+  // works if something later performs it: the pre-draw managed sweep is driven
+  // by a per-level pending mask that is set at create and CLEARED by every
+  // eager upload, so once a level has been uploaded once, a deferred write to
+  // it had nothing left to consume it and never reached the GPU at all. Both
+  // references do reach it -- wine's d3d9 texture.c suppresses only
+  // wined3d_texture_add_dirty_region (the UpdateTexture region) while the
+  // sysmem->GPU reload is driven by wined3d's location invalidation, and DXVK's
+  // UnlockImage calls SetNeedsUpload for a MANAGED resource regardless of the
+  // flag. This re-arms the level so the sweep pushes it before the next draw
+  // that samples the texture.
+  virtual void noteLevelDeferredWrite(uint32_t) {}
 
 protected:
   ~D9LazyMirrorHost() = default;

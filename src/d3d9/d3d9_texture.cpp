@@ -6,6 +6,7 @@
 #include "d3d9_image_lock.hpp"
 #include "d3d9_private_data.hpp"
 #include "d3d9_resource_priority.hpp"
+#include "util_env.hpp"
 #include "wsi_platform.hpp"
 
 #include <algorithm>
@@ -368,6 +369,37 @@ MTLD3D9Texture::noteLevelUploaded(uint32_t level) {
     dropMirror();
 }
 
+// ml1110: a NO_DIRTY_UPDATE write-Unlock skipped the eager upload, so re-arm
+// the level for the pre-draw managed sweep.
+//
+// BEFORE: UnlockRect saw defer_no_dirty, skipped stageTextureUpload and
+// skipped noteLevelUploaded, and nothing else touched m_needs_upload_mask. The
+// bit was set once at create and cleared by the FIRST eager upload of that
+// level, so the very first deferred write to a fresh texture was picked up by
+// the sweep and every later one was dropped on the floor: the bytes sat in the
+// mirror, the GPU copy kept whatever it last received, and only an explicit
+// AddDirtyRect or EvictManagedResources could ever dislodge them. A texture
+// that is written once, drawn, then rewritten in place therefore kept showing
+// its first contents.
+//
+// AFTER: the deferred write sets the level's bit and moves the sweep epoch, so
+// the next draw that has this texture bound pushes the level at full extent
+// from the mirror (MTLD3D9Texture::sweepManagedUpload) ahead of the draw, the
+// DXVK UploadManagedTextures ordering. Idempotent: repeated deferred writes
+// before a draw collapse into one push, and the sweep clears the bit again.
+//
+// DXMT_D9_NODIRTY_SWEEP=0 restores the drop-on-the-floor behaviour.
+void
+MTLD3D9Texture::noteLevelDeferredWrite(uint32_t level) {
+  static const bool enabled = env::getEnvVar("DXMT_D9_NODIRTY_SWEEP") != "0";
+  if (!enabled || m_pool != D3DPOOL_MANAGED || m_userMemory || level >= 32)
+    return;
+  m_needs_upload_mask |= (1u << level);
+  // The mask alone is not enough: the sweep only runs when the epoch moves, and
+  // a same-texture rebind early-outs in SetTexture without bumping it.
+  m_device->markManagedUploadPending();
+}
+
 void
 MTLD3D9Texture::materializeLevelForLock(uint32_t level) {
   if (level >= 32 || !(m_mirror_stale_mask & (1u << level)))
@@ -450,8 +482,11 @@ MTLD3D9Texture::stageMirrorLevel(uint32_t level, LONG l, LONG t, LONG r, LONG b)
   size.height = static_cast<uint32_t>(b - t);
   size.depth = 1;
   const uint8_t *src = static_cast<const uint8_t *>(m_mirrorBacking) + mirrorOffset(level) + row_off + col_off;
+  // Only this rect's own row length lives after its last row (see
+  // stageTextureUpload); the stride stays the level's.
   m_device->stageTextureUpload(
-      metalTexture(), m_dxmtTexture, level, /*slice=*/0, origin, size, src, src_pitch, compressed
+      metalTexture(), m_dxmtTexture, level, /*slice=*/0, origin, size, src, src_pitch, compressed,
+      /*src_slice_pitch=*/0, D3DFormatRowPitch(m_format, size.width)
   );
 }
 

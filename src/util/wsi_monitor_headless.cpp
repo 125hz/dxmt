@@ -16,6 +16,8 @@
 
 #include "wsi_monitor.hpp"
 
+#include <cstdlib>   /* ml1100: getenv/atoi for the session-default mode cap */
+
 #ifdef DXMT_MADEIRA
 #include "wsi_window.hpp"
 #include "wsi_window_madeira.hpp"
@@ -142,14 +144,38 @@ bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode *pMode) {
   return true;
 }
 #else
-/* Mirror of ios_standard_modes[] in build/win32u-unix/sysparams_ios.c. */
+/* Mirror of ios_standard_modes[] in build/win32u-unix/sysparams_ios.c.
+ * ml1100: the low 16:9/16:10 rungs were missing from both copies, which is
+ * how a 960x540 request came back DISP_CHANGE_BADMODE. Keep the two in step. */
 static const struct { uint32_t w, h; } kStandardModes[] = {
-    {  640,  480 }, {  800,  600 }, { 1024,  768 }, { 1152,  864 },
+    {  640,  360 }, {  640,  400 }, {  640,  480 }, {  720,  480 },
+    {  720,  576 }, {  800,  480 }, {  800,  600 }, {  848,  480 },
+    {  854,  480 }, {  960,  540 }, {  960,  600 }, {  960,  720 },
+    { 1024,  576 }, { 1024,  600 }, { 1024,  640 }, { 1024,  768 },
+    { 1120,  832 }, { 1152,  648 }, { 1152,  864 }, { 1176,  664 },
     { 1280,  720 }, { 1280,  768 }, { 1280,  800 }, { 1280,  960 },
-    { 1280, 1024 }, { 1360,  768 }, { 1366,  768 }, { 1440,  900 },
-    { 1600,  900 }, { 1600, 1200 }, { 1680, 1050 }, { 1920, 1080 },
-    { 1920, 1200 }, { 2048, 1536 }, { 2560, 1440 },
+    { 1280, 1024 }, { 1360,  768 }, { 1366,  768 }, { 1400, 1050 },
+    { 1440,  900 }, { 1600,  900 }, { 1600, 1024 }, { 1600, 1200 },
+    { 1680, 1050 }, { 1920, 1080 }, { 1920, 1200 }, { 2048, 1536 },
+    { 2560, 1440 },
 };
+
+/* ml1100: the cap must not move when the guest selects a mode, or a program
+ * that steps down cannot step back up -- see ios_mode_at_index. win32u uses
+ * its session default (ios_screen_def_*); below the Win32 boundary the same
+ * value is the MADEIRA_SCREEN_W/H the app published before any guest ran. */
+static void getDefaultScreenSize(uint32_t *w, uint32_t *h) {
+  const char *we = ::getenv("MADEIRA_SCREEN_W");
+  const char *he = ::getenv("MADEIRA_SCREEN_H");
+  int dw = we ? ::atoi(we) : 0;
+  int dh = he ? ::atoi(he) : 0;
+  if (dw > 0 && dh > 0) {
+    *w = (uint32_t)dw;
+    *h = (uint32_t)dh;
+    return;
+  }
+  getScreenSize(w, h);
+}
 
 bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode *pMode) {
   if (hMonitor != kSyntheticMonitor || !pMode)
@@ -165,12 +191,15 @@ bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode *pMode) {
     return true;
   }
 
+  uint32_t cw, ch;
+  getDefaultScreenSize(&cw, &ch);
+
   uint32_t n = 0;
   for (size_t i = 0; i < sizeof(kStandardModes) / sizeof(kStandardModes[0]); i++) {
     const uint32_t mw = kStandardModes[i].w, mh = kStandardModes[i].h;
     if (mw == sw && mh == sh)
       continue;                                                   /* already index 0 */
-    if ((uint64_t)mw * mh > 2ull * (uint64_t)sw * sh)
+    if ((uint64_t)mw * mh > 4ull * (uint64_t)cw * ch)
       continue;                                                   /* too big to drive */
     if (++n != modeNumber)
       continue;

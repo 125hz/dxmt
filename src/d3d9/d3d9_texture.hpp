@@ -122,6 +122,7 @@ public:
   // (wined3d's download_count heuristic) to avoid re-download thrash.
   void noteLevelUploaded(uint32_t level) override;
   void materializeLevelForLock(uint32_t level) override;
+  void noteLevelDeferredWrite(uint32_t level) override;
   void restoreMirrorForSource();
 
   // Deferred MANAGED upload (see MTLD3D9CommonTexture). A 2D MANAGED texture is

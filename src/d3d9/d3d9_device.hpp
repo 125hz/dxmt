@@ -2050,9 +2050,12 @@ public:
   }
 
   // Bump the deferred-MANAGED-upload sweep epoch. Called when a MANAGED texture
-  // with pending upload levels is bound (SetTexture / StateBlock Apply) and from
-  // EvictManagedResources, so the next QueueBatchedDraw re-pushes those levels
-  // from the sysmem mirror before the draws that sample them.
+  // with pending upload levels is bound (SetTexture / StateBlock Apply), from
+  // EvictManagedResources, and from a NO_DIRTY_UPDATE write-Unlock that deferred
+  // its own upload (ml1110, MTLD3D9Texture::noteLevelDeferredWrite) -- that one
+  // must bump it itself, because a title that rewrites an already-bound texture
+  // never re-enters SetTexture. The next QueueBatchedDraw then re-pushes those
+  // levels from the sysmem mirror before the draws that sample them.
   void
   markManagedUploadPending() {
     m_managedUploadEpoch.fetch_add(1, std::memory_order_relaxed);
@@ -2086,9 +2089,16 @@ public:
   // cross-encoder ordering (a same-chunk sampling draw must observe it).
   // src_slice_pitch is the source stride between depth slices for a 3D
   // (volume) upload; 0 = contiguous (2D, or a full-box 3D upload).
+  // src_row_bytes is how many bytes of each source row this region actually
+  // occupies, for a SUB-RECT upload whose src_pitch is the whole level's
+  // stride: the staging copy would otherwise read src_pitch bytes for the LAST
+  // row too, and a rect flush against the bottom edge with a non-zero left
+  // edge has only (pitch - left*bpp) bytes left in the level after it. 0 means
+  // "the rows are full-pitch", which is right for every whole-level upload.
   void stageTextureUpload(
       WMT::Texture dst, const Rc<dxmt::Texture> &dst_alloc, uint32_t mip_level, uint32_t slice, WMTOrigin origin,
-      WMTSize size, const void *src, uint32_t src_pitch, bool is_compressed, uint32_t src_slice_pitch = 0
+      WMTSize size, const void *src, uint32_t src_pitch, bool is_compressed, uint32_t src_slice_pitch = 0,
+      uint32_t src_row_bytes = 0
   );
 
   // A ring block that has been checked before anything writes through it. A

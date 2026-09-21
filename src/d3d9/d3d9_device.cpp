@@ -1418,7 +1418,8 @@ MTLD3D9Device::sweepBoundManagedUploads() {
 void
 MTLD3D9Device::stageTextureUpload(
     WMT::Texture dst, const Rc<dxmt::Texture> &dst_alloc, uint32_t mip_level, uint32_t slice, WMTOrigin origin,
-    WMTSize size, const void *src, uint32_t src_pitch, bool is_compressed, uint32_t src_slice_pitch
+    WMTSize size, const void *src, uint32_t src_pitch, bool is_compressed, uint32_t src_slice_pitch,
+    uint32_t src_row_bytes
 ) {
   if (dst_alloc == nullptr || dst.handle == 0 || src == nullptr || src_pitch == 0 || size.width == 0 ||
       size.height == 0)
@@ -1434,6 +1435,10 @@ MTLD3D9Device::stageTextureUpload(
     const uint32_t block_bytes = dst_alloc->pixelFormat() == WMTPixelFormatBC4_RUnorm ? 8u : 16u;
     src_pitch = ((static_cast<uint32_t>(size.width) + 3u) / 4u) * block_bytes;
     is_compressed = true;
+    // The caller's row length described the linear fiction, not the block
+    // stream the pitch above now describes; these uploads are whole-level
+    // anyway, so drop back to full-pitch rows.
+    src_row_bytes = 0;
   }
 
   // MADEIRA: BC DECODE FOR AN ADAPTER THAT CANNOT SAMPLE BC.
@@ -1520,16 +1525,32 @@ MTLD3D9Device::stageTextureUpload(
         /*is_base_level=*/mip_level == 0 && slice == 0, static_cast<uint64_t>(bc_src_bytes_per_image) * depth,
         static_cast<uint64_t>(bytes_per_image) * depth, census::bcDecodeClockNs() - t0
     );
-  } else if (src_slice == bytes_per_image) {
-    std::memcpy(staged, src, total_bytes);
   } else {
-    // Sub-box 3D upload: copy slice by slice, the staged slices packed
-    // tightly while the source skips the rest of each full mip slice.
-    for (uint32_t z = 0; z < depth; ++z)
-      std::memcpy(
-          staged + static_cast<size_t>(z) * bytes_per_image,
-          static_cast<const char *>(src) + static_cast<size_t>(z) * src_slice, bytes_per_image
-      );
+    // How much of each staged slice the SOURCE actually holds. A whole-level
+    // upload owns a full pitch on every row; a sub-rect one owns only its own
+    // row length, and reading a whole pitch for the LAST row walks past the
+    // end of the level -- off the mirror allocation entirely when the rect is
+    // flush against the bottom edge of the last level, which is what a glyph
+    // written into the bottom row of its cell at a non-zero left edge is. The
+    // staged block keeps its full-pitch stride either way: the blit reads
+    // width texels per row and never the tail.
+    const uint32_t staged_rows =
+        is_compressed ? ((static_cast<uint32_t>(size.height) + 3u) / 4u) : static_cast<uint32_t>(size.height);
+    const uint32_t last_row = (src_row_bytes != 0 && src_row_bytes < src_pitch) ? src_row_bytes : src_pitch;
+    const size_t slice_read =
+        staged_rows ? static_cast<size_t>(staged_rows - 1u) * src_pitch + last_row : static_cast<size_t>(0);
+    if (src_slice == bytes_per_image && last_row == src_pitch) {
+      std::memcpy(staged, src, total_bytes);
+    } else {
+      // Sub-box 3D upload (and every short-last-row 2D one): copy slice by
+      // slice, the staged slices packed tightly while the source skips the
+      // rest of each full mip slice.
+      for (uint32_t z = 0; z < depth; ++z)
+        std::memcpy(
+            staged + static_cast<size_t>(z) * bytes_per_image,
+            static_cast<const char *>(src) + static_cast<size_t>(z) * src_slice, slice_read
+        );
+    }
   }
 
   // Ride the arrival-order op stream instead of emitting the blit directly:
@@ -3968,9 +3989,12 @@ MTLD3D9Device::UpdateSurface(
       col_off = static_cast<uint64_t>(src_x0) * D3DFormatBytesPerPixel(sd.Format);
     }
     const uint8_t *src_ptr = static_cast<const uint8_t *>(src_host) + row_off + col_off;
+    // The source rect owns only its own row length after its last row (see
+    // stageTextureUpload); the stride stays the source surface's.
     stageTextureUpload(
         dst->metalTexture(), dst->dxmtTexture(), dst->mipLevel(), dst->arraySlice(), WMTOrigin{dst_x0, dst_y0, 0},
-        WMTSize{extent_w, extent_h, 1}, src_ptr, src->pitch(), compressed
+        WMTSize{extent_w, extent_h, 1}, src_ptr, src->pitch(), compressed, /*src_slice_pitch=*/0,
+        D3DFormatRowPitch(sd.Format, extent_w)
     );
     // A DYNAMIC DEFAULT destination keeps its host mirror authoritative on Lock
     // (the readback path skips DYNAMIC surfaces, d3d9_surface.cpp), so the GPU
@@ -4263,8 +4287,11 @@ MTLD3D9Device::UpdateTexture(IDirect3DBaseTexture9 *pSourceTexture, IDirect3DBas
       }
       const uint8_t *src_ptr =
           static_cast<const uint8_t *>(src->mirrorBase()) + src->mirrorOffset(src_level) + row_off + col_off;
+      // The dirty rect owns only its own row length after its last row (see
+      // stageTextureUpload); the stride stays the source level's.
       stageTextureUpload(
-          dst_tex, dst->dxmtTexture(), dst_level, /*slice=*/0, origin, size, src_ptr, src_pitch, compressed
+          dst_tex, dst->dxmtTexture(), dst_level, /*slice=*/0, origin, size, src_ptr, src_pitch, compressed,
+          /*src_slice_pitch=*/0, D3DFormatRowPitch(src->d3dFormat(), size.width)
       );
       // Keep the destination mirror in lockstep (DYNAMIC dst, see above). The
       // dst mirror always strides by its own aligned LockPitch (what its

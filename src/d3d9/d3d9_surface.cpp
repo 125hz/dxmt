@@ -12,6 +12,8 @@
 #include "d3d9_image_lock.hpp"
 #include "d3d9_private_data.hpp"
 #include "d3d9_texture.hpp"
+#include "util_env.hpp"
+#include "util_string.hpp"
 #include "wsi_platform.hpp"
 #include <cstring>
 
@@ -58,6 +60,71 @@ d3dkmtDestroyDCFromMemory(const D3DKMT_DESTROYDCFROMMEMORY *arg) {
 }
 } // namespace
 #endif
+
+namespace {
+// ml1110 - WHICH UPLOAD POLICY A SURFACE'S UNLOCK TOOK IS NOT A TRACE, IT IS
+// THE ANSWER.
+//
+// "Progressively drawn text appears as fragments" has several arithmetic
+// causes that a screenshot cannot tell apart, and the one that decides between
+// them is not visible in any device log taken so far: what FLAGS the title
+// locks with and what this code then does with the bytes. A READONLY lock
+// uploads nothing by contract, a NO_DIRTY_UPDATE lock defers to the pre-draw
+// managed sweep, a plain lock pushes its own rect, and a SYSTEMMEM lock pushes
+// nothing because UpdateTexture is the consumer. Those are four different bugs
+// wearing one symptom.
+//
+// Deduped on (pool, usage, format, extent, full-vs-sub, flags) and capped, so a
+// title that locks the same few shapes every frame emits a handful of lines for
+// a whole session. DXMT_D9_LOCKLOG=0 silences it.
+constexpr size_t kLockPolicyLineCap = 24;
+
+void
+d9LogLockPolicy(
+    const D3DSURFACE_DESC &desc, uint32_t locked_w, uint32_t locked_h, bool readonly, bool no_dirty_update,
+    bool deferred
+) {
+  static const bool enabled = env::getEnvVar("DXMT_D9_LOCKLOG") != "0";
+  if (!enabled)
+    return;
+  const bool sub_rect = locked_w < desc.Width || locked_h < desc.Height;
+  auto key = std::make_tuple(
+      static_cast<uint32_t>(desc.Pool), static_cast<uint32_t>(desc.Usage), static_cast<uint32_t>(desc.Format),
+      desc.Width, desc.Height,
+      static_cast<uint32_t>(sub_rect) | (static_cast<uint32_t>(readonly) << 1) |
+          (static_cast<uint32_t>(no_dirty_update) << 2) | (static_cast<uint32_t>(deferred) << 3)
+  );
+  static std::mutex seen_mutex;
+  static std::set<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>> seen;
+  {
+    std::lock_guard<std::mutex> guard(seen_mutex);
+    if (seen.size() >= kLockPolicyLineCap || !seen.insert(key).second)
+      return;
+    if (seen.size() == 1)
+      Logger::info(
+          "[d9-lock] ml1110 upload policy: a write-Unlock pushes its own locked rect through the upload ring; "
+          "READONLY pushes nothing; NO_DIRTY_UPDATE on MANAGED defers to the pre-draw sweep and re-arms the level "
+          "(DXMT_D9_NODIRTY_SWEEP=0 drops it instead); SYSTEMMEM/SCRATCH are CPU masters that UpdateTexture / "
+          "UpdateSurface consume. DXMT_D9_LOCKLOG=0 silences these lines."
+      );
+  }
+  const char *policy = "upload locked rect on unlock";
+  if (readonly)
+    policy = "no upload (READONLY)";
+  else if (deferred)
+    policy = "defer to pre-draw managed sweep";
+  else if (desc.Pool == D3DPOOL_SYSTEMMEM || desc.Pool == D3DPOOL_SCRATCH)
+    policy = "cpu master, no upload (UpdateTexture/UpdateSurface consumes)";
+  Logger::info(
+      str::format(
+          "[d9-lock] ml1110 pool=", static_cast<uint32_t>(desc.Pool), " usage=", desc.Usage,
+          " fmt=", static_cast<uint32_t>(desc.Format), " ", desc.Width, "x", desc.Height, " locked=", locked_w, "x",
+          locked_h, sub_rect ? " (sub-rect)" : " (full)", readonly ? " READONLY" : "",
+          no_dirty_update ? " NO_DIRTY_UPDATE" : "", " -> ", policy
+      )
+  );
+}
+} // namespace
 
 MTLD3D9Surface::MTLD3D9Surface(
     MTLD3D9Device *device, const D3DSURFACE_DESC &desc, IUnknown *container, WMT::Reference<WMT::Texture> texture,
@@ -622,6 +689,12 @@ MTLD3D9Surface::UnlockRect() {
   // the eager upload below (deferManagedNoDirtyUpload() gates on the 2D host).
   const bool defer_no_dirty = m_locked_no_dirty_update && m_desc.Pool == D3DPOOL_MANAGED && m_lazyMirrorParent &&
                               m_lazyMirrorParent->deferManagedNoDirtyUpload();
+  // ml1110: hand the deferral to something that will actually perform it. See
+  // D9LazyMirrorHost::noteLevelDeferredWrite -- without this the bytes stay in
+  // the mirror forever once the level has been uploaded once.
+  if (defer_no_dirty && !m_locked_readonly && m_locked_w > 0 && m_locked_h > 0)
+    m_lazyMirrorParent->noteLevelDeferredWrite(m_lazy_subresource);
+  d9LogLockPolicy(m_desc, m_locked_w, m_locked_h, m_locked_readonly, m_locked_no_dirty_update, defer_no_dirty);
   if (m_buffer == nullptr && m_cpu_ptr != nullptr && m_texture != nullptr &&
       (m_desc.Pool == D3DPOOL_MANAGED || m_desc.Pool == D3DPOOL_DEFAULT) && !m_locked_readonly && !defer_no_dirty &&
       !IsNullFormat(m_desc.Format) && m_locked_w > 0 && m_locked_h > 0) {
@@ -657,8 +730,12 @@ MTLD3D9Surface::UnlockRect() {
     // but next Lock could overwrite them (Apple Silicon UMA). Per-surface
     // rename ring on mirror would recover perf; follow-on work.
     const void *src = static_cast<const uint8_t *>(m_cpu_ptr) + src_offset;
+    // The locked region owns only its own row length inside the mirror, not
+    // the whole stride: a rect flush against the bottom edge with a non-zero
+    // left edge has nothing after its last row (see stageTextureUpload).
     m_device->stageTextureUpload(
-        m_texture, m_dxmtTexture, m_mip_level, m_array_slice, origin, size, src, m_pitch, compressed
+        m_texture, m_dxmtTexture, m_mip_level, m_array_slice, origin, size, src, m_pitch, compressed,
+        /*src_slice_pitch=*/0, D3DFormatRowPitch(m_desc.Format, m_locked_w)
     );
     // The bytes are now snapshotted into the upload ring; the mirror is no
     // longer referenced. A MANAGED parent reclaims it once every level has
