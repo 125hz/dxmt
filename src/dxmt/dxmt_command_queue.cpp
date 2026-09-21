@@ -57,9 +57,9 @@ CommandQueue::~CommandQueue() {
   TRACE("Destructing command queue");
   stopped.store(true);
   ready_for_encode++;
-  ready_for_encode.notify_one();
+  dxmt::atomic_notify_one(ready_for_encode);
   ready_for_commit++;
-  ready_for_commit.notify_one();
+  dxmt::atomic_notify_one(ready_for_commit);
   SharedEventListener_destroy(shared_event_listener);
   encodeThread.join();
   finishThread.join();
@@ -83,10 +83,10 @@ CommandQueue::CommitCurrentChunk() {
   statistics.command_buffer_count++;
 #if ASYNC_ENCODING
   ready_for_encode.fetch_add(1, std::memory_order_release);
-  ready_for_encode.notify_one();
+  dxmt::atomic_notify_one(ready_for_encode);
 
   auto t0 = clock::now();
-  chunk_ongoing.wait(kCommandChunkCount - 1, std::memory_order_acquire);
+  dxmt::atomic_wait(chunk_ongoing, uint64_t(kCommandChunkCount - 1), std::memory_order_acquire);
   chunk_ongoing.fetch_add(1, std::memory_order_relaxed);
   auto t1 = clock::now();
   statistics.commit_interval += (t1 - t0);
@@ -142,7 +142,7 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
   cmdbuf.commit();
 
   ready_for_commit.fetch_add(1, std::memory_order_release);
-  ready_for_commit.notify_one();
+  dxmt::atomic_notify_one(ready_for_commit);
 }
 
 uint32_t
@@ -152,7 +152,7 @@ CommandQueue::EncodingThread() {
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
   uint64_t internal_seq = 1;
   while (!stopped.load()) {
-    ready_for_encode.wait(internal_seq, std::memory_order_acquire);
+    dxmt::atomic_wait(ready_for_encode, internal_seq, std::memory_order_acquire);
     if (stopped.load())
       break;
     // perform...
@@ -171,7 +171,7 @@ CommandQueue::WaitForFinishThread() {
   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
   uint64_t internal_seq = 1;
   while (!stopped.load()) {
-    ready_for_commit.wait(internal_seq, std::memory_order_acquire);
+    dxmt::atomic_wait(ready_for_commit, internal_seq, std::memory_order_acquire);
     if (stopped.load())
       break;
     auto &chunk = chunks[internal_seq % kCommandChunkCount];
@@ -198,7 +198,7 @@ CommandQueue::WaitForFinishThread() {
     chunk.reset();
     cpu_coherent.signal(internal_seq);
     chunk_ongoing.fetch_sub(1, std::memory_order_release);
-    chunk_ongoing.notify_one();
+    dxmt::atomic_notify_one(chunk_ongoing);
 
     staging_allocator.free_blocks(internal_seq);
     copy_temp_allocator.free_blocks(internal_seq);

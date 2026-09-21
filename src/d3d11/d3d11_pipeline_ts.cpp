@@ -4,6 +4,7 @@
 #include "d3d11_pipeline.hpp"
 #include "d3d11_shader.hpp"
 #include "log/log.hpp"
+#include "util_futex.hpp"
 #include "thread.hpp"
 
 namespace dxmt {
@@ -63,7 +64,7 @@ public:
   }
 
   void GetPipeline(MTL_COMPILED_TESSELLATION_MESH_PIPELINE *pPipeline) final {
-    ready_.wait(false, std::memory_order_acquire);
+    dxmt::atomic_wait(ready_, false, std::memory_order_acquire);
     *pPipeline = {state_rasterization_, hull_reflection.NumOutputElement,
                   hull_reflection.ThreadsPerPatch};
   }
@@ -169,7 +170,7 @@ public:
 
   void SetIsDone(bool state) {
     ready_.store(state);
-    ready_.notify_all();
+    dxmt::atomic_notify_all(ready_);
   }
 
 private:

@@ -222,7 +222,6 @@ layerDrawableExtent(
     wsi::getWindowSize(hWindow, &win_w, &win_h);
   out_w = win_w > 0 ? (double)win_w * current.contents_scale : (double)params.BackBufferWidth;
   out_h = win_h > 0 ? (double)win_h * current.contents_scale : (double)params.BackBufferHeight;
-
   // Deduped to one line per distinct extent decision. This runs per Present, so
   // the dedupe is what makes it affordable, and it is also what makes it worth
   // reading: a stable configuration emits a line per mode change, while an
@@ -256,6 +255,74 @@ layerDrawableExtent(
       ++repeats;
     }
   }
+}
+
+// MADEIRA ml1040: PRESENT INTO THE DRAWABLE THAT EXISTS, NOT THE ONE WE ASKED FOR.
+//
+// changeLayerProperties is a REQUEST. On a host that owns the CAMetalLayer it can
+// be refused or immediately overwritten, and the Presenter then builds its present
+// pipeline for an extent the drawable does not have. Where the two agree by
+// accident the frame is fine; where they do not, a 1:1 blit copies the top-left
+// corner of the backbuffer into a smaller drawable and everything past it is
+// simply not presented — a black band down one side, and a cursor whose position
+// no longer matches what is drawn, which is what a device run showed: guest
+// surface 1024x768 (and 1280x720) against a drawable pinned at 800x600, i.e. the
+// right 22 % missing, exactly (1024-800)/1024.
+//
+// D3D9's contract is unambiguous: Present scales the back buffer to the
+// destination. So ask for the window's extent, then READ BACK what the layer
+// actually has, and if it differs adopt it — that hands the Presenter the real
+// destination and it builds a scaling pipeline instead of a cropping copy. The
+// backbuffer is never resized and the guest never sees any of this.
+//
+// Returns the extent the chain is now presenting into.
+static void
+applyLayerExtent(
+    Presenter *presenter, WMT::MetalLayer &layer, HWND hWindow, const D3DPRESENT_PARAMETERS &params, double &out_w,
+    double &out_h
+) {
+  if (!presenter || layer.handle == 0)
+    return;
+  WMTLayerProps current{};
+  layer.getProps(current);
+  layerDrawableExtent(hWindow, current, params, out_w, out_h);
+  presenter->changeLayerProperties(
+      D3DFormatToMetal(params.BackBufferFormat, D3D9FormatUsage::RenderTarget),
+      layerColorSpace(params.BackBufferFormat), out_w, out_h, /*sample_count=*/1
+  );
+
+  WMTLayerProps realized{};
+  layer.getProps(realized);
+  const double got_w = (double)realized.drawable_width;
+  const double got_h = (double)realized.drawable_height;
+  if (got_w <= 0.0 || got_h <= 0.0)
+    return;
+  if (got_w == out_w && got_h == out_h)
+    return;
+
+  // The layer kept a different size. Present into THAT, scaled.
+  {
+    static uint64_t adopt_n = 0;
+    static double last_w = 0, last_h = 0;
+    if (got_w != last_w || got_h != last_h) {
+      last_w = got_w;
+      last_h = got_h;
+      Logger::warn(str::format(
+          "d9 layer extent ADOPTED (#", ++adopt_n, "): asked for ", (uint64_t)out_w, "x", (uint64_t)out_h,
+          ", layer has ", (uint64_t)got_w, "x", (uint64_t)got_h, ", backbuffer ", params.BackBufferWidth, "x",
+          params.BackBufferHeight, " — presenting scaled into the layer's own extent (a 1:1 blit here would crop ",
+          (uint64_t)(out_w > got_w ? out_w - got_w : 0), " columns and ",
+          (uint64_t)(out_h > got_h ? out_h - got_h : 0), " rows)"
+      ));
+    }
+  }
+  out_w = got_w;
+  out_h = got_h;
+  presenter->changeLayerProperties(
+      D3DFormatToMetal(params.BackBufferFormat, D3D9FormatUsage::RenderTarget),
+      layerColorSpace(params.BackBufferFormat), out_w, out_h, /*sample_count=*/1
+  );
+
 }
 
 // The monitor a window currently lives on, or null (headless / non-Win32).
@@ -356,15 +423,8 @@ MTLD3D9SwapChain::createPresentTarget(HWND hEffectiveWindow) {
       // here (d3d11_swapchain.cpp ApplyLayerProps); d3d9 forks to the
       // window because the legacy-resolution problem only really hits dx9
       // apps and a window-sized drawable keeps windowed mode crisp.
-      WMTLayerProps current{};
-      m_layer.getProps(current);
       double drawable_w, drawable_h;
-      layerDrawableExtent(m_hWindow, current, m_params, drawable_w, drawable_h);
-      m_presenter->changeLayerProperties(
-          D3DFormatToMetal(m_params.BackBufferFormat, D3D9FormatUsage::RenderTarget),
-          layerColorSpace(m_params.BackBufferFormat), drawable_w, drawable_h,
-          /*sample_count=*/1
-      );
+      applyLayerExtent(m_presenter.ptr(), m_layer, m_hWindow, m_params, drawable_w, drawable_h);
     }
   }
 }
@@ -581,14 +641,8 @@ MTLD3D9SwapChain::ResetForDeviceReset(const D3DPRESENT_PARAMETERS &params, HWND 
     // Presenter caches these and rebuilds its present PSO on the next Present if
     // any input changed. Size off the live window client rect, not the layer's
     // pinned (now-stale) drawableSize; see layerDrawableExtent.
-    WMTLayerProps current{};
-    m_layer.getProps(current);
     double drawable_w, drawable_h;
-    layerDrawableExtent(m_hWindow, current, m_params, drawable_w, drawable_h);
-    m_presenter->changeLayerProperties(
-        D3DFormatToMetal(m_params.BackBufferFormat, D3D9FormatUsage::RenderTarget),
-        layerColorSpace(m_params.BackBufferFormat), drawable_w, drawable_h, /*sample_count=*/1
-    );
+    applyLayerExtent(m_presenter.ptr(), m_layer, m_hWindow, m_params, drawable_w, drawable_h);
   }
   // Re-evaluate the gamma gate against the new params: a rebuilt Presenter
   // starts with an identity LUT, and a windowed<->fullscreen flip changes
@@ -874,13 +928,9 @@ MTLD3D9SwapChain::Present(
       if (win_w > 0 && win_h > 0 && (win_w != target->last_w || win_h != target->last_h)) {
         target->last_w = win_w;
         target->last_h = win_h;
-        WMTLayerProps current{};
-        target->layer.getProps(current);
         double drawable_w, drawable_h;
-        layerDrawableExtent(hDestWindowOverride, current, m_params, drawable_w, drawable_h);
-        target->presenter->changeLayerProperties(
-            D3DFormatToMetal(m_params.BackBufferFormat, D3D9FormatUsage::RenderTarget),
-            layerColorSpace(m_params.BackBufferFormat), drawable_w, drawable_h, /*sample_count=*/1
+        applyLayerExtent(
+            target->presenter.ptr(), target->layer, hDestWindowOverride, m_params, drawable_w, drawable_h
         );
       }
       active_layer = target->layer;
@@ -900,17 +950,24 @@ MTLD3D9SwapChain::Present(
   if (m_hWindow && !override_present) {
     uint32_t win_w = 0, win_h = 0;
     wsi::getWindowSize(m_hWindow, &win_w, &win_h);
-    if (win_w > 0 && win_h > 0 && (win_w != m_lastWindowW || win_h != m_lastWindowH)) {
+    // MADEIRA ml1040: the window size alone is not enough to notice a stale
+    // drawable. A host that owns the layer can re-pin drawableSize at any time
+    // without the window moving, and this probe would then never fire again --
+    // which is how a chain ended up blitting 1:1 into a drawable two thirds the
+    // size of the frame for a whole session. Re-check the layer's own extent
+    // too, and let applyLayerExtent decide (it is a getProps and a comparison on
+    // the common path, and changeLayerProperties is a no-op when nothing moved).
+    WMTLayerProps probe{};
+    m_layer.getProps(probe);
+    double want_w = 0, want_h = 0;
+    layerDrawableExtent(m_hWindow, probe, m_params, want_w, want_h);
+    const bool extent_stale = probe.drawable_width > 0 && probe.drawable_height > 0 &&
+                              ((double)probe.drawable_width != want_w || (double)probe.drawable_height != want_h);
+    if (win_w > 0 && win_h > 0 && (win_w != m_lastWindowW || win_h != m_lastWindowH || extent_stale)) {
       m_lastWindowW = win_w;
       m_lastWindowH = win_h;
-      WMTLayerProps current{};
-      m_layer.getProps(current);
       double drawable_w, drawable_h;
-      layerDrawableExtent(m_hWindow, current, m_params, drawable_w, drawable_h);
-      m_presenter->changeLayerProperties(
-          D3DFormatToMetal(m_params.BackBufferFormat, D3D9FormatUsage::RenderTarget),
-          layerColorSpace(m_params.BackBufferFormat), drawable_w, drawable_h, /*sample_count=*/1
-      );
+      applyLayerExtent(m_presenter.ptr(), m_layer, m_hWindow, m_params, drawable_w, drawable_h);
     }
     // Re-probe the refresh rate when the window moves to a different monitor.
     // m_refreshRateHz drives the INTERVAL_TWO/THREE/FOUR vsync dwell; sampled

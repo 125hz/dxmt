@@ -7,6 +7,7 @@
 #include "dxmt_shader_cache.hpp"
 #include "log/log.hpp"
 #include "sha1/sha1_util.hpp"
+#include "util_futex.hpp"
 #include <version.h>
 
 #include <cerrno>
@@ -677,7 +678,7 @@ public:
   void
   SetDone(bool s) noexcept override {
     m_ready.store(s, std::memory_order_release);
-    m_ready.notify_all();
+    dxmt::atomic_notify_all(m_ready);
   }
 
   WMT::Function

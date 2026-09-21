@@ -35,6 +35,7 @@
 #include "d3d9_vertex_declaration.hpp"
 #include "dxmt_bcn.hpp"
 #include "dxmt_command_queue.hpp"
+#include "util_futex.hpp"
 #include "dxmt_context.hpp"
 #include "dxmt_format.hpp"
 #include "dxmt_resource_initializer.hpp"
@@ -410,7 +411,7 @@ public:
   void
   SetDone(bool s) noexcept override {
     m_ready.store(s, std::memory_order_release);
-    m_ready.notify_all();
+    dxmt::atomic_notify_all(m_ready);
   }
 
   // Block the calling thread until the worker has finished. First-draw
@@ -419,7 +420,7 @@ public:
   void
   Wait() const noexcept {
     while (!m_ready.load(std::memory_order_acquire))
-      m_ready.wait(false, std::memory_order_acquire);
+      dxmt::atomic_wait(m_ready, false, std::memory_order_acquire);
   }
 
   WMT::RenderPipelineState

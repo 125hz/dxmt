@@ -40,7 +40,10 @@
 #include <windows.h>
 
 #include <pthread.h>
+/* ml1050: pthread_set_qos_class_self_np / QOS_CLASS_* for SetThreadPriority. */
+#include <pthread/qos.h>
 #include <sched.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #include <cstdint>
@@ -93,29 +96,56 @@ GetCurrentProcess() {
   return MADEIRA_PSEUDO_HANDLE_CURRENT_PROCESS;
 }
 
-/* Real: the only two threads that ask are the encode and finish threads
- * (dxmt_command_queue.cpp, dxmt_tasks.hpp), which ask for TIME_CRITICAL
- * because a stall there stalls the GPU.  SCHED_FIFO at a mid band is the
- * closest Darwin equivalent; anything below TIME_CRITICAL stays SCHED_OTHER,
- * which is what pthreads already gives them. */
+/* The callers are the encode thread, the finish thread and the two task-pool
+ * workers (dxmt_command_queue.cpp, dxmt_tasks.hpp), all asking for
+ * TIME_CRITICAL because a stall there stalls the GPU.
+ *
+ * ml1050 -- THIS USED TO DO THE OPPOSITE OF WHAT IT ASKED FOR.
+ *
+ * It called pthread_setschedparam(SCHED_FIFO, ~3/4 band).  On Darwin an
+ * explicit sched param takes the thread OUT of QoS management entirely: the
+ * thread's QoS class becomes UNSPECIFIED/legacy, and QoS is what decides
+ * performance-core eligibility.  Every one of these threads is created by a
+ * guest Wine thread, and build/ntdll-unix/thread_ios.c's start_thread()
+ * promotes every guest thread to QOS_CLASS_USER_INTERACTIVE as its first
+ * statement -- so these four INHERITED user-interactive and then threw it
+ * away in the name of asking for more.  SCHED_FIFO is not honoured as a
+ * real-time band for an unentitled app either, so the trade was a
+ * demotion for nothing.
+ *
+ * QOS_CLASS_USER_INTERACTIVE is the correct Darwin expression of "this thread
+ * is on the frame's critical path": it is the highest class an unentitled app
+ * can request, it keeps the thread eligible for the P-cores, and it gives the
+ * shortest timer leeway -- which is the property the encode and finish threads
+ * actually need, since both spend their lives being woken by another thread.
+ *
+ * Anything below TIME_CRITICAL maps to UTILITY rather than being left alone,
+ * so a caller that asks to be backgrounded is not silently ignored.
+ *
+ * MADEIRA_DXMT_SCHED_FIFO=1 restores the old behaviour for an A/B. */
 static inline BOOL
 SetThreadPriority(HANDLE thread, int priority) {
   if (thread != MADEIRA_PSEUDO_HANDLE_CURRENT_THREAD)
     return FALSE; /* no thread handles exist here; refuse rather than lie */
 
-  struct sched_param param = {};
-  int policy = SCHED_OTHER;
-
-  if (priority >= THREAD_PRIORITY_TIME_CRITICAL) {
-    policy = SCHED_FIFO;
-    int lo = sched_get_priority_min(SCHED_FIFO);
-    int hi = sched_get_priority_max(SCHED_FIFO);
-    param.sched_priority = lo + ((hi - lo) * 3) / 4;
-  } else {
-    param.sched_priority = sched_get_priority_min(SCHED_OTHER);
+  if (const char *e = ::getenv("MADEIRA_DXMT_SCHED_FIFO"); e && *e && *e != '0') {
+    struct sched_param param = {};
+    int policy = SCHED_OTHER;
+    if (priority >= THREAD_PRIORITY_TIME_CRITICAL) {
+      policy = SCHED_FIFO;
+      int lo = sched_get_priority_min(SCHED_FIFO);
+      int hi = sched_get_priority_max(SCHED_FIFO);
+      param.sched_priority = lo + ((hi - lo) * 3) / 4;
+    } else {
+      param.sched_priority = sched_get_priority_min(SCHED_OTHER);
+    }
+    return ::pthread_setschedparam(::pthread_self(), policy, &param) == 0;
   }
 
-  return ::pthread_setschedparam(::pthread_self(), policy, &param) == 0;
+  qos_class_t want = priority >= THREAD_PRIORITY_HIGHEST ? QOS_CLASS_USER_INTERACTIVE
+                     : priority >= THREAD_PRIORITY_NORMAL ? QOS_CLASS_USER_INITIATED
+                                                          : QOS_CLASS_UTILITY;
+  return ::pthread_set_qos_class_self_np(want, 0) == 0;
 }
 
 /* ---- thread and process identity --------------------------------------- */
