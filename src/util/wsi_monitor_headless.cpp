@@ -16,6 +16,10 @@
 
 #include "wsi_monitor.hpp"
 
+#include "util_env.hpp"
+#include "log/log.hpp"
+#include "util_string.hpp"
+
 #include <cstdlib>   /* ml1100: getenv/atoi for the session-default mode cap */
 
 #ifdef DXMT_MADEIRA
@@ -56,6 +60,25 @@ static void getScreenSize(uint32_t *w, uint32_t *h) {
 #endif
 
 HMONITOR getDefaultMonitor() {
+#ifndef DXMT_MADEIRA
+  static const bool useIdentity = env::getEnvVar("DXMT_WSI_MONITOR_IDENTITY") != "0";
+  if (useIdentity) {
+    // DXGI_OUTPUT_DESC::Monitor must identify the same output as user32.
+    // A private sentinel prevents clients from matching the display even when
+    // its name and dimensions are correct. The native-only frontend has no
+    // user32 boundary and continues to use its internal singleton.
+    HMONITOR monitor = ::MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    if (monitor) {
+      static const bool announced = [monitor] {
+        Logger::warn(str::format("[monitor-identity] ml1190 using user32 primary=", monitor,
+            " (DXMT_WSI_MONITOR_IDENTITY=0 restores the synthetic handle)"));
+        return true;
+      }();
+      (void)announced;
+      return monitor;
+    }
+  }
+#endif
   return kSyntheticMonitor;
 }
 
@@ -63,11 +86,11 @@ HMONITOR enumMonitors(uint32_t index) {
   /* Only one synthetic monitor exists. */
   if (index != 0)
     return nullptr;
-  return kSyntheticMonitor;
+  return getDefaultMonitor();
 }
 
 bool getDisplayName(HMONITOR hMonitor, WCHAR (&Name)[32]) {
-  if (hMonitor != kSyntheticMonitor)
+  if (hMonitor != getDefaultMonitor())
     return false;
   /* Standard Windows display device name "\\.\DISPLAY1". */
   static const WCHAR kName[] = {'\\','\\','.','\\','D','I','S','P','L','A','Y','1', 0};
@@ -77,7 +100,7 @@ bool getDisplayName(HMONITOR hMonitor, WCHAR (&Name)[32]) {
 }
 
 bool getDesktopCoordinates(HMONITOR hMonitor, RECT *pRect) {
-  if (hMonitor != kSyntheticMonitor || !pRect)
+  if (hMonitor != getDefaultMonitor() || !pRect)
     return false;
   /* Real screen size from user32 — MUST agree with what win32u's virtual
    * monitor reports (sysparams_ios.c now serves the same values through
@@ -120,7 +143,7 @@ static inline void fillMode(WsiMode *pMode, uint32_t w, uint32_t h) {
  *    twice the current mode's pixel count). Keep the two tables in step. */
 #ifndef DXMT_MADEIRA
 bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode *pMode) {
-  if (hMonitor != kSyntheticMonitor || !pMode)
+  if (hMonitor != getDefaultMonitor() || !pMode)
     return false;
 
   DEVMODEW dm = {};
@@ -178,7 +201,7 @@ static void getDefaultScreenSize(uint32_t *w, uint32_t *h) {
 }
 
 bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode *pMode) {
-  if (hMonitor != kSyntheticMonitor || !pMode)
+  if (hMonitor != getDefaultMonitor() || !pMode)
     return false;
 
   uint32_t sw, sh;
@@ -213,7 +236,7 @@ bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode *pMode) {
 #endif
 
 bool getCurrentDisplayMode(HMONITOR hMonitor, WsiMode *pMode) {
-  if (hMonitor != kSyntheticMonitor || !pMode)
+  if (hMonitor != getDefaultMonitor() || !pMode)
     return false;
   uint32_t sw, sh;
   getScreenSize(&sw, &sh);

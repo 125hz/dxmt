@@ -9,6 +9,8 @@
 #include <cfloat>
 #include "dxmt_mem_census.hpp"
 #include "config/config.hpp"   /* ml754 */
+#include "util_env.hpp"
+#include <atomic>
 
 namespace dxmt {
 
@@ -1438,6 +1440,30 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
     if (latter->type == EncoderType::Clear && former->type == EncoderType::Render) {
       auto render = reinterpret_cast<RenderEncoderData *>(former);
       auto clear = reinterpret_cast<ClearEncoderData *>(latter);
+
+      static const bool discardColor = [] {
+        const bool enabled = env::getEnvVar("DXMT_CLEAR_DISCARD_STORE") != "0";
+        Logger::warn(str::format("[clear-store] ml1190 enabled=", enabled));
+        return enabled;
+      }();
+      // A full clear makes the preceding color store dead. Keep dependency
+      // tracking intact, and only match the exact view and covered subresource.
+      // Resolve stores and partial clears must retain their original behavior.
+      if (discardColor && !clear->clear_dsv && clear->attachment &&
+          clear->array_length == render->render_target_array_length &&
+          clear->width == render->render_target_width && clear->height == render->render_target_height) {
+        for (unsigned i = 0; i < render->render_target_count; ++i) {
+          auto &color = render->colors[i];
+          if (color.attachment == clear->attachment && !color.level && !color.slice && !color.depth_plane &&
+              !color.resolve_attachment && color.store_action == WMTStoreActionStore) {
+            color.store_action = WMTStoreActionDontCare;
+            static std::atomic<uint64_t> saved{0};
+            const auto total = saved.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (total <= 4 || !(total % 4096))
+              Logger::warn(str::format("[clear-store] ml1190 overwritten color stores skipped=", total));
+          }
+        }
+      }
 
       // DontCare can be used because it's going to be cleared anyway
       // just keep in mind DontCare != DontStore

@@ -51,7 +51,7 @@ namespace dxmt::census {
 /* ml999: see the note in d3d9_census.hpp. The counters are per thread; this is
  * the list the summary sums, and the only place a lock is taken -- once per
  * thread, on its first D3D9 call, never on the counting path. */
-thread_local ThreadCounters *g_tls_calls = nullptr;
+thread_local constinit ThreadCounters *g_tls_calls = nullptr;
 
 namespace {
 std::atomic<ThreadCounters *> g_tls_list{nullptr};

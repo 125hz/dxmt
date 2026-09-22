@@ -448,7 +448,8 @@ MTLD3D9Texture::materializeLevelForLock(uint32_t level) {
   // download the level's bytes back from the Metal texture so the Lock hands
   // out the real contents.
   if (m_mirrorBacking != nullptr && level < m_levels.size()) {
-    m_device->readbackSurfaceMirror(m_levels[level].ptr());
+    if (!m_device->readbackSurfaceMirror(m_levels[level].ptr()))
+      return;
     ++m_mirror_download_count;
   }
   m_mirror_stale_mask &= ~(1u << level);
@@ -461,10 +462,13 @@ MTLD3D9Texture::restoreMirrorForSource() {
   if (m_mirror_stale_mask == 0)
     return;
   ensureMirror();
-  for (uint32_t i = 0; i < m_levels.size() && i < 32; ++i) {
+  std::vector<MTLD3D9Surface *> pending;
+  for (size_t i = 0; i < m_levels.size() && i < 32; ++i) {
     if (m_mirror_stale_mask & (1u << i))
-      m_device->readbackSurfaceMirror(m_levels[i].ptr());
+      pending.push_back(m_levels[i].ptr());
   }
+  if (!m_device->readbackSurfaceMirrors(pending.data(), pending.size()))
+    return;
   m_mirror_stale_mask = 0;
   ++m_mirror_download_count;
 }

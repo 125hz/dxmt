@@ -206,6 +206,7 @@ public:
   void noteReadback(unsigned kind, const D3DSURFACE_DESC &desc);
   uint64_t m_readbackKinds[4] = {};
   uint64_t m_readbackCount = 0;
+  uint64_t m_readbackBatches = 0, m_readbackWaitsSaved = 0;
   uint64_t m_readbackBytes = 0;
   // Current device-wide frame latency, as Set/Get via the d3d9Ex API.
   // Read by MTLD3D9SwapChain to clamp the queue's max_latency_ to
@@ -2191,7 +2192,8 @@ public:
   // through whatever its own contract allows.
   bool waitForGpuOrDeviceError(uint64_t value);
 
-  void readbackSurfaceMirror(class MTLD3D9Surface *surface);
+  bool readbackSurfaceMirror(class MTLD3D9Surface *surface);
+  bool readbackSurfaceMirrors(class MTLD3D9Surface *const *surfaces, size_t count);
 
   // Force a staged Clear (m_pendingClear) onto the CURRENT bindings by
   // posting a chunk lambda that opens a clear-only render pass against

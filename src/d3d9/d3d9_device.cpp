@@ -1611,89 +1611,121 @@ MTLD3D9Device::noteReadback(unsigned kind, const D3DSURFACE_DESC &desc) {
         " format=", uint32_t(desc.Format), " usage=", desc.Usage, " kind=", kind));
 }
 
-void
+bool
 MTLD3D9Device::readbackSurfaceMirror(MTLD3D9Surface *surface) {
-  // Local pool for the same reason as GetRenderTargetData: the commit
-  // and wait below go through autoreleased Metal selectors and wine's
-  // main thread has no outer NSAutoreleasePool.
+  return readbackSurfaceMirrors(&surface, 1);
+}
+
+bool
+MTLD3D9Device::readbackSurfaceMirrors(MTLD3D9Surface *const *surfaces, size_t count) {
   auto pool = WMT::MakeAutoreleasePool();
-  const D3DSURFACE_DESC &desc = surface->desc();
-  // MADEIRA: a decoded BC texture has NO readback. Its Metal storage is RGBA8
-  // texels while the mirror this would fill is BC blocks, and there is no
-  // re-encoder -- so the copy below would be refused by the blit guard
-  // (texture_upload_pitch_ok) and then memcpy whatever the ring block happened
-  // to hold into the application's pixels. The mirror is the authoritative
-  // copy for these resources (see the eviction gate in d3d9_texture.cpp), so
-  // leaving it untouched is not a degradation, it is the correct answer.
-  if (!m_bcSupported && (IsCompressedFormat(desc.Format) || Is3DcFormat(desc.Format)))
-    return;
-  // 3Dc reads back through the real BC geometry into the fiction mirror's
-  // head; every other format uses the mirror's own layout pitch.
-  const uint32_t pitch =
-      Is3DcFormat(desc.Format) ? D3DFormatMetalTransferPitch(desc.Format, desc.Width) : surface->pitch();
-  const uint32_t width = desc.Width;
-  const uint32_t height = desc.Height;
-  // Byte counts run over block-rows, not pixel-rows: a compressed format packs
-  // 4 texel rows per row of pitch, so pitch * height would over-read by 4x. The
-  // blit's source size below stays in pixels (Metal blocks internally).
-  const uint32_t row_count = D3DFormatMetalTransferRows(desc.Format, height);
-  const size_t total_bytes = static_cast<size_t>(pitch) * row_count;
-  if (surface->metalTexture().handle == 0 || surface->cpuPtr() == nullptr || total_bytes == 0)
-    return;
-
-  // Drain queued draws and any staged clear onto chunks first so the
-  // readback sees them; the unconditional pair is the same sync-point
-  // shape EndScene and Present use.
-  FlushDrawBatch();
-  flushOpenWork();
-
-  uint64_t coherent_id = m_cachedSignaled.load(std::memory_order_acquire);
-  auto span = tryRingAllocate(m_uploadRing, m_currentCmdSeq, coherent_id, total_bytes, 16);
-  if (!span)
-    return;
-  const uint64_t offset = span.offset;
-
-  WMT::Reference<WMT::Texture> src_tex_retain(surface->metalTexture());
-  obj_handle_t src_texture_handle = surface->metalTexture().handle;
-  obj_handle_t dst_buffer_handle = span.handle;
-  uint32_t src_mip = surface->mipLevel();
-  uint32_t src_slice = surface->arraySlice();
-
-  uint64_t signal_seq = m_currentCmdSeq;
-  obj_handle_t event_handle = m_completionEvent.handle;
-
-  auto *chunk = m_dxmtQueue->CurrentChunk();
-  chunk->emitcc([src_tex_retain = std::move(src_tex_retain), src_texture_handle, dst_buffer_handle, offset, pitch,
-                 width, height, row_count, src_mip, src_slice, event_handle,
-                 signal_seq](ArgumentEncodingContext &ctx) mutable {
-    ctx.startBlitPass();
-    auto &cmd = ctx.encodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer>();
-    cmd.type = WMTBlitCommandCopyFromTextureToBuffer;
-    cmd.src = src_texture_handle;
-    cmd.slice = src_slice;
-    cmd.level = src_mip;
-    cmd.origin = WMTOrigin{0, 0, 0};
-    cmd.size = WMTSize{width, height, 1};
-    cmd.dst = dst_buffer_handle;
-    cmd.offset = offset;
-    cmd.bytes_per_row = pitch;
-    cmd.bytes_per_image = pitch * row_count;
-    ctx.endPass();
-    ctx.signalEventByHandle(event_handle, signal_seq);
-  });
-  ++m_currentCmdSeq;
-  refreshSignaledAndTrimRings();
-
-  // Synchronous: the caller's LockRect hands out the mirror pointer
-  // right after this returns. Wait for the chunk's encode AND the
-  // GPU-side retirement, then copy the block into the mirror.
-  uint64_t seq = m_dxmtQueue->CurrentSeqId();
-  noteReadback(desc.Pool == D3DPOOL_MANAGED ? 0 : 1, desc);
-  commitCurrentChunkTimed(3);
-  m_dxmtQueue->WaitCPUFence(seq);
-  if (!waitForGpuOrDeviceError(signal_seq))
-    return;
-  std::memcpy(surface->cpuPtr(), static_cast<const char *>(span.host), total_bytes);
+  static const bool enabled = [] {
+    const bool value = env::getEnvVar("DXMT_D9_BATCH_READBACK") != "0";
+    Logger::warn(str::format("[readback-batch] ml1190 enabled=", value, " max-bytes=16777216"));
+    return value;
+  }();
+  struct Copy {
+    MTLD3D9Surface *surface;
+    uint32_t pitch, rows;
+    size_t offset, bytes;
+  };
+  std::vector<Copy> copies;
+  size_t bytes = 0;
+  // Keep batches bounded on a 32-bit address space. One larger surface still
+  // uses its original single-surface allocation size.
+  constexpr size_t limit = 16u * 1024u * 1024u;
+  auto drain = [&]() -> bool {
+    if (copies.empty())
+      return true;
+    FlushDrawBatch();
+    flushOpenWork();
+    const uint64_t coherent = m_cachedSignaled.load(std::memory_order_acquire);
+    auto span = tryRingAllocate(m_uploadRing, m_currentCmdSeq, coherent, bytes, 16);
+    if (!span) {
+      if (copies.size() == 1)
+        return false;
+      // Under address pressure, preserve the smaller allocation behavior.
+      for (const auto &copy : copies)
+        if (!readbackSurfaceMirror(copy.surface))
+          return false;
+      copies.clear();
+      bytes = 0;
+      return true;
+    }
+    auto *chunk = m_dxmtQueue->CurrentChunk();
+    for (const auto &copy : copies) {
+      auto *surface = copy.surface;
+      const auto desc = surface->desc();
+      WMT::Reference<WMT::Texture> texture(surface->metalTexture());
+      const auto src = surface->metalTexture().handle;
+      const auto dst = span.handle;
+      const auto offset = span.offset + copy.offset;
+      const auto mip = surface->mipLevel(), slice = surface->arraySlice();
+      const auto pitch = copy.pitch, rows = copy.rows;
+      chunk->emitcc([texture = std::move(texture), src, dst, offset, mip, slice, pitch, rows,
+                     width = desc.Width, height = desc.Height](ArgumentEncodingContext &ctx) mutable {
+        ctx.startBlitPass();
+        auto &cmd = ctx.encodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer>();
+        cmd.type = WMTBlitCommandCopyFromTextureToBuffer;
+        cmd.src = src;
+        cmd.slice = slice;
+        cmd.level = mip;
+        cmd.origin = WMTOrigin{0, 0, 0};
+        cmd.size = WMTSize{width, height, 1};
+        cmd.dst = dst;
+        cmd.offset = offset;
+        cmd.bytes_per_row = pitch;
+        cmd.bytes_per_image = pitch * rows;
+        ctx.endPass();
+      });
+      noteReadback(desc.Pool == D3DPOOL_MANAGED ? 0 : 1, desc);
+    }
+    const uint64_t signal = m_currentCmdSeq++;
+    const auto event = m_completionEvent.handle;
+    chunk->emitcc([event, signal](ArgumentEncodingContext &ctx) { ctx.signalEventByHandle(event, signal); });
+    refreshSignaledAndTrimRings();
+    const auto seq = m_dxmtQueue->CurrentSeqId();
+    commitCurrentChunkTimed(3);
+    m_dxmtQueue->WaitCPUFence(seq);
+    if (!waitForGpuOrDeviceError(signal))
+      return false;
+    // No allocation/trim is allowed between completion and these copies: the
+    // ring span must remain owned until every CPU mirror has been populated.
+    for (const auto &copy : copies)
+      std::memcpy(copy.surface->cpuPtr(), static_cast<const char *>(span.host) + copy.offset, copy.bytes);
+    if (copies.size() > 1) {
+      m_readbackWaitsSaved += copies.size() - 1;
+      if (++m_readbackBatches <= 4 || !(m_readbackBatches % 128))
+        Logger::warn(str::format("[readback-batch] ml1190 batches=", m_readbackBatches,
+            " copies=", copies.size(), " bytes=", bytes, " waits-saved=", m_readbackWaitsSaved));
+    }
+    copies.clear();
+    bytes = 0;
+    return true;
+  };
+  for (size_t i = 0; i < count; ++i) {
+    auto *surface = surfaces[i];
+    const auto &desc = surface->desc();
+    // Decoded BC/3Dc mirrors remain authoritative: RGBA GPU storage cannot be
+    // copied back into compressed blocks without a re-encoder.
+    if (!m_bcSupported && (IsCompressedFormat(desc.Format) || Is3DcFormat(desc.Format)))
+      continue;
+    const uint32_t pitch = Is3DcFormat(desc.Format)
+        ? D3DFormatMetalTransferPitch(desc.Format, desc.Width) : surface->pitch();
+    const uint32_t rows = D3DFormatMetalTransferRows(desc.Format, desc.Height);
+    const size_t size = size_t(pitch) * rows;
+    if (!surface->metalTexture().handle || !surface->cpuPtr() || !size)
+      return false;
+    size_t aligned = (bytes + 15) & ~size_t(15);
+    if (!copies.empty() && (!enabled || size > limit || aligned > limit - size)) {
+      if (!drain())
+        return false;
+      aligned = 0;
+    }
+    copies.push_back({surface, pitch, rows, aligned, size});
+    bytes = aligned + size;
+  }
+  return drain();
 }
 
 ULONG STDMETHODCALLTYPE

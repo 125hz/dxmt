@@ -244,7 +244,8 @@ MTLD3D9CubeTexture::materializeLevelForLock(uint32_t subresource) {
   // backing; download the face's bytes back from the Metal texture so
   // the Lock hands out the real contents.
   if (m_mirrorBacking != nullptr && subresource < m_levels.size()) {
-    m_device->readbackSurfaceMirror(m_levels[subresource].ptr());
+    if (!m_device->readbackSurfaceMirror(m_levels[subresource].ptr()))
+      return;
     ++m_mirror_download_count;
   }
   m_staleSubres.reset(subresource);
@@ -257,10 +258,13 @@ MTLD3D9CubeTexture::restoreMirrorForSource() {
   if (m_staleSubres.none())
     return;
   ensureMirror();
+  std::vector<MTLD3D9Surface *> pending;
   for (size_t i = 0; i < m_levels.size() && i < m_staleSubres.size(); ++i) {
     if (m_staleSubres.test(i))
-      m_device->readbackSurfaceMirror(m_levels[i].ptr());
+      pending.push_back(m_levels[i].ptr());
   }
+  if (!m_device->readbackSurfaceMirrors(pending.data(), pending.size()))
+    return;
   m_staleSubres.reset();
   ++m_mirror_download_count;
 }

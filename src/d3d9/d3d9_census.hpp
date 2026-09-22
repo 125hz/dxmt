@@ -99,7 +99,9 @@ struct ThreadCounters {
   ThreadCounters *next;
 };
 
-extern thread_local ThreadCounters *g_tls_calls;
+// The pointer has no dynamic initializer. Declare that across translation
+// units so ARM64EC does not request an unavailable external TLS-init thunk.
+extern thread_local constinit ThreadCounters *g_tls_calls;
 
 /* First call on this thread: allocate and link the block, then count. Out of
  * line and never inlined -- it runs once per thread and keeping it out of the
