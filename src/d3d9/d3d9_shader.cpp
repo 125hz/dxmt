@@ -1199,6 +1199,23 @@ MTLD3D9PixelShaderModule::getVariantTask(
     uint32_t alpha_test_func, const uint8_t samp_kinds[16], bool point_sprite, int fog_mode, bool fog_coord_w,
     bool dual_source, bool flat_shading, bool emit_sample_mask, uint32_t unorm_snap_mask
 ) {
+  // The compiler's binding pre-scan and this metadata mask use the same
+  // dxso_opcode_samples/dxso_sampling_slot helpers (including SM1 implicit
+  // stages). Unread slots never enter its signature or lowering. Keeping
+  // their live texture kinds in the key needlessly compiles identical AIR
+  // and links new PSOs when an application changes an unrelated binding.
+  static const bool prune_unused = [] {
+    const char *value = std::getenv("DXMT_D9_SHADER_PRUNE");
+    bool enabled = !value || std::strcmp(value, "0");
+    Logger::warn(str::format("[shader-variants] ml1170 unused-sampler-pruning=", enabled));
+    return enabled;
+  }();
+  uint8_t canonical_kinds[16];
+  if (prune_unused) {
+    for (unsigned i = 0; i < 16; ++i)
+      canonical_kinds[i] = (m_metadata.sampler_usage_mask & (1u << i)) ? samp_kinds[i] : 0;
+    samp_kinds = canonical_kinds;
+  }
   // FNV-1a over the (alpha FUNC, sampler-kinds, point-sprite, fog-mode,
   // dual-source, flat) bounded tuple. The alpha REF and the bump-env
   // matrix / luminance scale + offset ride the shared PS uniform tail and

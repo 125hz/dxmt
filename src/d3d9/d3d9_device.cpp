@@ -967,7 +967,18 @@ MTLD3D9Device::initTextureWithZero(dxmt::Texture *texture) {
 }
 
 void
-MTLD3D9Device::commitCurrentChunkTimed() {
+MTLD3D9Device::commitCurrentChunkTimed(unsigned reason) {
+  // Device lock serializes callers. Report causes, not just GPU totals: an
+  // upload queue can also submit buffers independently of these chunks.
+  static const bool stats = env::getEnvVar("DXMT_D9_SUBMIT_STATS") != "0";
+  if (stats) {
+    ++m_submitReasons[std::min(reason, 4u)];
+    if (++m_submitCount == 1 || !(m_submitCount % 512))
+      Logger::warn(str::format("[submit-causes] ml1170 total=", m_submitCount,
+          " present=", m_submitReasons[1], " query=", m_submitReasons[2],
+          " readback=", m_submitReasons[3], " rename-pressure=", m_submitReasons[4],
+          " other=", m_submitReasons[0]));
+  }
   // Per command-buffer ring seal. A CPU store into a placed Metal buffer an
   // in-flight command buffer references faults on every store under x86
   // translation on macOS 27 Beta 3, so no ring block may receive writes for
@@ -1661,7 +1672,7 @@ MTLD3D9Device::readbackSurfaceMirror(MTLD3D9Surface *surface) {
   // right after this returns. Wait for the chunk's encode AND the
   // GPU-side retirement, then copy the block into the mirror.
   uint64_t seq = m_dxmtQueue->CurrentSeqId();
-  commitCurrentChunkTimed();
+  commitCurrentChunkTimed(3);
   m_dxmtQueue->WaitCPUFence(seq);
   if (!waitForGpuOrDeviceError(signal_seq))
     return;
@@ -4804,7 +4815,7 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
     // returning. m_currentCmdSeq was bumped after posting, so the chunk's
     // signal target is the pre-bump value.
     uint64_t seq = m_dxmtQueue->CurrentSeqId();
-    commitCurrentChunkTimed();
+    commitCurrentChunkTimed(3);
     m_dxmtQueue->WaitCPUFence(seq);
     if (!waitForGpuOrDeviceError(signal_seq))
       return D3DERR_DEVICELOST;
@@ -4877,7 +4888,7 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
   refreshSignaledAndTrimRings();
 
   uint64_t seq = m_dxmtQueue->CurrentSeqId();
-  commitCurrentChunkTimed();
+  commitCurrentChunkTimed(3);
   m_dxmtQueue->WaitCPUFence(seq);
   if (!waitForGpuOrDeviceError(signal_seq))
     return D3DERR_DEVICELOST;
@@ -5031,7 +5042,7 @@ MTLD3D9Device::frontBufferReadback(MTLD3D9SwapChain *chain, IDirect3DSurface9 *p
   refreshSignaledAndTrimRings();
 
   uint64_t seq = m_dxmtQueue->CurrentSeqId();
-  commitCurrentChunkTimed();
+  commitCurrentChunkTimed(3);
   m_dxmtQueue->WaitCPUFence(seq);
   if (!waitForGpuOrDeviceError(signal_seq))
     return D3DERR_DEVICELOST;
@@ -9913,8 +9924,24 @@ MTLD3D9Device::ResolveClusterState(
     res.resolved_pso_first_use = first_time;
   }
 
+  // The compiler emits bindings only for sampled stages. Avoid sampler-cache
+  // probes, Metal texture-view creation and resource retention for stale
+  // bindings outside that mask. Fixed-function combiners retain their path.
+  static const bool prune_bindings = env::getEnvVar("DXMT_D9_BINDING_PRUNE") != "0";
+  static const bool prune_announced = [] {
+    Logger::warn(str::format("[shader-bindings] ml1170 sampled-stages-only=", prune_bindings));
+    return true;
+  }();
+  (void)prune_announced;
   // ---- Per-stage textures + samplers ----
   for (uint32_t stage = 0; stage < 16; ++stage) {
+    if (prune_bindings && !ffp_ps && !(ps->metadata().sampler_usage_mask & (1u << stage))) {
+      res.resolved_frag_view[stage] = 0;
+      res.resolved_frag_textures[stage] = 0;
+      res.resolved_frag_samplers[stage] = 0;
+      res.resolved_frag_texture_dxmt[stage] = nullptr;
+      continue;
+    }
     auto *tex = refs.textures[stage].ptr();
     const DWORD *samp_row = samp_states[stage];
     // A bound texture with no Metal backing (a SCRATCH / packed-YUV resource
@@ -10790,7 +10817,7 @@ MTLD3D9Device::forceFlushAndCommit() {
   FlushDrawBatch();
   flushOpenWork();
   emitCmdbufTailSignal();
-  commitCurrentChunkTimed();
+  commitCurrentChunkTimed(4);
 }
 
 void

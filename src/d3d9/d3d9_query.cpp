@@ -385,7 +385,7 @@ MTLD3D9Query::getDataImpl(void *pData, DWORD dwSize, DWORD dwGetDataFlags) {
       m_flushed_since_issue = true;
       if (queue.CurrentSeqId() == m_event_seq) {
         m_device->FlushDrawBatch();
-        m_device->commitCurrentChunkTimed();
+        m_device->commitCurrentChunkTimed(2);
         census::queryFlushed();
       }
     }
@@ -427,7 +427,7 @@ MTLD3D9Query::getDataImpl(void *pData, DWORD dwSize, DWORD dwGetDataFlags) {
       m_flushed_since_issue = true;
       if (queue.CurrentSeqId() == m_event_seq) {
         m_device->FlushDrawBatch();
-        m_device->commitCurrentChunkTimed();
+        m_device->commitCurrentChunkTimed(2);
         census::queryFlushed();
       }
     }

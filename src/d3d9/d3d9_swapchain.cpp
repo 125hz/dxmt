@@ -1171,7 +1171,7 @@ MTLD3D9SwapChain::Present(
   // Present chunk is the natural end of a frame's cmdbuf; sync paths
   // (UpdateTexture / GetRenderTargetData) still emit their own signal.
   m_device->emitCmdbufTailSignal();
-  m_device->commitCurrentChunkTimed();
+  m_device->commitCurrentChunkTimed(1);
   queue.PresentBoundary();
   // Throttle the calling thread to the frame-latency depth. Present pacing was
   // split out of PresentBoundary so each back end applies its own; without this
