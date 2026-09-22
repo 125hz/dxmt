@@ -4,6 +4,7 @@
 #include "log/log.hpp"
 #include "thread.hpp"
 #include "util_math.hpp"
+#include "util_env.hpp"
 #include <cassert>
 #include <mutex>
 #include <queue>
@@ -29,6 +30,15 @@ constexpr size_t kStagingBlockSize = 0x2000000; // 32MB
 #endif
 constexpr size_t kStagingBlockSizeForDeferredContext = 0x200000; // 2MB
 constexpr size_t kStagingBlockLifetime = 300;
+
+inline bool ringOversizeReuseEnabled() {
+  static const bool enabled = [] {
+    const bool value = env::getEnvVar("DXMT_RING_OVERSIZE_REUSE") != "0";
+    WARN("[ring-reuse] ml1180 enabled=", value, " retained-extra-blocks=2 max-block=16777216");
+    return value;
+  }();
+  return enabled;
+}
 
 template <typename Allocator, size_t BlockSize = kStagingBlockSize, class mutex = dxmt::mutex> class RingBumpState {
 
@@ -101,6 +111,7 @@ private:
     size_t total_size;
     uint64_t last_used_seq_id;
     uint64_t inc_time_to_live;
+    bool reusable_oversize = false;
     Allocator::Block block;
   };
 
@@ -133,6 +144,8 @@ private:
 #endif
 
   std::queue<Allocation> fifo;
+  unsigned reusable_oversize_blocks_ = 0;
+  uint64_t oversize_reuses_ = 0;
   mutex mutex_;
   Allocator allocator_;
 };
@@ -313,9 +326,10 @@ RingBumpState<Allocator, BlockSize, mutex>::free_blocks(uint64_t coherent_id) {
       break;
     auto expired = (coherent_id - front.last_used_seq_id) > kStagingBlockLifetime ||
                    front.inc_time_to_live > kStagingBlockLifetime || coherent_id == -1ull;
-    auto adhoc = front.total_size != BlockSize;
+    auto adhoc = front.total_size != BlockSize && !front.reusable_oversize;
     if (expired || adhoc) {
       // can be deallocated
+      if (front.reusable_oversize) --reusable_oversize_blocks_;
       fifo.pop();
       continue;
     }
@@ -332,10 +346,19 @@ RingBumpState<Allocator, BlockSize, mutex>::allocate_or_reuse_block(
   while (!fifo.empty()) {
     auto &front = fifo.front();
     if (front.last_used_seq_id < coherent_id) {
-      if (front.total_size != BlockSize) {
+      if (ringOversizeReuseEnabled() && front.total_size < block_size) {
+        // A completed small block must not strand usable blocks behind it.
+        // No pointer into it remains in flight at this coherent sequence.
+        if (front.reusable_oversize) --reusable_oversize_blocks_;
+        fifo.pop();
+        continue;
+      }
+      if (front.total_size != BlockSize && !front.reusable_oversize) {
         fifo.pop();
         continue;
       } else if (front.total_size >= block_size) {
+        if (front.reusable_oversize && ++oversize_reuses_ == 1)
+          WARN("[ring-reuse] ml1180 recycled oversized block bytes=", front.total_size);
         front.last_used_seq_id = seq_id;
         front.allocated_size = 0;
         front.inc_time_to_live = 0;
@@ -347,11 +370,18 @@ RingBumpState<Allocator, BlockSize, mutex>::allocate_or_reuse_block(
     }
     break;
   }
+  // Repeated image uploads just above the normal block size otherwise create
+  // and destroy a Metal buffer every frame. Retain at most two modest oversize
+  // blocks per ring, with the same completion checks and expiry as normal ones.
+  const bool reusable_oversize = ringOversizeReuseEnabled() && block_size > BlockSize &&
+      block_size <= 16u * 1024u * 1024u && reusable_oversize_blocks_ < 2;
+  if (reusable_oversize) ++reusable_oversize_blocks_;
   fifo.push({
       .allocated_size = 0,
       .total_size = block_size,
       .last_used_seq_id = seq_id,
       .inc_time_to_live = 0,
+      .reusable_oversize = reusable_oversize,
       .block = allocator_.allocate(block_size),
   });
   return fifo.back();

@@ -203,6 +203,10 @@ public:
   void commitCurrentChunkTimed(unsigned reason = 0);
   uint64_t m_submitReasons[5] = {};
   uint64_t m_submitCount = 0;
+  void noteReadback(unsigned kind, const D3DSURFACE_DESC &desc);
+  uint64_t m_readbackKinds[4] = {};
+  uint64_t m_readbackCount = 0;
+  uint64_t m_readbackBytes = 0;
   // Current device-wide frame latency, as Set/Get via the d3d9Ex API.
   // Read by MTLD3D9SwapChain to clamp the queue's max_latency_ to
   // min(m_frameLatency, BackBufferCount + 1): DXVK d3d9_swapchain.cpp

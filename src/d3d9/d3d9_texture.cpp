@@ -10,6 +10,8 @@
 #include "wsi_platform.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include "log/log.hpp"
 
 #include "d3d9_census.hpp"
 
@@ -306,6 +308,22 @@ MTLD3D9Texture::ensureMirror() {
 // wins arrives much sooner.
 static constexpr uint32_t kMirrorReadEvictThreshold = 4;
 
+// Small MANAGED mirrors are inexpensive, but reconstructing even a tiny one
+// drains the GPU queue. Keep a bounded working set without changing LockRect
+// visibility or discarding the CPU's authoritative bytes. Shared across devices
+// in this module; destructors may run on the encode thread.
+static std::atomic<size_t> retainedMirrorBytes{0};
+static constexpr size_t kMirrorRetentionBudget = 32u * 1024u * 1024u;
+static bool smallMirrorRetentionEnabled() {
+  static const bool enabled = [] {
+    const bool value = env::getEnvVar("DXMT_D9_SMALL_MIRROR_CACHE") != "0";
+    Logger::warn(str::format("[mirror-cache] ml1180 enabled=", value,
+        " budget=33554432 max-resource=262144"));
+    return value;
+  }();
+  return enabled;
+}
+
 // MADEIRA: is this resource's sysmem mirror the ONLY copy of its bytes?
 //
 // True for a block-compressed format on an adapter that cannot sample BC. The
@@ -343,6 +361,10 @@ MTLD3D9Texture::dropMirror() {
   // cap there returns it to the OS when the pool is over budget).
   for (auto &level : m_levels)
     level->clearMirrorPatch();
+  if (m_retainedMirrorBytes) {
+    retainedMirrorBytes.fetch_sub(m_retainedMirrorBytes, std::memory_order_relaxed);
+    m_retainedMirrorBytes = 0;
+  }
   const size_t mirror_bytes = m_mirrorOffsets.empty() ? 0u : m_mirrorOffsets.back();
   m_device->releaseBufferBacking(std::move(m_mirrorBuffer), m_mirrorBacking, /*gpu_address=*/0, mirror_bytes);
   m_mirrorBacking = nullptr;
@@ -364,6 +386,24 @@ MTLD3D9Texture::noteLevelUploaded(uint32_t level) {
     // push it. A NO_DIRTY_UPDATE Unlock skips the eager upload, so it never
     // reaches here and the bit (if set) stays for the sweep.
     m_needs_upload_mask &= ~(1u << level);
+  }
+  if (m_uploaded_mask == m_all_levels_mask && smallMirrorRetentionEnabled()) {
+    if (m_retainedMirrorBytes)
+      return;
+    const size_t bytes = m_mirrorOffsets.empty() ? 0 : m_mirrorOffsets.back();
+    // Sole-copy compressed mirrors already have to remain resident, so do not
+    // charge those against this optional cache. No new allocation is made.
+    if (mirrorIsSoleCopy(m_device, m_format))
+      return;
+    if (bytes && bytes <= 256u * 1024u) {
+      size_t used = retainedMirrorBytes.load(std::memory_order_relaxed);
+      while (used <= kMirrorRetentionBudget - bytes) {
+        if (retainedMirrorBytes.compare_exchange_weak(used, used + bytes, std::memory_order_relaxed)) {
+          m_retainedMirrorBytes = bytes;
+          return;
+        }
+      }
+    }
   }
   if (m_uploaded_mask == m_all_levels_mask && m_mirror_download_count <= kMirrorReadEvictThreshold)
     dropMirror();
@@ -559,6 +599,8 @@ MTLD3D9Texture::evictManagedMirror() {
 }
 
 MTLD3D9Texture::~MTLD3D9Texture() {
+  if (m_retainedMirrorBytes)
+    retainedMirrorBytes.fetch_sub(m_retainedMirrorBytes, std::memory_order_relaxed);
   // Tear down per-level surfaces first so the GPU stops sampling
   // before we drop the underlying allocations.
   m_levels.clear();

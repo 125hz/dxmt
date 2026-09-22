@@ -283,6 +283,7 @@ private:
   uint32_t m_uploaded_mask = 0;
   uint32_t m_mirror_stale_mask = 0;
   uint32_t m_mirror_download_count = 0;
+  size_t m_retainedMirrorBytes = 0;
   // Deferred-upload bitset (see the sweepManagedUpload / hasPendingManagedUpload
   // block above): one bit per mip level that the app has written (or that create
   // / EvictManagedResources marked) but that has not been pushed to the Metal

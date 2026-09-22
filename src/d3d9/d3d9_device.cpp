@@ -1596,6 +1596,22 @@ MTLD3D9Device::waitForGpuOrDeviceError(uint64_t value) {
 }
 
 void
+MTLD3D9Device::noteReadback(unsigned kind, const D3DSURFACE_DESC &desc) {
+  static const bool enabled = env::getEnvVar("DXMT_D9_READBACK_STATS") != "0";
+  if (!enabled)
+    return;
+  ++m_readbackKinds[std::min(kind, 3u)];
+  m_readbackBytes += uint64_t(D3DFormatMetalTransferPitch(desc.Format, desc.Width)) *
+      D3DFormatMetalTransferRows(desc.Format, desc.Height);
+  if (++m_readbackCount <= 8 || !(m_readbackCount % 512))
+    Logger::warn(str::format("[readback-detail] ml1180 total=", m_readbackCount,
+        " managed=", m_readbackKinds[0], " default=", m_readbackKinds[1],
+        " target=", m_readbackKinds[2], " front=", m_readbackKinds[3],
+        " bytes=", m_readbackBytes, " last=", desc.Width, "x", desc.Height,
+        " format=", uint32_t(desc.Format), " usage=", desc.Usage, " kind=", kind));
+}
+
+void
 MTLD3D9Device::readbackSurfaceMirror(MTLD3D9Surface *surface) {
   // Local pool for the same reason as GetRenderTargetData: the commit
   // and wait below go through autoreleased Metal selectors and wine's
@@ -1672,6 +1688,7 @@ MTLD3D9Device::readbackSurfaceMirror(MTLD3D9Surface *surface) {
   // right after this returns. Wait for the chunk's encode AND the
   // GPU-side retirement, then copy the block into the mirror.
   uint64_t seq = m_dxmtQueue->CurrentSeqId();
+  noteReadback(desc.Pool == D3DPOOL_MANAGED ? 0 : 1, desc);
   commitCurrentChunkTimed(3);
   m_dxmtQueue->WaitCPUFence(seq);
   if (!waitForGpuOrDeviceError(signal_seq))
@@ -4815,6 +4832,7 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
     // returning. m_currentCmdSeq was bumped after posting, so the chunk's
     // signal target is the pre-bump value.
     uint64_t seq = m_dxmtQueue->CurrentSeqId();
+    noteReadback(2, sd);
     commitCurrentChunkTimed(3);
     m_dxmtQueue->WaitCPUFence(seq);
     if (!waitForGpuOrDeviceError(signal_seq))
@@ -4888,6 +4906,7 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
   refreshSignaledAndTrimRings();
 
   uint64_t seq = m_dxmtQueue->CurrentSeqId();
+  noteReadback(2, sd);
   commitCurrentChunkTimed(3);
   m_dxmtQueue->WaitCPUFence(seq);
   if (!waitForGpuOrDeviceError(signal_seq))
@@ -5042,6 +5061,7 @@ MTLD3D9Device::frontBufferReadback(MTLD3D9SwapChain *chain, IDirect3DSurface9 *p
   refreshSignaledAndTrimRings();
 
   uint64_t seq = m_dxmtQueue->CurrentSeqId();
+  noteReadback(3, sd);
   commitCurrentChunkTimed(3);
   m_dxmtQueue->WaitCPUFence(seq);
   if (!waitForGpuOrDeviceError(signal_seq))
