@@ -162,9 +162,46 @@ static void wmtr_init(void) {
     setsockopt(wmtr_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     setsockopt(wmtr_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     wmtr_mode = 1;   /* set before the auth call so the socket is usable */
-    if (wmtr_call(RM_OP_PING, tok, (uint32_t)strlen(tok), 0, 0, 0) != RM_OK) {
-        fprintf(stderr, "[wmt-remote] authentication rejected -- staying local\n");
-        close(wmtr_fd); wmtr_fd = -1; wmtr_mode = 0; return;
+    {
+        /* ml1022: DISTINGUISH A REJECTED TOKEN FROM A TIMEOUT, AND SAY SO LOUDLY.
+         *
+         * This printed "authentication rejected -- staying local" for ANY
+         * non-RM_OK ping, including a 30-second transport timeout, and then
+         * silently rendered locally for the whole session. That cost a run: the
+         * guest quietly used the local paravirtual device (which reports NO
+         * Metal family at all, so Apple's driver later asserted) while the stale
+         * host log still showed the PREVIOUS session's frames -- and the two
+         * together read exactly like a successful remote run.
+         *
+         * The daemon serves ONE connection at a time, so a previous stuck
+         * session lets a second TCP connect succeed in the backlog and then
+         * never answer. That is a transport timeout, not a bad token, and the
+         * two need different responses from whoever reads the log.
+         *
+         * Falling back is still the behaviour (a hard failure here would need a
+         * failed-backend state threaded through device creation, which this
+         * header cannot do), but it is now IMPOSSIBLE to miss. */
+        int rc = (int)wmtr_call(RM_OP_PING, tok, (uint32_t)strlen(tok), 0, 0, 0);
+        if (rc != RM_OK) {
+            /* The daemon rejects a bad token by CLOSING WITHOUT REPLYING
+             * (authenticate() returns 0 and never calls reply), so from here a
+             * wrong token and a daemon too busy to answer look identical. Say
+             * that, rather than asserting "authentication rejected" as the old
+             * message did -- it sent me looking for a token mismatch when the
+             * real cause was a 30-second timeout against an occupied daemon. */
+            const char *why = "no reply -- either the token is wrong OR the daemon is busy/stuck "
+                              "(it serves ONE connection at a time)";
+            fprintf(stderr,
+                "[wmt-remote] ml1022 ================ REMOTE METAL NOT AVAILABLE ================\n"
+                "[wmt-remote] ml1022 %s:%d -- %s (ping rc=%d)\n"
+                "[wmt-remote] ml1022 FALLING BACK TO LOCAL METAL. Remote was explicitly requested,\n"
+                "[wmt-remote] ml1022 so this run is NOT a valid remote-mode test: the local device\n"
+                "[wmt-remote] ml1022 reports no Metal family and behaves differently. Any host log\n"
+                "[wmt-remote] ml1022 you read alongside it belongs to a PREVIOUS session.\n"
+                "[wmt-remote] ml1022 ============================================================\n",
+                host, RM_PORT, why, rc);
+            close(wmtr_fd); wmtr_fd = -1; wmtr_mode = 0; return;
+        }
     }
     fprintf(stderr, "[wmt-remote] ml762 REMOTE MODE via %s:%d -- no local Metal objects "
                     "will be created in this process\n", host, RM_PORT);

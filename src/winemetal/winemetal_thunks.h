@@ -83,6 +83,24 @@ struct unixcall_mtldevice_newdepthstencilstate {
   obj_handle_t ret;
 };
 
+struct unixcall_mtldevice_heaptexturesizealign {   /* ml1072 */
+  obj_handle_t device;
+  struct WMTMemoryPointer info;
+  uint64_t ret_size;
+  uint64_t ret_align;
+};
+struct unixcall_mtldevice_newplacementheap {
+  obj_handle_t device;
+  uint64_t size;
+  uint64_t options;
+  obj_handle_t ret;
+};
+struct unixcall_mtlheap_newtextureatoffset {
+  obj_handle_t heap;
+  struct WMTMemoryPointer info;
+  uint64_t offset;
+  obj_handle_t ret;
+};
 struct unixcall_mtldevice_newtexture {
   obj_handle_t device;
   struct WMTMemoryPointer info;

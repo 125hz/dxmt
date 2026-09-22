@@ -1,7 +1,10 @@
 #include <stdatomic.h>
+#include "../../../../../build/madeira_cfg.h"   /* ml1095: one config file */
 #include <sys/mman.h>
 #include <mach/vm_statistics.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <stdlib.h>
 #include <dlfcn.h>
@@ -134,6 +137,95 @@ _MTLCopyAllDevices(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* ml1042: THE VIDEO MEMORY BUDGET IS WHAT THIS PROCESS CAN AFFORD, NOT WHAT THE
+ * GPU COULD ADDRESS.
+ *
+ * Everything DXGI tells an application about video memory (adapter
+ * DedicatedVideoMemory, QueryVideoMemoryInfo.Budget) comes from this one number,
+ * and it was Metal's recommendedMaxWorkingSetSize -- on a 12GB phone, most of
+ * RAM. An engine budgets system RAM and video RAM as two separate pools: it
+ * filled the 4GB of RAM we report (guest band 4070MB dirty) AND streamed
+ * textures toward a multi-GB "VRAM" target (IOAccelerator 1983MB and climbing).
+ * On this device those are the SAME pool, and the process has one limit. The
+ * first run to reach the 3D benchmark sat at 8186MB with 1.5GB in the
+ * compressor -- ~2 FPS, scene never finished streaming -- and was jetsammed.
+ *
+ * So: budget = process limit - the RAM we let the guest believe it has - what
+ * our own runtime costs (JIT pool, FEX, Wine, host: ~2.5GB measured), floored at
+ * 1GB, never above what Metal recommends. os_proc_available_memory() +
+ * phys_footprint gives the real limit, including the Game Mode increase.
+ * Documents/madeira-vram-mb.txt overrides the result outright. */
+#include <os/proc.h>
+#include <mach/mach.h>
+static uint64_t madeira_ml1042_video_budget(uint64_t metal_recommended);
+/* ml1075: DYNAMIC BUDGET. The number above is a one-off: the game read it once
+ * and then grew its heap through a cutscene until jetsam (ph-rdr42: guest heap
+ * 2.3 -> 4.0 GB, footprint 4.7 -> 7.9 GB, killed at 8.19). On Windows, DXGI's
+ * budget MOVES under memory pressure and RAGE trims its texture pool when it
+ * shrinks. So: once the process passes a high-water mark, shrink the advertised
+ * budget 1:1 with the excess, floored at 768 MB, recomputed at most every 250 ms,
+ * and count the queries -- if the count stays at one, the game does not poll and
+ * this cannot help (the budget-change EVENT would be next). */
+static uint64_t madeira_ml1075_dynamic_budget(uint64_t base) {
+  static uint64_t last_ns, last_budget, last_logged; static unsigned long calls;
+  struct timespec ts; uint64_t now;
+  calls++;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  now = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+  if (last_budget && now - last_ns < 250000000ull) return last_budget;
+  last_ns = now;
+  {
+    task_vm_info_data_t vmi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+    uint64_t foot = 0, limit, high, budget = base;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &cnt) == KERN_SUCCESS) foot = vmi.phys_footprint;
+    limit = (uint64_t)os_proc_available_memory() + foot;
+    /* ml1103: madeira.cfg vram-trim-mb = distance below the kill line where the
+     * trim starts (default 1536, the ml1075 value); 0 = never trim. ph-rdr56:
+     * raising vram-mb to 3072 doubled the snow-scene frame rate, but in the city
+     * the footprint reached 7.1 GB, this trim cut the budget to 2625 MB, and the
+     * game went back to evicting and re-streaming (the pop-in). */
+    { static long long trim_mb = -1; if (trim_mb < 0) { trim_mb = madeira_cfg_int("vram-trim-mb", 1536); if (trim_mb < 0) trim_mb = 1536;
+        fprintf(stderr, "[wmt] ml1103 video budget trim starts %lld MB below the kill line (madeira.cfg vram-trim-mb; 0 = never)\n", trim_mb); }
+      high = trim_mb ? (limit > ((uint64_t)trim_mb << 20) ? limit - ((uint64_t)trim_mb << 20) : 0) : ~0ull; }
+    if (foot > high) budget = base > foot - high ? base - (foot - high) : 0;
+    if (budget < (768ull << 20)) budget = 768ull << 20;
+    if (budget > base) budget = base;
+    if (!last_logged || (last_logged > budget ? last_logged - budget : budget - last_logged) >= (64ull << 20) || (calls % 5000) == 0) {
+      fprintf(stderr, "[wmt] ml1075 video budget now %llu MB (base %llu, footprint %llu of %llu MB; %lu queries so far)\n",
+              (unsigned long long)(budget >> 20), (unsigned long long)(base >> 20), (unsigned long long)(foot >> 20),
+              (unsigned long long)(limit >> 20), calls);
+      last_logged = budget;
+    }
+    last_budget = budget;
+    return budget;
+  }
+}
+static uint64_t madeira_ml1042_video_budget(uint64_t metal_recommended) {
+  static uint64_t cached;
+  if (cached) return madeira_ml1075_dynamic_budget(cached);
+
+  uint64_t budget = 0;
+  { long long mb = madeira_cfg_int("vram-mb", 0);   /* ml1095: madeira.cfg vram-mb = N */
+    if (mb >= 256) budget = (uint64_t)mb << 20; }
+  uint64_t limit = 0, foot = 0;
+  if (!budget) {
+    task_vm_info_data_t vmi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &cnt) == KERN_SUCCESS) foot = vmi.phys_footprint;
+    limit = (uint64_t)os_proc_available_memory() + foot;
+    const uint64_t guest_ram = 4096ull << 20;      /* what ml992 lets the guest see */
+    const uint64_t overhead  = 2560ull << 20;      /* JIT pool + FEX + Wine + host, measured */
+    budget = limit > guest_ram + overhead ? limit - guest_ram - overhead : 0;
+    if (budget < (1024ull << 20)) budget = 1024ull << 20;
+  }
+  if (metal_recommended && budget > metal_recommended) budget = metal_recommended;
+  cached = budget;
+  fprintf(stderr, "[wmt] ml1042 video memory budget = %llu MB (process limit %llu MB, footprint now %llu MB, "
+                  "Metal recommends %llu MB)\n",
+          (unsigned long long)(budget >> 20), (unsigned long long)(limit >> 20),
+          (unsigned long long)(foot >> 20), (unsigned long long)(metal_recommended >> 20));
+  return madeira_ml1075_dynamic_budget(cached);
+}
+
 static NTSTATUS
 _MTLDevice_recommendedMaxWorkingSetSize(void *obj) {
   struct unixcall_generic_obj_uint64_ret *params = obj;
@@ -143,7 +235,7 @@ _MTLDevice_recommendedMaxWorkingSetSize(void *obj) {
     params->ret = (wmtr_call(RM_OP_DEVICE_MAX_WORKING_SET, &a, sizeof a, &r, sizeof r, 0) == RM_OK) ? r.value : 0;
     return STATUS_SUCCESS;
   }
-  params->ret = [(id<MTLDevice>)params->handle recommendedMaxWorkingSetSize];
+  params->ret = madeira_ml1042_video_budget([(id<MTLDevice>)params->handle recommendedMaxWorkingSetSize]);
   return STATUS_SUCCESS;
 }
 
@@ -1692,8 +1784,12 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
     case WMTBlitCommandCopyFromTextureToBuffer: {
       struct wmtcmd_blit_copy_from_texture_to_buffer *body = (struct wmtcmd_blit_copy_from_texture_to_buffer *)next;
       id<MTLTexture> src = (id<MTLTexture>)body->src;
-      /* iOS-Madeira: skip BC-pitch readback to remapped RGBA8 textures. */
-      if (!texture_upload_pitch_ok(src, body->size.width, body->bytes_per_row))
+      /* iOS-Madeira: skip BC-pitch readback to remapped RGBA8 textures.
+       * ml1102: not for an ASPECT copy -- a depth or stencil readback of a
+       * Depth32Float_Stencil8 texture is 4 or 1 bytes per pixel, not the
+       * combined format's, and this check silently dropped every depth capture
+       * (all-zero DepthTarget files in ph-rdr55). */
+      if (!body->options && !texture_upload_pitch_ok(src, body->size.width, body->bytes_per_row))
         break;
       [encoder copyFromTexture:src
                        sourceSlice:body->slice
@@ -1703,7 +1799,8 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
                           toBuffer:(id<MTLBuffer>)body->dst
                  destinationOffset:body->offset
             destinationBytesPerRow:body->bytes_per_row
-          destinationBytesPerImage:body->bytes_per_image];
+          destinationBytesPerImage:body->bytes_per_image
+                           options:(MTLBlitOption)body->options];   /* ml1098 */
       break;
     }
     case WMTBlitCommandCopyFromTextureToTexture: {
@@ -4300,6 +4397,68 @@ static NTSTATUS _MTLResidencySet_addAllocation_wow64(void *args) { (void)args; r
 static NTSTATUS _MTLResidencySet_commit_wow64(void *args) { (void)args; return STATUS_NOT_IMPLEMENTED; }
 static NTSTATUS _MTLCommandQueue_addResidencySet_wow64(void *args) { (void)args; return STATUS_NOT_IMPLEMENTED; }
 static NTSTATUS _MTLDevice_newGeometryEmulationPipelineState_wow64(void *args) { (void)args; return STATUS_NOT_IMPLEMENTED; }
+static NTSTATUS _MTLResidencySet_removeAllocation_wow64(void *args) { (void)args; return STATUS_NOT_IMPLEMENTED; }
+static NTSTATUS _MTLDevice_heapTextureSizeAndAlign_wow64(void *args) { (void)args; return STATUS_NOT_IMPLEMENTED; }
+static NTSTATUS _MTLDevice_newPlacementHeap_wow64(void *args) { (void)args; return STATUS_NOT_IMPLEMENTED; }
+static NTSTATUS _MTLHeap_newTextureAtOffset_wow64(void *args) { (void)args; return STATUS_NOT_IMPLEMENTED; }
+
+/* ml1098: runtime control (winemetal.h, struct madeira_ctl_args). */
+static volatile int g_madeira_capture_req;
+void madeira_capture_request(int frames) {   /* called from the app's UI */
+  __sync_fetch_and_add(&g_madeira_capture_req, frames > 0 ? frames : 1);
+  fprintf(stderr, "[capture] ml1098 UI requested %d frame(s)\n", frames);
+}
+static NTSTATUS _madeira_ctl(void *args) {
+  struct madeira_ctl_args *a = args;
+  if (!a) return STATUS_SUCCESS;
+  a->ret = 0;
+  switch (a->op) {
+  case 0: {
+    int n;
+    do { n = g_madeira_capture_req; } while (n && !__sync_bool_compare_and_swap(&g_madeira_capture_req, n, 0));
+    a->ret = (uint32_t)n;
+    break;
+  }
+  case 1: {
+    const char *docs = getenv("MADEIRA_DOCS_DIR");
+    char path[1400];
+    int fd;
+    if (!docs || !*docs || !a->name[0] || !a->ptr) break;
+    snprintf(path, sizeof path, "%s/capture", docs);
+    mkdir(path, 0755);
+    snprintf(path, sizeof path, "%s/capture/%s", docs, a->name);
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) { fprintf(stderr, "[capture] ml1098 cannot create %s: %s\n", path, strerror(errno)); break; }
+    {
+      const unsigned char *p = (const unsigned char *)(uintptr_t)a->ptr;
+      uint64_t left = a->len; int ok = 1;
+      while (left) { ssize_t w = write(fd, p, left > (1u << 20) ? (1u << 20) : (size_t)left); if (w <= 0) { ok = 0; break; } p += w; left -= (uint64_t)w; }
+      close(fd);
+      a->ret = ok ? 1u : 0u;
+    }
+    break;
+  }
+  case 3: {   /* ml1108: GPU start/end of a COMPLETED command buffer (seconds, CACurrentMediaTime base) */
+    struct { uint64_t cb; double start, end; } *t = (void *)(uintptr_t)a->ptr;
+    if (!t || !t->cb || wmtr_enabled()) break;
+    t->start = [(id<MTLCommandBuffer>)(uintptr_t)t->cb GPUStartTime];
+    t->end = [(id<MTLCommandBuffer>)(uintptr_t)t->cb GPUEndTime];
+    a->ret = 1;
+    break;
+  }
+  case 2: {
+    char v[512];
+    if (madeira_cfg_get(a->name, v, sizeof v)) {
+      if (a->ptr && a->len) { strncpy((char *)(uintptr_t)a->ptr, v, (size_t)a->len - 1); ((char *)(uintptr_t)a->ptr)[a->len - 1] = 0; }
+      a->ret = 1;
+    }
+    break;
+  }
+  default: break;
+  }
+  return STATUS_SUCCESS;
+}
+static NTSTATUS _madeira_ctl_wow64(void *args) { (void)args; return STATUS_NOT_IMPLEMENTED; }
 
 #if TARGET_OS_IOS
 /* On iOS we statically link DXMT's unix side into the host app (Madeira.app),
@@ -4345,6 +4504,67 @@ _MTLResidencySet_addAllocation(void *obj) {
   }
   if (@available(iOS 18.0, macOS 15.0, *))
     [(id<MTLResidencySet>)params->handle addAllocation:(id<MTLAllocation>)params->arg];
+  return STATUS_SUCCESS;
+}
+
+/* ml1050: the set RETAINS what it holds, and the D3D12 runtime only ever added.
+ * Every texture, buffer and view the application destroyed therefore stayed
+ * allocated for the rest of the run. Removal is staged until the next commit. */
+static NTSTATUS
+_MTLResidencySet_removeAllocation(void *obj) {
+  struct unixcall_generic_obj_obj_noret *params = obj;
+  if (wmtr_enabled()) return STATUS_SUCCESS;   /* the remote host owns its own set */
+  if (@available(iOS 18.0, macOS 15.0, *))
+    [(id<MTLResidencySet>)params->handle removeAllocation:(id<MTLAllocation>)params->arg];
+  return STATUS_SUCCESS;
+}
+
+/* ml1072: placement heaps for the D3D12 runtime's small-texture sub-allocator. */
+static NTSTATUS
+_MTLDevice_heapTextureSizeAndAlign(void *obj) {
+  struct unixcall_mtldevice_heaptexturesizealign *params = obj;
+  params->ret_size = 0; params->ret_align = 0;
+  if (wmtr_enabled()) return STATUS_SUCCESS;
+  {
+    MTLTextureDescriptor *desc = [[MTLTextureDescriptor alloc] init];
+    fill_texture_descriptor(desc, params->info.ptr);
+    MTLSizeAndAlign sa = [(id<MTLDevice>)params->device heapTextureSizeAndAlignWithDescriptor:desc];
+    params->ret_size = sa.size; params->ret_align = sa.align;
+    [desc release];
+  }
+  return STATUS_SUCCESS;
+}
+static NTSTATUS
+_MTLDevice_newPlacementHeap(void *obj) {
+  struct unixcall_mtldevice_newplacementheap *params = obj;
+  params->ret = 0;
+  if (wmtr_enabled()) return STATUS_SUCCESS;
+  {
+    MTLHeapDescriptor *hd = [[MTLHeapDescriptor alloc] init];
+    hd.type = MTLHeapTypePlacement;
+    hd.size = params->size;
+    hd.storageMode = ((params->options & 0x30) == WMTResourceStorageModePrivate) ? MTLStorageModePrivate : MTLStorageModeShared;
+    hd.hazardTrackingMode = MTLHazardTrackingModeTracked;
+    params->ret = (obj_handle_t)[(id<MTLDevice>)params->device newHeapWithDescriptor:hd];
+    [hd release];
+  }
+  return STATUS_SUCCESS;
+}
+static NTSTATUS
+_MTLHeap_newTextureAtOffset(void *obj) {
+  struct unixcall_mtlheap_newtextureatoffset *params = obj;
+  struct WMTTextureInfo *info = params->info.ptr;
+  params->ret = 0;
+  if (wmtr_enabled()) return STATUS_SUCCESS;
+  {
+    MTLTextureDescriptor *desc = [[MTLTextureDescriptor alloc] init];
+    fill_texture_descriptor(desc, info);
+    id<MTLTexture> t = [(id<MTLHeap>)params->heap newTextureWithDescriptor:desc offset:params->offset];
+    params->ret = (obj_handle_t)t;
+    info->gpu_resource_id = t ? [t gpuResourceID]._impl : 0;
+    info->mach_port = 0;
+    [desc release];
+  }
   return STATUS_SUCCESS;
 }
 
@@ -4551,6 +4771,11 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLResidencySet_commit,
     &_MTLCommandQueue_addResidencySet,
     &_MTLDevice_newGeometryEmulationPipelineState,
+    &_MTLResidencySet_removeAllocation,
+    &_MTLDevice_heapTextureSizeAndAlign,
+    &_MTLDevice_newPlacementHeap,
+    &_MTLHeap_newTextureAtOffset,
+    &_madeira_ctl,   /* ml1098 */
 };
 
 #ifndef DXMT_NATIVE
@@ -4689,5 +4914,10 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLResidencySet_commit_wow64,
     &_MTLCommandQueue_addResidencySet_wow64,
     &_MTLDevice_newGeometryEmulationPipelineState_wow64,
+    &_MTLResidencySet_removeAllocation_wow64,
+    &_MTLDevice_heapTextureSizeAndAlign_wow64,
+    &_MTLDevice_newPlacementHeap_wow64,
+    &_MTLHeap_newTextureAtOffset_wow64,
+    &_madeira_ctl_wow64,
 };
 #endif

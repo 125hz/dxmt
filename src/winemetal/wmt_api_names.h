@@ -3,7 +3,7 @@
 #ifndef WMT_API_NAMES_H
 #define WMT_API_NAMES_H
 
-#define WMT_API_COUNT 134
+#define WMT_API_COUNT 139
 
 static const char *const wmt_api_names[WMT_API_COUNT] = {
     "NSObject_retain",
@@ -140,6 +140,11 @@ static const char *const wmt_api_names[WMT_API_COUNT] = {
     "MTLResidencySet_commit",
     "MTLCommandQueue_addResidencySet",
     "MTLDevice_newGeometryEmulationPipelineState",
+    "MTLResidencySet_removeAllocation",
+    "MTLDevice_heapTextureSizeAndAlign",
+    "MTLDevice_newPlacementHeap",
+    "MTLHeap_newTextureAtOffset",
+    "madeira_ctl",
 };
 
 #endif

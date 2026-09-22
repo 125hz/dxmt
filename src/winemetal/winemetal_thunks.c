@@ -1219,3 +1219,45 @@ MTLDevice_newGeometryEmulationPipelineState(obj_handle_t device, const struct WM
     *err_out = params.ret_error;
   return params.ret_pso;
 }
+
+WINEMETAL_API void
+MTLResidencySet_removeAllocation(obj_handle_t set, obj_handle_t allocation) {
+  struct unixcall_generic_obj_obj_noret params;
+  params.handle = set;
+  params.arg = allocation;
+  UNIX_CALL(134, &params);
+}
+
+WINEMETAL_API void
+MTLDevice_heapTextureSizeAndAlign(obj_handle_t device, const struct WMTTextureInfo *info, uint64_t *size, uint64_t *align) {
+  struct unixcall_mtldevice_heaptexturesizealign params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.info, (void *)info);
+  params.ret_size = 0; params.ret_align = 0;
+  UNIX_CALL(135, &params);
+  *size = params.ret_size; *align = params.ret_align;
+}
+
+WINEMETAL_API obj_handle_t
+MTLDevice_newPlacementHeap(obj_handle_t device, uint64_t size, enum WMTResourceOptions options) {
+  struct unixcall_mtldevice_newplacementheap params;
+  params.device = device; params.size = size; params.options = options; params.ret = 0;
+  UNIX_CALL(136, &params);
+  return params.ret;
+}
+
+WINEMETAL_API obj_handle_t
+MTLHeap_newTextureAtOffset(obj_handle_t heap, struct WMTTextureInfo *info, uint64_t offset) {
+  struct unixcall_mtlheap_newtextureatoffset params;
+  params.heap = heap;
+  WMT_MEMPTR_SET(params.info, info);
+  params.offset = offset; params.ret = 0;
+  UNIX_CALL(137, &params);
+  return params.ret;
+}
+
+/* ml1098: slot 138, see winemetal.h. */
+WINEMETAL_API void
+MadeiraCtl(struct madeira_ctl_args *args) {
+  UNIX_CALL(138, args);
+}

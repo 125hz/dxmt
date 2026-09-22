@@ -935,6 +935,8 @@ struct wmtcmd_blit_copy_from_texture_to_buffer {
   uint64_t offset;
   uint32_t bytes_per_row;
   uint32_t bytes_per_image;
+  uint32_t options;   /* ml1098: MTLBlitOption bits (1 = depth from depth/stencil, 2 = stencil from depth/stencil) */
+  uint32_t reserved2;
 };
 
 struct wmtcmd_blit_generate_mipmaps {
@@ -1895,6 +1897,29 @@ MTLDevice_newRenderPipelineStateVD(obj_handle_t device, const struct WMTRenderPi
 WINEMETAL_API obj_handle_t MTLDevice_newResidencySet(obj_handle_t device, uint64_t initial_capacity);
 WINEMETAL_API void MTLResidencySet_addAllocation(obj_handle_t set, obj_handle_t allocation);
 WINEMETAL_API void MTLResidencySet_commit(obj_handle_t set);
+/* ml1050: staged like addAllocation; takes effect at the next commit. */
+WINEMETAL_API void MTLResidencySet_removeAllocation(obj_handle_t set, obj_handle_t allocation);
+/* ml1072: placement heaps. size/align a texture would need inside a heap; a
+ * private placement heap; a texture placed at an offset in it. Remote mode
+ * returns 0 for all three (callers fall back to standalone allocations). */
+WINEMETAL_API void MTLDevice_heapTextureSizeAndAlign(obj_handle_t device, const struct WMTTextureInfo *info, uint64_t *size, uint64_t *align);
+WINEMETAL_API obj_handle_t MTLDevice_newPlacementHeap(obj_handle_t device, uint64_t size, enum WMTResourceOptions options);
+WINEMETAL_API obj_handle_t MTLHeap_newTextureAtOffset(obj_handle_t heap, struct WMTTextureInfo *info, uint64_t offset);
+
+/* ml1098: madeira runtime control, slot 138. A PE-side runtime has no reach
+ * into the app's sandbox; this is its one door. Ops:
+ *   0  capture poll: ret = frames requested from the UI since the last poll (cleared)
+ *   1  write file: Documents/capture/<name> from ptr/len; ret = 1 on success
+ *   2  config get: madeira.cfg value of key <name> copied into ptr/len (NUL-terminated); ret = 1 when set
+ * Local in both backends: it never touches a Metal object. */
+struct madeira_ctl_args {
+  uint32_t op;
+  uint32_t ret;
+  uint64_t ptr;
+  uint64_t len;
+  char name[160];
+};
+WINEMETAL_API void MadeiraCtl(struct madeira_ctl_args *args);
 WINEMETAL_API void MTLCommandQueue_addResidencySet(obj_handle_t queue, obj_handle_t set);
 
 /* ml927 (slot 133): a geometry-shader pipeline through the Metal Shader
