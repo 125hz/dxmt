@@ -559,6 +559,12 @@ MTLD3D9Device::MTLD3D9Device(
         // opt into the DXMT_DEBUG single-writer assertion.
         /*single_writer=*/true
     ) {
+  m_batchScenes = env::getEnvVar("DXMT_D9_SCENE_BATCH") != "0";
+  const auto filtering = env::getEnvVar("DXMT_D9_ANISO_LIMIT");
+  if (filtering == "1" || filtering == "2" || filtering == "4" || filtering == "8")
+    m_anisotropyLimit = static_cast<uint32_t>(std::stoi(filtering));
+  Logger::warn(str::format("[d9-batching] ml1250 enabled=", m_batchScenes,
+                          " max-ops=256 anisotropy-limit=", m_anisotropyLimit));
   // Match Windows D3D9 float behaviour on the app's creating thread before any
   // device work; D3DCREATE_FPU_PRESERVE opts out (wined3d / DXVK gate the same).
   if (!(behaviorFlags & D3DCREATE_FPU_PRESERVE))
@@ -1012,7 +1018,9 @@ MTLD3D9Device::commitCurrentChunkTimed(unsigned reason) {
 // is unconditional even on factory failure so a repeatedly bad
 // descriptor doesn't burn a Metal round-trip every draw.
 Rc<Sampler>
-MTLD3D9Device::getOrCreateSampler(const WMTSamplerInfo &info) {
+MTLD3D9Device::getOrCreateSampler(const WMTSamplerInfo &requested) {
+  auto info = requested;
+  info.max_anisotroy = std::min(info.max_anisotroy, m_anisotropyLimit);
   SamplerKey key = samplerKeyFromInfo(info);
   if (auto it = m_samplerCache.find(key); it != m_samplerCache.end())
     return it->second;
@@ -6109,8 +6117,8 @@ MTLD3D9Device::GetDepthStencilSurface(IDirect3DSurface9 **ppZStencilSurface) {
 // BeginScene / EndScene: pair-bracketed scene marker. DXVK
 // (d3d9_device.cpp) and wined3d (device.c) both track an
 // in_scene flag and reject misnested calls with INVALIDCALL. The
-// bracket is also where DXVK fires an implicit-flush hint at EndScene;
-// EndScene drains the batch below, matching that hint.
+// bracket is not a GPU completion boundary. Small adjacent scenes may share
+// the recorded batch; Present and resource/query hazards still drain it.
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Device::BeginScene() {
   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Device_BeginScene);
@@ -6128,6 +6136,16 @@ MTLD3D9Device::EndScene() {
   if (!m_inScene)
     return D3DERR_INVALIDCALL;
   m_inScene = false;
+  // EndScene already only recorded work; it did not submit a command buffer.
+  // Retain small op streams so repeated scene markers do not reset the resolve
+  // cache, allocate fresh vectors and break otherwise compatible render passes.
+  // Bound retained work, and keep clear-only scenes on the original drain path.
+  if (m_batchScenes && !m_pendingOps.empty() && m_pendingOps.size() < 256) {
+    const auto count = ++m_batchedSceneEnds;
+    if (count <= 2 || !(count % 16384))
+      Logger::warn(str::format("[d9-batching] ml1250 retained-scene-ends=", count));
+    return D3D_OK;
+  }
   // Frame boundary. Drain queued batched draws onto a chunk first so
   // Present + downstream sync paths observe the frame's actual draws.
   // flushOpenWork() then drains a Clear the frame issued but no draw consumed,

@@ -1776,6 +1776,9 @@ private:
   // rejection only; the eventual flush hint at EndScene will hang off
   // the same flag.
   bool m_inScene = false;
+  bool m_batchScenes = true;
+  uint64_t m_batchedSceneEnds = 0;
+  uint32_t m_anisotropyLimit = 16;
 
   // D3D9 ClipStatus: vestigial occlusion-test bookkeeping from FFP.
   // Set/Get round-trip the struct; nothing else consumes it. wined3d
