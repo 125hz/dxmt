@@ -9814,6 +9814,19 @@ MTLD3D9Device::ResolveClusterState(
     pso_info.colors[i].pixel_format = fmt;
     const bool alpha_is_one = D3DFormatHasNoAlpha(rt->desc().Format);
     apply_blend_state_to_attachment(pso_info.colors[i], rs, rs[kColorWriteEnableRS[i]], dual_source, alpha_is_one);
+    // Disabled blending ignores all six operation/factor fields. Canonicalize
+    // before both hashing and collision checks to share the same Metal PSO.
+    static const bool canonical_blend = [] {
+      bool enabled = env::getEnvVar("DXMT_D9_CANONICAL_BLEND") != "0";
+      Logger::info(str::format("[pipeline-cache] ml1160 canonical-disabled-blend=", enabled));
+      return enabled;
+    }();
+    auto &blend = pso_info.colors[i];
+    if (canonical_blend && !blend.blending_enabled) {
+      blend.rgb_blend_operation = blend.alpha_blend_operation = WMTBlendOperationAdd;
+      blend.src_rgb_blend_factor = blend.src_alpha_blend_factor = WMTBlendFactorOne;
+      blend.dst_rgb_blend_factor = blend.dst_alpha_blend_factor = WMTBlendFactorZero;
+    }
   }
 
   uint64_t pso_key = 0xcbf29ce484222325ull;
@@ -10621,7 +10634,18 @@ MTLD3D9Device::FlushDrawBatch() {
             pso_ready = res.resolved_pso_task->GetDone();
           }
           if (!pso_ready) {
+            static const bool wait_stats = env::getEnvVar("DXMT_D9_PIPELINE_STATS") != "0";
+            const auto start = wait_stats ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             res.resolved_pso_task->Wait();
+            if (wait_stats) {
+              const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+              if (us >= 2000) {
+                static std::atomic<uint32_t> slow_waits{0};
+                const auto count = slow_waits.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (count <= 16 || !(count & (count - 1)))
+                  Logger::info(str::format("[pipeline-wait] ml1160 slow=", count, " wait-us=", us));
+              }
+            }
           }
           res.resolved_pso = res.resolved_pso_task->state().handle;
           if (res.resolved_pso == 0) {
