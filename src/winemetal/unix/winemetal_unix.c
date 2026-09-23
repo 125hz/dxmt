@@ -4446,6 +4446,18 @@ static NTSTATUS _madeira_ctl(void *args) {
     a->ret = 1;
     break;
   }
+  case 4: {   /* ml1128: probe role for the CALLING thread (runs on it); len = role char, ptr = Windows TID */
+    extern void ios_xp_set_role(int role, uint64_t wtid);
+    ios_xp_set_role((int)a->len, a->ptr);
+    a->ret = 1;
+    break;
+  }
+  case 5: {   /* ml1128: the PE counter block the probe samples */
+    extern volatile uint64_t ios_xp_pe_block, ios_xp_pe_len;
+    ios_xp_pe_len = a->len; ios_xp_pe_block = a->ptr;
+    a->ret = 1;
+    break;
+  }
   case 2: {
     char v[512];
     if (madeira_cfg_get(a->name, v, sizeof v)) {
