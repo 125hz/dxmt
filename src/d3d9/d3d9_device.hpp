@@ -298,6 +298,31 @@ public:
     m_renamedBytesSinceCommit += bytes;
   }
 
+  // MADEIRA ml1490: the same pressure from texture uploads, which stage their
+  // bytes in m_uploadRing. A ring block is recycled only once the command
+  // buffer that reads it retires, so a loading screen that uploads hundreds of
+  // MB between Presents grew the ring without bound (device census: staging
+  // ring 955 MB live in 83 blocks with 3 frees, the process pinned at its
+  // memory ceiling and the load crawling under compression). Commit once the
+  // threshold is staged, at the end of the upload call, and wait for the
+  // previous threshold's copies to retire before queueing another, so at most
+  // two are in flight however fast the CPU stages.
+  // DXMT_D9_UPLOAD_COMMIT_MB (default 64, 0 disables) sets the threshold.
+  uint64_t m_uploadedBytesSinceCommit = 0;
+  uint64_t m_uploadCommitSignal = 0;
+  uint64_t m_uploadCommits = 0;
+  uint64_t m_uploadCommitWaits = 0;
+
+  void
+  noteUploadBytes(uint64_t bytes) {
+    m_uploadedBytesSinceCommit += bytes;
+  }
+
+  // Call at a boundary where no draw is half recorded: the end of an upload
+  // API call (Unlock / UpdateTexture / UpdateSurface), never from the
+  // pre-draw managed sweep.
+  void settleUploadPressure();
+
   HRESULT STDMETHODCALLTYPE TestCooperativeLevel() override;
   UINT STDMETHODCALLTYPE GetAvailableTextureMem() override;
   HRESULT STDMETHODCALLTYPE EvictManagedResources() override;

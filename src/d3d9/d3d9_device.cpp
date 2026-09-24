@@ -1010,6 +1010,7 @@ MTLD3D9Device::commitCurrentChunkTimed(unsigned reason) {
   // The allocations renamed into this command buffer become recyclable once it
   // retires, so the pressure this counter tracks is now the next one's to carry.
   m_renamedBytesSinceCommit = 0;
+  m_uploadedBytesSinceCommit = 0;
 }
 
 // Sampler cache lookup. Builds the prefix key from the input info,
@@ -1589,6 +1590,8 @@ MTLD3D9Device::stageTextureUpload(
   op.tex_src_pitch = src_pitch;
   op.tex_bytes_per_image = bytes_per_image;
   QueueBlitOp(std::move(op));
+  // ml1490: counted here, settled by the caller at a safe boundary.
+  noteUploadBytes(total_bytes);
 }
 
 bool
@@ -3976,6 +3979,7 @@ MTLD3D9Device::UpdateSurface(
 ) {
   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Device_UpdateSurface);
   D9DeviceLock lock = LockDevice();
+  settleUploadPressure(); // ml1490, as in UpdateTexture
   if (!pSourceSurface || !pDestinationSurface)
     return D3DERR_INVALIDCALL;
   auto *src = static_cast<MTLD3D9Surface *>(pSourceSurface);
@@ -4146,6 +4150,9 @@ MTLD3D9Device::UpdateTexture(IDirect3DBaseTexture9 *pSourceTexture, IDirect3DBas
   // touches Metal APIs (texture view, fence access) that return
   // autoreleased handles, so create one here.
   auto pool = WMT::MakeAutoreleasePool();
+  // ml1490: settle what earlier calls staged, before anything is recorded; a
+  // run of UpdateTexture calls with nothing in between is then bounded too.
+  settleUploadPressure();
   if (!pSourceTexture || !pDestinationTexture)
     return D3DERR_INVALIDCALL;
   if (pSourceTexture == pDestinationTexture)
@@ -7801,6 +7808,9 @@ MTLD3D9Device::QueueBatchedDraw(BatchedDraw &&draw) {
   // that needs this.
   if (m_renamedBytesSinceCommit >= kRenameBytesBeforeImplicitCommit)
     forceFlushAndCommit();
+  // ml1490: managed textures uploaded by the pre-draw sweep are settled here,
+  // on the same boundary.
+  settleUploadPressure();
 }
 
 void
@@ -10888,6 +10898,42 @@ MTLD3D9Device::forceFlushAndCommit() {
   flushOpenWork();
   emitCmdbufTailSignal();
   commitCurrentChunkTimed(4);
+}
+
+void
+MTLD3D9Device::settleUploadPressure() {
+  static const uint64_t threshold = [] {
+    const std::string value = env::getEnvVar("DXMT_D9_UPLOAD_COMMIT_MB");
+    const uint64_t mb = value.empty() ? 64u : std::strtoull(value.c_str(), nullptr, 10);
+    Logger::warn(str::format("[d9-upload-commit] ml1490 threshold-mb=", mb, " (DXMT_D9_UPLOAD_COMMIT_MB=0 disables)"));
+    return mb << 20;
+  }();
+  if (!threshold || m_uploadedBytesSinceCommit < threshold)
+    return;
+  const uint64_t staged = m_uploadedBytesSinceCommit;
+  // The previous threshold's copies retire before another is queued behind
+  // them; without this a CPU that stages faster than the GPU copies still
+  // grows the ring, just in smaller steps.
+  bool waited = false;
+  if (m_uploadCommitSignal && m_completionEvent.signaledValue() < m_uploadCommitSignal) {
+    waited = true;
+    ++m_uploadCommitWaits;
+    waitForGpuOrDeviceError(m_uploadCommitSignal);
+  }
+  forceFlushAndCommit();
+  // emitCmdbufTailSignal signalled the pre-increment sequence.
+  m_uploadCommitSignal = m_currentCmdSeq - 1;
+  // Fold the event's progress in now instead of at the next throttled refresh,
+  // so the uploads that follow can already reuse the blocks that retired.
+  const uint64_t event_signalled = m_completionEvent.signaledValue();
+  uint64_t prev = m_cachedSignaled.load(std::memory_order_relaxed);
+  while (prev < event_signalled &&
+         !m_cachedSignaled.compare_exchange_weak(prev, event_signalled, std::memory_order_relaxed))
+    ;
+  m_uploadRing.free_blocks(m_cachedSignaled.load(std::memory_order_acquire));
+  if (++m_uploadCommits <= 4 || !(m_uploadCommits % 256))
+    Logger::warn(str::format("[d9-upload-commit] ml1490 commits=", m_uploadCommits, " waits=", m_uploadCommitWaits,
+                             " staged-mb=", staged >> 20, waited ? " (waited for the previous batch)" : ""));
 }
 
 void

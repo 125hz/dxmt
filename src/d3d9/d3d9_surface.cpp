@@ -758,6 +758,8 @@ MTLD3D9Surface::UnlockRect() {
   m_locked_readonly = false;
   m_locked_no_dirty_update = false;
   m_locked_x = m_locked_y = m_locked_w = m_locked_h = 0;
+  // ml1490: the lock is released and nothing is half recorded.
+  m_device->settleUploadPressure();
   return D3D_OK;
 }
 
