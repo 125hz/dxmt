@@ -294,6 +294,23 @@ static NTSTATUS _rmg_madeira_ctl(void *obj) {
   }
   return _madeira_ctl(obj);
 }
+static NTSTATUS _rmg_MTLDevice_heapBufferSizeAndAlign(void *obj) {
+  if (wmtr_enabled()) {
+    struct unixcall_mtldevice_heapbuffersizealign *p = obj;
+    p->ret_size = 0;   /* never hand back uninitialised stack */
+    p->ret_align = 0;   /* never hand back uninitialised stack */
+    return wmtr_unimplemented("MTLDevice_heapBufferSizeAndAlign");
+  }
+  return _MTLDevice_heapBufferSizeAndAlign(obj);
+}
+static NTSTATUS _rmg_MTLHeap_newBufferAtOffset(void *obj) {
+  if (wmtr_enabled()) {
+    struct unixcall_mtlheap_newbufferatoffset *p = obj;
+    p->ret = 0;   /* never hand back uninitialised stack */
+    return wmtr_unimplemented("MTLHeap_newBufferAtOffset");
+  }
+  return _MTLHeap_newBufferAtOffset(obj);
+}
 #ifndef DXMT_NATIVE
 static NTSTATUS _rmg_MTLCaptureManager_startCapture32(void *obj) {
   if (wmtr_enabled()) {

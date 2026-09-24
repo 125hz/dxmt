@@ -121,6 +121,75 @@ _NSObject_retain(NSObject **obj) {
 }
 
 static NTSTATUS
+_NSObject_release(NSObject **obj);
+/* ml1155: WHICH object did we free? A command buffer's completion crashes in
+ * objc_release of an already-freed object (IOGPUMetalCommandBufferStorageReset;
+ * ph-valley04/05/14): something we release is released once too often. Every
+ * release through here that drops the LAST reference is recorded (pointer and
+ * class, lock-free ring); the Mach fault handler looks the crashing pointer up
+ * (signal_arm64_ios.c ml1155), so the next crash names the object's class. */
+struct wmt_rel_rec { uintptr_t p; const char *cls; };
+static struct wmt_rel_rec g_wmt_rel[16384];
+static volatile uint64_t g_wmt_rel_n;
+__attribute__((visibility("default"))) const char *
+madeira_wmt_released_class(uintptr_t addr, uint64_t *releases_ago) {
+  uint64_t n = __atomic_load_n(&g_wmt_rel_n, __ATOMIC_RELAXED), i, lim = n > 16384 ? 16384 : n;
+  for (i = 0; i < lim; i++) {
+    const struct wmt_rel_rec *r = &g_wmt_rel[(n - 1 - i) & 16383];
+    if (r->p == addr) { if (releases_ago) *releases_ago = i; return r->cls; }
+  }
+  return NULL;
+}
+
+/* ml1156: the ml1155 answer was an AGXG19FamilyBuffer our release freed, then
+ * released again by a completing command buffer. A handle that is dead by the
+ * time an encoder binds it would do exactly that (Metal retains the corpse, the
+ * command buffer releases it at reset). So: remember every buffer our release
+ * frees, forget it when a new buffer is created at that address, and check
+ * every binding point; the first hits name the binding path. */
+#include <os/lock.h>
+#define WMT_FREED_SLOTS 65536
+static uintptr_t g_wmt_freed[WMT_FREED_SLOTS];
+static os_unfair_lock g_wmt_freed_lock = OS_UNFAIR_LOCK_INIT;
+static volatile long g_wmt_stale_hits;
+static inline unsigned wmt_freed_hash(uintptr_t p) { return (unsigned)((p >> 4) * 2654435761u) & (WMT_FREED_SLOTS - 1); }
+static void wmt_freed_set(uintptr_t p, int add) {
+  unsigned i, n;
+  if (!p) return;
+  os_unfair_lock_lock(&g_wmt_freed_lock);
+  for (i = wmt_freed_hash(p), n = 0; n < 64; n++, i = (i + 1) & (WMT_FREED_SLOTS - 1)) {
+    if (add) { if (g_wmt_freed[i] == p) break; if (g_wmt_freed[i] <= 1) { g_wmt_freed[i] = p; break; } }
+    else { if (g_wmt_freed[i] == p) { g_wmt_freed[i] = 1; break; } if (!g_wmt_freed[i]) break; }
+  }
+  os_unfair_lock_unlock(&g_wmt_freed_lock);
+}
+#define wmt_stale_check(o, w) wmt_stale_check_p((uintptr_t)(o), (w))
+static int wmt_stale_probe_on(void) {   /* ml1158: the ml1156 probe found its bug (ml1157); off unless madeira.cfg stale-probe = 1 */
+  static int on = -1;
+  if (on < 0) on = madeira_cfg_int("stale-probe", 0) ? 1 : 0;
+  return on;
+}
+static void wmt_stale_check_p(uintptr_t p, const char *where) {
+  const void *obj = (const void *)p;
+  if (!wmt_stale_probe_on()) return; unsigned i, n; int hit = 0;
+  if (!p) return;
+  os_unfair_lock_lock(&g_wmt_freed_lock);
+  for (i = wmt_freed_hash(p), n = 0; n < 64; n++, i = (i + 1) & (WMT_FREED_SLOTS - 1)) {
+    if (g_wmt_freed[i] == p) { hit = 1; break; }
+    if (!g_wmt_freed[i]) break;
+  }
+  os_unfair_lock_unlock(&g_wmt_freed_lock);
+  if (hit) {
+    long k = __atomic_add_fetch(&g_wmt_stale_hits, 1, __ATOMIC_RELAXED);
+    if (k <= 48 || (k & (k - 1)) == 0) {
+      uint64_t ago = 0; const char *cls = madeira_wmt_released_class(p, &ago);
+      fprintf(stderr, "[wmt] ml1156 STALE %s: %p was freed by our release (%s, %llu releases ago); hit #%ld\n",
+              where, obj, cls ? cls : "?", (unsigned long long)ago, k);
+    }
+  }
+}
+
+static NTSTATUS
 _NSObject_release(NSObject **obj) {
   if (wmtr_enabled() && RM_IS_REMOTE((uint64_t)(uintptr_t)*obj)) {
     struct rm_arg_handle a = { (uint64_t)(uintptr_t)*obj };
@@ -131,6 +200,11 @@ _NSObject_release(NSObject **obj) {
   /* ml820: a guest-local autorelease pool going away is the moment the host
    * objects it mirrored (command buffers, encoders) are released too. */
   if (wmtr_enabled() && [*obj isKindOfClass:[NSAutoreleasePool class]]) wmtr_pool_drain();
+  if (*obj && [*obj retainCount] == 1) {   /* ml1155: this release frees it */
+    uint64_t k = __atomic_fetch_add(&g_wmt_rel_n, 1, __ATOMIC_RELAXED) & 16383;
+    g_wmt_rel[k].p = (uintptr_t)*obj; g_wmt_rel[k].cls = object_getClassName(*obj);
+    if (wmt_stale_probe_on() && strstr(g_wmt_rel[k].cls, "Buffer")) wmt_freed_set((uintptr_t)*obj, 1);   /* ml1156 */
+  }
   [*obj release];
   return STATUS_SUCCESS;
 }
@@ -565,6 +639,7 @@ _MTLDevice_newBuffer(void *obj) {
   }
   params->ret = (obj_handle_t)buffer;
   info->gpu_address = [buffer gpuAddress];
+  if (wmt_stale_probe_on()) wmt_freed_set((uintptr_t)buffer, 0);   /* ml1156: a new buffer at a recycled address is alive */
   return STATUS_SUCCESS;
 }
 
@@ -921,6 +996,7 @@ _MTLBuffer_newTexture(void *obj) {
   MTLTextureDescriptor *desc = [[MTLTextureDescriptor alloc] init];
   fill_texture_descriptor(desc, info);
 
+  wmt_stale_check(buffer, "buffer newTexture view");   /* ml1156 */
   id<MTLTexture> ret = [buffer newTextureWithDescriptor:desc offset:params->offset bytesPerRow:params->bytes_per_row];
   params->ret = (obj_handle_t)ret;
   info->gpu_resource_id = [ret gpuResourceID]._impl;
@@ -1830,6 +1906,7 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
       break;
     case WMTBlitCommandCopyFromBufferToBuffer: {
       struct wmtcmd_blit_copy_from_buffer_to_buffer *body = (struct wmtcmd_blit_copy_from_buffer_to_buffer *)next;
+      wmt_stale_check(body->src, "blit copy src"); wmt_stale_check(body->dst, "blit copy dst");
       [encoder copyFromBuffer:(id<MTLBuffer>)body->src
                  sourceOffset:body->src_offset
                      toBuffer:(id<MTLBuffer>)body->dst
@@ -1843,6 +1920,7 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
       /* iOS-Madeira: skip BC-pitch uploads to remapped RGBA8 textures. */
       if (!texture_upload_pitch_ok(dst, body->size.width, body->bytes_per_row))
         break;
+      wmt_stale_check(body->src, "blit copy src"); wmt_stale_check(body->dst, "blit copy dst");
       [encoder copyFromBuffer:(id<MTLBuffer>)body->src
                  sourceOffset:body->src_offset
             sourceBytesPerRow:body->bytes_per_row
@@ -1917,6 +1995,7 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTBlitCommandFillBuffer: {
       struct wmtcmd_blit_fillbuffer *body = (struct wmtcmd_blit_fillbuffer *)next;
+      wmt_stale_check(body->buffer, "blit fill");
       [encoder fillBuffer:(id<MTLBuffer>)body->buffer range:NSMakeRange(body->offset, body->length) value:body->value];
       break;
     }
@@ -2030,6 +2109,7 @@ _MTLComputeCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTComputeCommandSetBuffer: {
       struct wmtcmd_compute_setbuffer *body = (struct wmtcmd_compute_setbuffer *)next;
+      wmt_stale_check(body->buffer, "compute setBuffer");
       [encoder setBuffer:(id<MTLBuffer>)body->buffer offset:body->offset atIndex:body->index];
       break;
     }
@@ -2040,6 +2120,7 @@ _MTLComputeCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTComputeCommandUseResource: {
       struct wmtcmd_compute_useresource *body = (struct wmtcmd_compute_useresource *)next;
+      wmt_stale_check(body->resource, "compute useResource");
       [encoder useResource:(id<MTLResource>)body->resource usage:(MTLResourceUsage)body->usage];
       break;
     }
@@ -2160,6 +2241,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
       break;
     case WMTRenderCommandUseResource: {
       struct wmtcmd_render_useresource *body = (struct wmtcmd_render_useresource *)next;
+      wmt_stale_check(body->resource, "render useResource");
       [encoder useResource:(id<MTLResource>)body->resource
                      usage:(MTLResourceUsage)body->usage
                     stages:(MTLRenderStages)body->stages];
@@ -2167,6 +2249,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandSetVertexBuffer: {
       struct wmtcmd_render_setbuffer *body = (struct wmtcmd_render_setbuffer *)next;
+      wmt_stale_check(body->buffer, "render setVertexBuffer");
       [encoder setVertexBuffer:(id<MTLBuffer>)body->buffer offset:body->offset atIndex:body->index];
       break;
     }
@@ -2177,6 +2260,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandSetFragmentBuffer: {
       struct wmtcmd_render_setbuffer *body = (struct wmtcmd_render_setbuffer *)next;
+      wmt_stale_check(body->buffer, "render setFragmentBuffer");
       [encoder setFragmentBuffer:(id<MTLBuffer>)body->buffer offset:body->offset atIndex:body->index];
       break;
     }
@@ -2187,6 +2271,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandSetMeshBuffer: {
       struct wmtcmd_render_setbuffer *body = (struct wmtcmd_render_setbuffer *)next;
+      wmt_stale_check(body->buffer, "render setMeshBuffer");
       [encoder setMeshBuffer:(id<MTLBuffer>)body->buffer offset:body->offset atIndex:body->index];
       break;
     }
@@ -2197,6 +2282,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandSetObjectBuffer: {
       struct wmtcmd_render_setbuffer *body = (struct wmtcmd_render_setbuffer *)next;
+      wmt_stale_check(body->buffer, "render setObjectBuffer");
       [encoder setObjectBuffer:(id<MTLBuffer>)body->buffer offset:body->offset atIndex:body->index];
       break;
     }
@@ -2298,6 +2384,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     case WMTRenderCommandDrawIndexed: {
       struct wmtcmd_render_draw_indexed *body = (struct wmtcmd_render_draw_indexed *)next;
       atomic_fetch_add_explicit(&g_madeira_draw_calls, 1, memory_order_relaxed);
+      wmt_stale_check(body->index_buffer, "draw index buffer");
       [encoder drawIndexedPrimitives:(MTLPrimitiveType)body->primitive_type
                           indexCount:body->index_count
                            indexType:(MTLIndexType)body->index_type
@@ -2311,6 +2398,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     case WMTRenderCommandDrawIndirect: {
       struct wmtcmd_render_draw_indirect *body = (struct wmtcmd_render_draw_indirect *)next;
       atomic_fetch_add_explicit(&g_madeira_draw_calls, 1, memory_order_relaxed);
+      wmt_stale_check(body->indirect_args_buffer, "draw indirect args");
       [encoder drawPrimitives:(MTLPrimitiveType)body->primitive_type
                 indirectBuffer:(id<MTLBuffer>)body->indirect_args_buffer
           indirectBufferOffset:body->indirect_args_offset];
@@ -2319,6 +2407,8 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     case WMTRenderCommandDrawIndexedIndirect: {
       struct wmtcmd_render_draw_indexed_indirect *body = (struct wmtcmd_render_draw_indexed_indirect *)next;
       atomic_fetch_add_explicit(&g_madeira_draw_calls, 1, memory_order_relaxed);
+      wmt_stale_check(body->index_buffer, "draw index buffer");
+      wmt_stale_check(body->indirect_args_buffer, "draw indirect args");
       [encoder drawIndexedPrimitives:(MTLPrimitiveType)body->primitive_type
                            indexType:(MTLIndexType)body->index_type
                          indexBuffer:(id<MTLBuffer>)body->index_buffer
@@ -2377,6 +2467,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandDXMTGeometryDrawIndexed: {
       struct wmtcmd_render_dxmt_geometry_draw_indexed *body = (struct wmtcmd_render_dxmt_geometry_draw_indexed *)next;
+      wmt_stale_check(body->index_buffer, "gs index buffer");
       [encoder setObjectBuffer:(id<MTLBuffer>)body->index_buffer offset:body->index_buffer_offset atIndex:20];
       [encoder setObjectBufferOffset:body->draw_arguments_offset atIndex:21];
       [encoder drawMeshThreadgroups:MTLSizeMake(body->warp_count, body->instance_count, 1)
@@ -2386,6 +2477,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandDXMTGeometryDrawIndirect: {
       struct wmtcmd_render_dxmt_geometry_draw_indirect *body = (struct wmtcmd_render_dxmt_geometry_draw_indirect *)next;
+      wmt_stale_check(body->indirect_args_buffer, "gs indirect args");
       [encoder setObjectBuffer:(id<MTLBuffer>)body->indirect_args_buffer offset:body->indirect_args_offset atIndex:21];
       [encoder drawMeshThreadgroupsWithIndirectBuffer:(id<MTLBuffer>)body->dispatch_args_buffer
                                  indirectBufferOffset:body->dispatch_args_offset
@@ -2397,7 +2489,9 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     case WMTRenderCommandDXMTGeometryDrawIndexedIndirect: {
       struct wmtcmd_render_dxmt_geometry_draw_indexed_indirect *body =
           (struct wmtcmd_render_dxmt_geometry_draw_indexed_indirect *)next;
+      wmt_stale_check(body->index_buffer, "gs index buffer");
       [encoder setObjectBuffer:(id<MTLBuffer>)body->index_buffer offset:body->index_buffer_offset atIndex:20];
+      wmt_stale_check(body->indirect_args_buffer, "gs indirect args");
       [encoder setObjectBuffer:(id<MTLBuffer>)body->indirect_args_buffer offset:body->indirect_args_offset atIndex:21];
       [encoder drawMeshThreadgroupsWithIndirectBuffer:(id<MTLBuffer>)body->dispatch_args_buffer
                                  indirectBufferOffset:body->dispatch_args_offset
@@ -2416,6 +2510,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     }
     case WMTRenderCommandDXMTTessellationMeshDrawIndexed: {
       struct wmtcmd_render_dxmt_tessellation_mesh_draw_indexed *body = (struct wmtcmd_render_dxmt_tessellation_mesh_draw_indexed *)next;
+      wmt_stale_check(body->index_buffer, "gs index buffer");
       [encoder setObjectBuffer:(id<MTLBuffer>)body->index_buffer offset:body->index_buffer_offset atIndex:20];
       [encoder setObjectBufferOffset:body->draw_arguments_offset atIndex:21];
       [encoder drawMeshThreadgroups:MTLSizeMake(body->patch_per_mesh_instance, body->instance_count, 1)
@@ -2426,6 +2521,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
 
     case WMTRenderCommandDXMTTessellationMeshDrawIndirect: {
       struct wmtcmd_render_dxmt_tessellation_mesh_draw_indirect *body = (struct wmtcmd_render_dxmt_tessellation_mesh_draw_indirect *)next;
+      wmt_stale_check(body->indirect_args_buffer, "gs indirect args");
       [encoder setObjectBuffer:(id<MTLBuffer>)body->indirect_args_buffer offset:body->indirect_args_offset atIndex:21];
       [encoder drawMeshThreadgroupsWithIndirectBuffer:(id<MTLBuffer>)body->dispatch_args_buffer
                                  indirectBufferOffset:body->dispatch_args_offset
@@ -2437,7 +2533,9 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     case WMTRenderCommandDXMTTessellationMeshDrawIndexedIndirect: {
       struct wmtcmd_render_dxmt_tessellation_mesh_draw_indexed_indirect *body =
           (struct wmtcmd_render_dxmt_tessellation_mesh_draw_indexed_indirect *)next;
+      wmt_stale_check(body->index_buffer, "gs index buffer");
       [encoder setObjectBuffer:(id<MTLBuffer>)body->index_buffer offset:body->index_buffer_offset atIndex:20];
+      wmt_stale_check(body->indirect_args_buffer, "gs indirect args");
       [encoder setObjectBuffer:(id<MTLBuffer>)body->indirect_args_buffer offset:body->indirect_args_offset atIndex:21];
       [encoder drawMeshThreadgroupsWithIndirectBuffer:(id<MTLBuffer>)body->dispatch_args_buffer
                                  indirectBufferOffset:body->dispatch_args_offset
@@ -5758,6 +5856,14 @@ void madeira_capture_request(int frames) {   /* called from the app's UI */
   __sync_fetch_and_add(&g_madeira_capture_req, frames > 0 ? frames : 1);
   fprintf(stderr, "[capture] ml1098 UI requested %d frame(s)\n", frames);
 }
+/* ml1136: live GPU encoder-sync mode from the overlay (0 = no request). The D3D12
+ * runtime polls it once per Present (op 6) and switches at a list boundary, so a
+ * mode can be A/B-tested in one spot instead of across runs. */
+static volatile int g_madeira_fence_req;
+void madeira_set_fence_mode(int mode) {
+  g_madeira_fence_req = mode;
+  fprintf(stderr, "[fence-mode] ml1136 UI requested fence-chain %d\n", mode);
+}
 static NTSTATUS _madeira_ctl(void *args) {
   struct madeira_ctl_args *a = args;
   if (!a) return STATUS_SUCCESS;
@@ -5802,6 +5908,9 @@ static NTSTATUS _madeira_ctl(void *args) {
     a->ret = 1;
     break;
   }
+  case 6:     /* ml1136: requested fence-chain mode (0 = none) */
+    a->ret = (uint32_t)g_madeira_fence_req;
+    break;
   case 5: {   /* ml1128: the PE counter block the probe samples */
     extern volatile uint64_t ios_xp_pe_block, ios_xp_pe_len;
     ios_xp_pe_len = a->len; ios_xp_pe_block = a->ptr;
@@ -5875,6 +5984,7 @@ _MTLResidencySet_addAllocation(void *obj) {
     return STATUS_SUCCESS;
   }
   if (@available(iOS 18.0, macOS 15.0, *))
+    wmt_stale_check(params->arg, "residency add");   /* ml1156 */
     [(id<MTLResidencySet>)params->handle addAllocation:(id<MTLAllocation>)params->arg];
   return STATUS_SUCCESS;
 }
@@ -5940,6 +6050,39 @@ _MTLHeap_newTextureAtOffset(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* ml1145: buffers placed in a placement heap (D3D12 placed resources in DEFAULT heaps). */
+static NTSTATUS
+_MTLDevice_heapBufferSizeAndAlign(void *obj) {
+  struct unixcall_mtldevice_heapbuffersizealign *params = obj;
+  params->ret_size = 0; params->ret_align = 0;
+  if (wmtr_enabled()) return STATUS_SUCCESS;
+  {
+    MTLSizeAndAlign sa = [(id<MTLDevice>)params->device heapBufferSizeAndAlignWithLength:params->length
+                                                                                  options:(MTLResourceOptions)params->options];
+    params->ret_size = sa.size; params->ret_align = sa.align;
+  }
+  return STATUS_SUCCESS;
+}
+static NTSTATUS
+_MTLHeap_newBufferAtOffset(void *obj) {
+  struct unixcall_mtlheap_newbufferatoffset *params = obj;
+  struct WMTBufferInfo *info = params->info.ptr;
+  params->ret = 0;
+  if (wmtr_enabled()) return STATUS_SUCCESS;
+  {
+    id<MTLBuffer> b = [(id<MTLHeap>)params->heap newBufferWithLength:info->length
+                                                             options:(MTLResourceOptions)info->options
+                                                              offset:params->offset];
+    params->ret = (obj_handle_t)b;
+    if (wmt_stale_probe_on()) wmt_freed_set((uintptr_t)b, 0);   /* ml1156 */
+    info->memory.ptr = (b && [b storageMode] != MTLStorageModePrivate) ? [b contents] : NULL;
+    info->gpu_address = b ? [b gpuAddress] : 0;
+  }
+  return STATUS_SUCCESS;
+}
+static NTSTATUS _MTLDevice_heapBufferSizeAndAlign_wow64(void *args) { (void)args; return STATUS_NOT_IMPLEMENTED; }
+static NTSTATUS _MTLHeap_newBufferAtOffset_wow64(void *args) { (void)args; return STATUS_NOT_IMPLEMENTED; }
+
 static NTSTATUS
 _MTLResidencySet_commit(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
@@ -5972,9 +6115,8 @@ _MTLCommandQueue_addResidencySet(void *obj) {
  * attachments cross as a WMTMeshRenderPipelineInfo and the libraries, names
  * and configuration as a WMTGeometryEmulationInfo right after it; the host
  * builds the functions (with their function constants and the linked stage-in
- * function) itself. Local backend: not provided -- every device this runtime
- * targets renders remotely, and the local paravirtual device has no mesh
- * shaders anyway. */
+ * function) itself. Local backend (ml1138): built here the same way; iPhones
+ * with mesh shaders render locally. */
 static NTSTATUS
 _MTLDevice_newGeometryEmulationPipelineState(void *obj) {
   struct unixcall_mtldevice_newgeompso *params = obj;
@@ -5994,7 +6136,91 @@ _MTLDevice_newGeometryEmulationPipelineState(void *obj) {
       fprintf(stderr, "[wmt-remote] host refused a geometry-emulation pipeline\n");
     return STATUS_SUCCESS;
   }
-  fprintf(stderr, "[winemetal] geometry-emulation pipelines are only implemented for the remote backend\n");
+  /* ml1138: LOCAL geometry emulation, exactly what IRRuntimeNewGeometryEmulationPipeline
+   * (and rmetald's RM_OP_NEW_GEOM_PSO_INFO) does. Object stage = the vertex
+   * shader's converter object entry with tessellation off, with the stage-in
+   * function linked in; mesh stage = the geometry shader, told the vertex output
+   * size; fragment = the pixel shader. Until now the local backend refused these,
+   * the fallback plain pipeline cannot link a VS converted for stage-in
+   * ("unresolved visible function reference: irconverter_stage_in_shader"), and a
+   * UE5 title froze on the device waiting for its WriteToSlice pipelines. */
+  @autoreleasepool {
+    const struct WMTMeshRenderPipelineInfo *i = params->info.ptr;
+    const struct WMTGeometryEmulationInfo *g = params->ge.ptr;
+    id<MTLLibrary> Ls = (id<MTLLibrary>)g->stagein_library, Lv = (id<MTLLibrary>)g->vertex_library;
+    id<MTLLibrary> Lg = (id<MTLLibrary>)g->geometry_library, Lf = (id<MTLLibrary>)g->fragment_library;
+    MTLMeshRenderPipelineDescriptor *d;
+    MTLFunctionConstantValues *cv;
+    id<MTLFunction> fsi, fo, fm, ff = nil;
+    NSError *e = nil;
+    BOOL tess = NO;
+    int vsz = (int)g->gs_vertex_size_bytes;
+    if (!Ls || !Lv || !Lg || (g->fragment_function[0] && !Lf)) {
+      fprintf(stderr, "[winemetal] ml1138 geometry pipeline: missing library (stage-in %d vertex %d geometry %d fragment %d)\n",
+              !!Ls, !!Lv, !!Lg, !!Lf);
+      return STATUS_SUCCESS;
+    }
+    d = [[[MTLMeshRenderPipelineDescriptor alloc] init] autorelease];
+    for (unsigned c = 0; c < 8; c++) {
+      d.colorAttachments[c].pixelFormat = to_metal_pixel_format(i->colors[c].pixel_format);
+      d.colorAttachments[c].blendingEnabled = i->colors[c].blending_enabled;
+      d.colorAttachments[c].writeMask = (MTLColorWriteMask)i->colors[c].write_mask;
+      d.colorAttachments[c].alphaBlendOperation = (MTLBlendOperation)i->colors[c].alpha_blend_operation;
+      d.colorAttachments[c].rgbBlendOperation = (MTLBlendOperation)i->colors[c].rgb_blend_operation;
+      d.colorAttachments[c].sourceRGBBlendFactor = (MTLBlendFactor)i->colors[c].src_rgb_blend_factor;
+      d.colorAttachments[c].sourceAlphaBlendFactor = (MTLBlendFactor)i->colors[c].src_alpha_blend_factor;
+      d.colorAttachments[c].destinationRGBBlendFactor = (MTLBlendFactor)i->colors[c].dst_rgb_blend_factor;
+      d.colorAttachments[c].destinationAlphaBlendFactor = (MTLBlendFactor)i->colors[c].dst_alpha_blend_factor;
+    }
+    d.depthAttachmentPixelFormat = to_metal_pixel_format(i->depth_pixel_format);
+    d.stencilAttachmentPixelFormat = to_metal_pixel_format(i->stencil_pixel_format);
+    d.alphaToCoverageEnabled = i->alpha_to_coverage_enabled;
+    d.rasterizationEnabled = i->rasterization_enabled;
+    d.rasterSampleCount = i->raster_sample_count ? i->raster_sample_count : 1;
+
+    cv = [[[MTLFunctionConstantValues alloc] init] autorelease];
+    fsi = [[Ls newFunctionWithName:Ls.functionNames.firstObject] autorelease];
+    [cv setConstantValue:&tess type:MTLDataTypeBool withName:@"tessellationEnabled"];
+    fo = [[Lv newFunctionWithName:[NSString stringWithFormat:@"%s.dxil_irconverter_object_shader", g->vertex_function]
+                   constantValues:cv error:&e] autorelease];
+    if (!fo)
+      fprintf(stderr, "[winemetal] ml1138 geometry pipeline: object function '%s.dxil_irconverter_object_shader': %s\n",
+              g->vertex_function, e ? [[e localizedDescription] UTF8String] : "?");
+    [cv setConstantValue:&vsz type:MTLDataTypeInt withName:@"vertex_shader_output_size_fc"];
+    e = nil;
+    fm = [[Lg newFunctionWithName:[NSString stringWithUTF8String:g->geometry_function] constantValues:cv error:&e] autorelease];
+    if (!fm)
+      fprintf(stderr, "[winemetal] ml1138 geometry pipeline: mesh function '%s': %s\n", g->geometry_function,
+              e ? [[e localizedDescription] UTF8String] : "?");
+    if (g->fragment_function[0])
+      ff = [[Lf newFunctionWithName:[NSString stringWithUTF8String:g->fragment_function]] autorelease];
+    if (!fsi || !fo || !fm || (g->fragment_function[0] && !ff)) {
+      fprintf(stderr, "[winemetal] ml1138 geometry pipeline REFUSED: stage-in %d object %d mesh %d fragment %d\n",
+              !!fsi, !!fo, !!fm, !!ff);
+      return STATUS_SUCCESS;
+    }
+    d.objectFunction = fo;
+    d.meshFunction = fm;
+    d.fragmentFunction = ff;
+    {
+      MTLLinkedFunctions *lf = [MTLLinkedFunctions linkedFunctions];
+      lf.functions = @[ fsi ];
+      d.objectLinkedFunctions = lf;
+    }
+    e = nil;
+    params->ret_pso = (obj_handle_t)[(id<MTLDevice>)params->device newRenderPipelineStateWithMeshDescriptor:d
+                                                                                                    options:MTLPipelineOptionNone
+                                                                                                 reflection:nil
+                                                                                                      error:&e];
+    if (!params->ret_pso)
+      fprintf(stderr, "[winemetal] ml1138 geometry pipeline: %s\n", e ? [[e localizedDescription] UTF8String] : "?");
+    else {
+      static unsigned said;
+      if (said++ < 4)
+        fprintf(stderr, "[winemetal] ml1138 local geometry pipeline OK: vs '%s' gs '%s' ps '%s', vertex %u B\n",
+                g->vertex_function, g->geometry_function, g->fragment_function, g->gs_vertex_size_bytes);
+    }
+  }
   return STATUS_SUCCESS;
 }
 
@@ -6148,10 +6374,10 @@ const void *__wine_unix_call_funcs[] = {
     &_rmg_MTLDevice_newPlacementHeap,
     &_rmg_MTLHeap_newTextureAtOffset,
     &_madeira_ctl,   /* ml1098 */
-    /* upstream merge: 127-138 are upstream madeira-d3d12 (above); 139-144 stay NULL; 145-150 are
+    /* upstream merge: 127-138 are upstream madeira-d3d12 (above); 139-140 are upstream placement-heap buffers; 141-144 stay NULL; 145-150 are
      * this line's DXSO block and nop. The slot number is the ABI: never insert, never reuse. */
-    NULL, /* 139 */
-    NULL, /* 140 */
+    &_MTLDevice_heapBufferSizeAndAlign,   /* ml1145: 139 */
+    &_MTLHeap_newBufferAtOffset,          /* ml1145: 140 */
     NULL, /* 141 */
     NULL, /* 142 */
     NULL, /* 143 */
@@ -6308,10 +6534,10 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_newPlacementHeap_wow64,
     &_MTLHeap_newTextureAtOffset_wow64,
     &_madeira_ctl_wow64,
-    /* upstream merge: 127-138 are upstream madeira-d3d12 (above); 139-144 stay NULL; 145-150 are
+    /* upstream merge: 127-138 are upstream madeira-d3d12 (above); 139-140 are upstream placement-heap buffers; 141-144 stay NULL; 145-150 are
      * this line's DXSO block and nop. The slot number is the ABI: never insert, never reuse. */
-    NULL, /* 139 */
-    NULL, /* 140 */
+    &_MTLDevice_heapBufferSizeAndAlign_wow64,   /* 139 */
+    &_MTLHeap_newBufferAtOffset_wow64,   /* 140 */
     NULL, /* 141 */
     NULL, /* 142 */
     NULL, /* 143 */

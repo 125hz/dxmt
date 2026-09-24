@@ -101,6 +101,19 @@ struct unixcall_mtlheap_newtextureatoffset {
   uint64_t offset;
   obj_handle_t ret;
 };
+struct unixcall_mtldevice_heapbuffersizealign {   /* ml1145 */
+  obj_handle_t device;
+  uint64_t length;
+  uint64_t options;
+  uint64_t ret_size;
+  uint64_t ret_align;
+};
+struct unixcall_mtlheap_newbufferatoffset {   /* ml1145 */
+  obj_handle_t heap;
+  struct WMTMemoryPointer info;
+  uint64_t offset;
+  obj_handle_t ret;
+};
 struct unixcall_mtldevice_newtexture {
   obj_handle_t device;
   struct WMTMemoryPointer info;
