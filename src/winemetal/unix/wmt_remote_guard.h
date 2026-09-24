@@ -10,29 +10,6 @@ static NTSTATUS _rmg_NSObject_description(void *obj) {
   }
   return _NSObject_description(obj);
 }
-static NTSTATUS _rmg_MTLCommandBuffer_computeCommandEncoder(void *obj) {
-  if (wmtr_enabled()) {
-    struct unixcall_generic_obj_uint64_obj_ret *p = obj;
-    p->ret = 0;   /* never hand back uninitialised stack */
-    return wmtr_unimplemented("MTLCommandBuffer_computeCommandEncoder");
-  }
-  return _MTLCommandBuffer_computeCommandEncoder(obj);
-}
-static NTSTATUS _rmg_MTLDevice_newMeshRenderPipelineState(void *obj) {
-  if (wmtr_enabled()) {
-    struct unixcall_mtldevice_newmeshrenderpso *p = obj;
-    p->ret_error = 0;   /* never hand back uninitialised stack */
-    p->ret_pso = 0;   /* never hand back uninitialised stack */
-    return wmtr_unimplemented("MTLDevice_newMeshRenderPipelineState");
-  }
-  return _MTLDevice_newMeshRenderPipelineState(obj);
-}
-static NTSTATUS _rmg_MTLComputeCommandEncoder_encodeCommands(void *obj) {
-  if (wmtr_enabled()) {
-    return wmtr_unimplemented("MTLComputeCommandEncoder_encodeCommands");
-  }
-  return _MTLComputeCommandEncoder_encodeCommands(obj);
-}
 static NTSTATUS _rmg_MTLTexture_pixelFormat(void *obj) {
   if (wmtr_enabled()) {
     struct unixcall_generic_obj_uint64_ret *p = obj;
@@ -56,14 +33,6 @@ static NTSTATUS _rmg_MTLTexture_arrayLength(void *obj) {
     return wmtr_unimplemented("MTLTexture_arrayLength");
   }
   return _MTLTexture_arrayLength(obj);
-}
-static NTSTATUS _rmg_MTLTexture_mipmapLevelCount(void *obj) {
-  if (wmtr_enabled()) {
-    struct unixcall_generic_obj_uint64_ret *p = obj;
-    p->ret = 0;   /* never hand back uninitialised stack */
-    return wmtr_unimplemented("MTLTexture_mipmapLevelCount");
-  }
-  return _MTLTexture_mipmapLevelCount(obj);
 }
 static NTSTATUS _rmg_MTLBuffer_didModifyRange(void *obj) {
   if (wmtr_enabled()) {
@@ -252,14 +221,6 @@ static NTSTATUS _rmg_MTLBinaryArchive_serialize(void *obj) {
   }
   return _MTLBinaryArchive_serialize(obj);
 }
-static NTSTATUS _rmg_MTLDevice_newSharedTexture(void *obj) {
-  if (wmtr_enabled()) {
-    struct unixcall_mtldevice_newtexture *p = obj;
-    p->ret = 0;   /* never hand back uninitialised stack */
-    return wmtr_unimplemented("MTLDevice_newSharedTexture");
-  }
-  return _MTLDevice_newSharedTexture(obj);
-}
 static NTSTATUS _rmg_WMTBootstrapRegister(void *obj) {
   if (wmtr_enabled()) {
     return wmtr_unimplemented("WMTBootstrapRegister");
@@ -296,22 +257,44 @@ static NTSTATUS _rmg_MTLSharedEvent_waitUntilSignaledValue(void *obj) {
   }
   return _MTLSharedEvent_waitUntilSignaledValue(obj);
 }
+static NTSTATUS _rmg_MTLResidencySet_removeAllocation(void *obj) {
+  if (wmtr_enabled()) {
+    return wmtr_unimplemented("MTLResidencySet_removeAllocation");
+  }
+  return _MTLResidencySet_removeAllocation(obj);
+}
+static NTSTATUS _rmg_MTLDevice_heapTextureSizeAndAlign(void *obj) {
+  if (wmtr_enabled()) {
+    struct unixcall_mtldevice_heaptexturesizealign *p = obj;
+    p->ret_size = 0;   /* never hand back uninitialised stack */
+    p->ret_align = 0;   /* never hand back uninitialised stack */
+    return wmtr_unimplemented("MTLDevice_heapTextureSizeAndAlign");
+  }
+  return _MTLDevice_heapTextureSizeAndAlign(obj);
+}
+static NTSTATUS _rmg_MTLDevice_newPlacementHeap(void *obj) {
+  if (wmtr_enabled()) {
+    struct unixcall_mtldevice_newplacementheap *p = obj;
+    p->ret = 0;   /* never hand back uninitialised stack */
+    return wmtr_unimplemented("MTLDevice_newPlacementHeap");
+  }
+  return _MTLDevice_newPlacementHeap(obj);
+}
+static NTSTATUS _rmg_MTLHeap_newTextureAtOffset(void *obj) {
+  if (wmtr_enabled()) {
+    struct unixcall_mtlheap_newtextureatoffset *p = obj;
+    p->ret = 0;   /* never hand back uninitialised stack */
+    return wmtr_unimplemented("MTLHeap_newTextureAtOffset");
+  }
+  return _MTLHeap_newTextureAtOffset(obj);
+}
+static NTSTATUS _rmg_madeira_ctl(void *obj) {
+  if (wmtr_enabled()) {
+    return wmtr_unimplemented("madeira_ctl");
+  }
+  return _madeira_ctl(obj);
+}
 #ifndef DXMT_NATIVE
-static NTSTATUS _rmg_MTLDevice_newMeshRenderPipelineState32(void *obj) {
-  if (wmtr_enabled()) {
-    struct unixcall_mtldevice_newmeshrenderpso *p = obj;
-    p->ret_error = 0;   /* never hand back uninitialised stack */
-    p->ret_pso = 0;   /* never hand back uninitialised stack */
-    return wmtr_unimplemented("MTLDevice_newMeshRenderPipelineState32");
-  }
-  return _MTLDevice_newMeshRenderPipelineState32(obj);
-}
-static NTSTATUS _rmg_MTLComputeCommandEncoder_encodeCommands32(void *obj) {
-  if (wmtr_enabled()) {
-    return wmtr_unimplemented("MTLComputeCommandEncoder_encodeCommands32");
-  }
-  return _MTLComputeCommandEncoder_encodeCommands32(obj);
-}
 static NTSTATUS _rmg_MTLCaptureManager_startCapture32(void *obj) {
   if (wmtr_enabled()) {
     struct unixcall_mtlcapturemanager_startcapture *p = obj;
@@ -363,13 +346,5 @@ static NTSTATUS _rmg_WMTUpdateDisplaySetting32(void *obj) {
     return wmtr_unimplemented("WMTUpdateDisplaySetting32");
   }
   return _WMTUpdateDisplaySetting32(obj);
-}
-static NTSTATUS _rmg_MTLDevice_newSharedTexture32(void *obj) {
-  if (wmtr_enabled()) {
-    struct unixcall_mtldevice_newtexture *p = obj;
-    p->ret = 0;   /* never hand back uninitialised stack */
-    return wmtr_unimplemented("MTLDevice_newSharedTexture32");
-  }
-  return _MTLDevice_newSharedTexture32(obj);
 }
 #endif /* DXMT_NATIVE */

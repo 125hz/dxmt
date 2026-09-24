@@ -74,7 +74,14 @@ ROUTED = {
     '_MTLCommandBuffer_blitCommandEncoder', '_MTLBlitCommandEncoder_encodeCommands',
     '_MTLDevice_minimumLinearTextureAlignmentForPixelFormat',
     '_MTLDevice_supportsTextureSampleCount', '_MTLBuffer_newTexture',
+    '_MTLCommandBuffer_computeCommandEncoder', '_MTLComputeCommandEncoder_encodeCommands',
+    '_MTLTexture_mipmapLevelCount', '_MTLDevice_newMeshRenderPipelineState',
     '_MTLCommandEncoder_setLabel',
+    '_MTLDevice_newRenderPipelineStateVD',
+    '_MTLDevice_newSharedTexture',
+    '_MTLDevice_newResidencySet', '_MTLResidencySet_addAllocation',
+    '_MTLResidencySet_commit', '_MTLCommandQueue_addResidencySet',
+    '_MTLDevice_newGeometryEmulationPipelineState',
 }
 
 # Deliberately NOT guarded -- these belong on whichever machine runs the guest.
@@ -109,7 +116,7 @@ ROUTED = {
 # unix-call benchmark times. It has no handle to dereference and no output to
 # leave uninitialised, so the ⛔ rule below is satisfied trivially; guarding it
 # would mean the benchmark measured the guard rather than the crossing.
-LOCAL_OK = re.compile(r'^(thunk_SM50|thunk_DXSO|CacheReader_|CacheWriter_|DispatchData_|'
+LOCAL_OK = re.compile(r'^(madeira_ir_|thunk_SM50|thunk_DXSO|CacheReader_|CacheWriter_|DispatchData_|'
                       r'NSAutoreleasePool_|SharedEventListener_|NSString_|'
                       r'WMTSetMetalShaderCachePath|WMTQueryDisplaySettingForLayer|'
                       r'MetalLayer_getEDRValue|DeveloperHUDProperties_|'
