@@ -1256,6 +1256,26 @@ MTLHeap_newTextureAtOffset(obj_handle_t heap, struct WMTTextureInfo *info, uint6
   return params.ret;
 }
 
+/* ml1145: slots 139-140, see winemetal.h. */
+WINEMETAL_API void
+MTLDevice_heapBufferSizeAndAlign(obj_handle_t device, uint64_t length, enum WMTResourceOptions options, uint64_t *size, uint64_t *align) {
+  struct unixcall_mtldevice_heapbuffersizealign params;
+  params.device = device; params.length = length; params.options = options;
+  params.ret_size = 0; params.ret_align = 0;
+  UNIX_CALL(139, &params);
+  *size = params.ret_size; *align = params.ret_align;
+}
+
+WINEMETAL_API obj_handle_t
+MTLHeap_newBufferAtOffset(obj_handle_t heap, struct WMTBufferInfo *info, uint64_t offset) {
+  struct unixcall_mtlheap_newbufferatoffset params;
+  params.heap = heap;
+  WMT_MEMPTR_SET(params.info, info);
+  params.offset = offset; params.ret = 0;
+  UNIX_CALL(140, &params);
+  return params.ret;
+}
+
 /* ml1098: slot 138, see winemetal.h. */
 WINEMETAL_API void
 MadeiraCtl(struct madeira_ctl_args *args) {

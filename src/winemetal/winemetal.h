@@ -1905,6 +1905,11 @@ WINEMETAL_API void MTLResidencySet_removeAllocation(obj_handle_t set, obj_handle
 WINEMETAL_API void MTLDevice_heapTextureSizeAndAlign(obj_handle_t device, const struct WMTTextureInfo *info, uint64_t *size, uint64_t *align);
 WINEMETAL_API obj_handle_t MTLDevice_newPlacementHeap(obj_handle_t device, uint64_t size, enum WMTResourceOptions options);
 WINEMETAL_API obj_handle_t MTLHeap_newTextureAtOffset(obj_handle_t heap, struct WMTTextureInfo *info, uint64_t offset);
+/* ml1145: slots 139-140. Buffers placed in a placement heap, so a D3D12 placed
+ * resource in a DEFAULT heap aliases the heap's memory the way D3D12 does.
+ * Remote mode returns 0 for both (callers fall back to standalone buffers). */
+WINEMETAL_API void MTLDevice_heapBufferSizeAndAlign(obj_handle_t device, uint64_t length, enum WMTResourceOptions options, uint64_t *size, uint64_t *align);
+WINEMETAL_API obj_handle_t MTLHeap_newBufferAtOffset(obj_handle_t heap, struct WMTBufferInfo *info, uint64_t offset);
 
 /* ml1098: madeira runtime control, slot 138. A PE-side runtime has no reach
  * into the app's sandbox; this is its one door. Ops:

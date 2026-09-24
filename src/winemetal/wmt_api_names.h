@@ -3,7 +3,7 @@
 #ifndef WMT_API_NAMES_H
 #define WMT_API_NAMES_H
 
-#define WMT_API_COUNT 139
+#define WMT_API_COUNT 141
 
 static const char *const wmt_api_names[WMT_API_COUNT] = {
     "NSObject_retain",
@@ -126,7 +126,7 @@ static const char *const wmt_api_names[WMT_API_COUNT] = {
     "CacheWriter_alloc_init",
     "CacheWriter_set",
     "WMTSetMetalShaderCachePath",
-    "rmg_MTLDevice_newSharedTexture",
+    "MTLDevice_newSharedTexture",
     "rmg_WMTBootstrapRegister",
     "rmg_WMTBootstrapLookUp",
     "rmg_MTLSharedEvent_createMachPort",
@@ -145,6 +145,8 @@ static const char *const wmt_api_names[WMT_API_COUNT] = {
     "MTLDevice_newPlacementHeap",
     "MTLHeap_newTextureAtOffset",
     "madeira_ctl",
+    "MTLDevice_heapBufferSizeAndAlign",
+    "MTLHeap_newBufferAtOffset",
 };
 
 #endif
