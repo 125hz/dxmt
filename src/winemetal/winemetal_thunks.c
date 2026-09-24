@@ -1164,6 +1164,8 @@ WMTNop(uint64_t a, uint64_t b) {
   params.arg0 = a;
   params.arg1 = b;
   WINE_UNIX_CALL(150, &params);
+}
+
 /* madeira-d3d12: runtime DXIL -> metallib conversion.
  *
  * Slot 127, appended. The argument block is described once in
