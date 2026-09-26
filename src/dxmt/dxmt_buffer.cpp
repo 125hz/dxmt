@@ -160,7 +160,15 @@ Buffer::allocate(Flags<BufferAllocationFlag> flags, const char *site) {
   if (flags.test(BufferAllocationFlag::GpuManaged)) {
     options |= WMTResourceStorageModeManaged;
   }
-#if defined(__i386__)
+/* MADEIRA (WOW64_DESIGN.md section 8.2(a)): the !DXMT_MADEIRA half of this
+ * test is the native frontend reverting toward the upstream tag.  The rule
+ * below exists because a 32-bit GUEST cannot name a pointer from Metal's own
+ * heap; natively there is no guest in this path at all -- Metal object
+ * lifetime is host-side, [buffer contents] is an ordinary host pointer, and
+ * forcing CpuPlaced would only add a redundant malloc and a copy per
+ * allocation.  What the application can dereference is a different question,
+ * answered by the guest arena (section 8.2(c)), not by this flag. */
+#if defined(__i386__) && !defined(DXMT_MADEIRA)
   /* MADEIRA (WOW64_DESIGN.md section 7.5): on a 32-bit guest a CPU-visible
    * allocation MUST supply its own memory. The alternative -- letting the unix
    * side call newBufferWithLength: and write [buffer contents] back into

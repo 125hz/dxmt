@@ -16,7 +16,13 @@ namespace dxmt {
 // GB of address space with the application, and every block is guest VA plus
 // host RAM plus a Metal buffer registration, so there the ring uses 8 MB
 // blocks; every 64-bit target keeps 32 MB.
-#if defined(__i386__)
+// MADEIRA (WOW64_DESIGN.md section 8.2(a)): the !DXMT_MADEIRA half reverts
+// this toward the upstream tag for the native frontend. The 8 MB block is a
+// concession to a 32-bit guest's VA ceiling, and natively these blocks leave
+// the guest window entirely -- they are host allocations the application
+// never sees -- so the 32 MB block that suits every other 64-bit target
+// suits this one too.
+#if defined(__i386__) && !defined(DXMT_MADEIRA)
 constexpr size_t kStagingBlockSize = 0x800000; // 8MB
 #else
 constexpr size_t kStagingBlockSize = 0x2000000; // 32MB
@@ -227,7 +233,7 @@ public:
   allocate(size_t block_size) {
     Block block{};
     bool placed = placed_buffer_;
-#if defined(__i386__)
+#if defined(__i386__) && !defined(DXMT_MADEIRA)
     /* MADEIRA (WOW64_DESIGN.md section 7.5): placed_buffer=false means "let
      * Metal allocate and never look at the memory again".  That is fine for a
      * 64-bit caller, but for a 32-bit guest the unix side would have to write
