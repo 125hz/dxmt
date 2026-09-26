@@ -28,6 +28,16 @@ if (not dxmt_native) or dxmt_madeira
 subdir('d3d9')
 endif
 
+# MADEIRA (WOW64_DESIGN.md section 8.5): the i386 shim that stands in front of
+# the native frontend. It is a Windows PE module and nothing else -- its own
+# meson.build builds nothing unless cpu_family == 'x86' -- so it is excluded
+# from the native build the same way the line above includes the frontend
+# there. build-pe.sh installs the shim AS d3d9.dll and the emulated frontend
+# as d3d9-emulated.dll, which is the A/B pair madeira-d3d9.txt selects between.
+if not dxmt_native
+subdir('d3d9shim')
+endif
+
 if get_option('enable_nvapi')
 subdir('nvapi')
 endif
