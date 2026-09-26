@@ -7,7 +7,8 @@
  * change sits behind a switch that is:
  *
  *   - ON by default in a module that only ever serves 32-bit processes
- *     (the i386 PE build);
+ *     (the i386 PE build, and the native D3D9 frontend built with
+ *     DXMT_MADEIRA);
  *   - OFF by default everywhere else, which keeps upstream behaviour;
  *   - forced either way by its environment variable: "0" disables it on every
  *     architecture, any other non-empty value enables it on every
@@ -39,9 +40,11 @@
 
 namespace dxmt {
 
-/* True in a module that only ever serves 32-bit (WoW64) processes. */
+/* True in a module that only ever serves 32-bit (WoW64) processes: the i386
+ * PE build, and the native ARM64 Direct3D 9 frontend (DXMT_MADEIRA), which
+ * only ever runs behind the i386 d3d9 shim. */
 constexpr bool kMadeira32BitModule =
-#if defined(__i386__)
+#if defined(__i386__) || defined(DXMT_MADEIRA)
     true;
 #else
     false;
