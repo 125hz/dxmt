@@ -151,11 +151,11 @@ static const char *const wmt_api_names[WMT_API_COUNT] = {
     "<null slot>",
     "<null slot>",
     "<null slot>",
-    "<null slot>",
-    "<null slot>",
-    "<null slot>",
-    "<null slot>",
-    "<null slot>",
+    "thunk_DXSOInitialize",
+    "thunk_DXSODestroy",
+    "thunk_DXSOCompile",
+    "thunk_DXSOGetCompiledBitcode",
+    "thunk_DXSODestroyBitcode",
     "d3d9_nop",
 };
 
