@@ -1847,6 +1847,8 @@ static uint32_t wmt_blit_cmd_size(unsigned type) {
     case WMTBlitCommandWaitForFence:
     case WMTBlitCommandUpdateFence:               return sizeof(struct wmtcmd_blit_fence_op);
     case WMTBlitCommandFillBuffer:                return sizeof(struct wmtcmd_blit_fillbuffer);
+    case WMTBlitCommandOptimizeContentsForGPUAccess:
+                                                  return sizeof(struct wmtcmd_blit_optimize_contents);
     default:                                      return 0;
     }
 }
@@ -1968,6 +1970,17 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
     case WMTBlitCommandGenerateMipmaps: {
       struct wmtcmd_blit_generate_mipmaps *body = (struct wmtcmd_blit_generate_mipmaps *)next;
       [encoder generateMipmapsForTexture:(id<MTLTexture>)body->texture];
+      break;
+    }
+    /* MADEIRA (WOW64_DESIGN.md section 7.11): re-tile one subresource for GPU
+     * access. A Private texture written by a blit or fill can be left in a
+     * GPU-compressed layout a render-pass sampler misreads; the Direct3D 9
+     * StretchRect scale path issues this before sampling its source. */
+    case WMTBlitCommandOptimizeContentsForGPUAccess: {
+      struct wmtcmd_blit_optimize_contents *body = (struct wmtcmd_blit_optimize_contents *)next;
+      [encoder optimizeContentsForGPUAccess:(id<MTLTexture>)body->texture
+                                      slice:body->slice
+                                      level:body->level];
       break;
     }
     case WMTBlitCommandUpdateFence: {
@@ -2287,6 +2300,32 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     case WMTRenderCommandSetFragmentTexture: {
       struct wmtcmd_render_settexture *body = (struct wmtcmd_render_settexture *)next;
       [encoder setFragmentTexture:(id<MTLTexture>)body->texture atIndex:body->index];
+      break;
+    }
+    /* MADEIRA (WOW64_DESIGN.md section 7.11): the argument-TABLE binds the
+     * Direct3D 9 frontend needs. d3d11 binds every texture and sampler through
+     * an argument buffer, so these four had no caller until now. */
+    case WMTRenderCommandSetVertexTexture: {
+      struct wmtcmd_render_settexture *body = (struct wmtcmd_render_settexture *)next;
+      [encoder setVertexTexture:(id<MTLTexture>)body->texture atIndex:body->index];
+      break;
+    }
+    case WMTRenderCommandSetFragmentSamplerState: {
+      struct wmtcmd_render_setsamplerstate *body = (struct wmtcmd_render_setsamplerstate *)next;
+      [encoder setFragmentSamplerState:(id<MTLSamplerState>)body->sampler atIndex:body->index];
+      break;
+    }
+    case WMTRenderCommandSetVertexSamplerState: {
+      struct wmtcmd_render_setsamplerstate *body = (struct wmtcmd_render_setsamplerstate *)next;
+      [encoder setVertexSamplerState:(id<MTLSamplerState>)body->sampler atIndex:body->index];
+      break;
+    }
+    case WMTRenderCommandSetBlendFactor: {
+      struct wmtcmd_render_setblendcolor *body = (struct wmtcmd_render_setblendcolor *)next;
+      /* Blend colour only: Direct3D 9 carries the stencil reference on its
+       * depth-stencil state, so it must not be clobbered here the way
+       * SetBlendFactorAndStencilRef does for d3d11. */
+      [encoder setBlendColorRed:body->red green:body->green blue:body->blue alpha:body->alpha];
       break;
     }
     case WMTRenderCommandSetRasterizerState: {
@@ -5369,9 +5408,12 @@ wow_cmd_payload(struct wmtcmd_base *node, enum wow_cmd_kind kind, int to_host) {
       payload = &((struct wmtcmd_render_setviewports *)node)->viewports;
     else if (node->type == WMTRenderCommandSetScissorRects)
       payload = &((struct wmtcmd_render_setscissorrects *)node)->scissor_rects;
-    /* MADEIRA (WOW64_DESIGN.md section 7.11): any later command that carries
-     * a CPU pointer must be added here or the 32-bit path dereferences a
-     * guest address. */
+    /* MADEIRA (WOW64_DESIGN.md section 7.11): the four commands appended for
+     * the Direct3D 9 frontend -- SetBlendFactor, SetVertexTexture and the two
+     * SamplerState binds -- carry only obj_handle_t values and scalars, so
+     * they have no payload to convert. Their `next` still rides the chain
+     * walk below. Any later command that DOES carry a CPU pointer must be
+     * added here or the 32-bit path dereferences a guest address. */
     break;
   case WOW_CMD_COMPUTE:
     if (node->type == WMTComputeCommandSetBytes)

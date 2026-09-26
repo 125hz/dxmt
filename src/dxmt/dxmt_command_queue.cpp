@@ -4,6 +4,7 @@
 #include "util_env.hpp"
 #include "util_win32_compat.h"
 #include <atomic>
+#include <chrono>
 
 #define ASYNC_ENCODING 1
 
@@ -177,8 +178,10 @@ CommandQueue::WaitForFinishThread() {
     if (chunk.attached_cmdbuf.status() <= WMTCommandBufferStatusScheduled) {
       chunk.attached_cmdbuf.waitUntilCompleted();
     }
-    if (chunk.attached_cmdbuf.status() == WMTCommandBufferStatusError) {
+    const bool device_error = chunk.attached_cmdbuf.status() == WMTCommandBufferStatusError;
+    if (device_error) {
       ERR("Device error at frame ", chunk.frame_, ": ", chunk.attached_cmdbuf.error().description().getUTF8String());
+      MarkDeviceError();
     }
     if (auto logs = chunk.attached_cmdbuf.logs()) {
       for (auto &log : logs.elements()) {
@@ -188,6 +191,9 @@ CommandQueue::WaitForFinishThread() {
 
     if (chunk.signal_frame_latency_fence_ != ~0ull)
       frame_latency_fence_.signal(chunk.signal_frame_latency_fence_);
+
+    for (const auto &target : chunk.completion_targets)
+      target->CompleteGpuWork(device_error ? GpuCompletionStatus::Failed : GpuCompletionStatus::Complete);
 
     chunk.reset();
     cpu_coherent.signal(internal_seq);
@@ -213,5 +219,38 @@ void CommandQueue::Retain(uint64_t seq, Allocation* allocaiton) {
     tracker.addStorage(temp_buffer.ptr, block_size);
   }
 };
+
+// MADEIRA: see dxmt_command_queue.hpp for why a non-blocking poller needs
+// this instead of WaitCPUFence.
+bool
+CommandQueue::WaitCPUFenceBounded(uint64_t seq, uint64_t timeout_ns) {
+  if (cpu_coherent.signaledValue() >= seq)
+    return true;
+  // Phase 1: a short load-spin. The watermark is published by the finish
+  // thread with a release store, so a re-check costs one acquire load; if the
+  // command buffer is about to retire this catches it without entering the
+  // scheduler at all.
+  constexpr unsigned kSpinIterations = 64;
+  for (unsigned i = 0; i < kSpinIterations; i++) {
+    if (cpu_coherent.signaledValue() >= seq)
+      return true;
+  }
+  // Phase 2: yield until the deadline. this_thread::yield is SwitchToThread on
+  // the PE build, so the encode / finish threads (both TIME_CRITICAL) get the
+  // core the poller would otherwise have burned. The clock is read once per
+  // yield, because reading it is the expensive part of this loop.
+  const auto deadline = clock::now() + std::chrono::nanoseconds(timeout_ns);
+  do {
+    this_thread::yield();
+    if (cpu_coherent.signaledValue() >= seq)
+      return true;
+  } while (clock::now() < deadline);
+  return cpu_coherent.signaledValue() >= seq;
+}
+
+void
+CommandQueue::MarkDeviceError() {
+  device_error_.store(true, std::memory_order_release);
+}
 
 } // namespace dxmt
