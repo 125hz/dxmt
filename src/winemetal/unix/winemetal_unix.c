@@ -3585,6 +3585,56 @@ thunk_SM50GetArgumentsInfo(void *args) {
   return STATUS_SUCCESS;
 }
 
+/* DXSO (D3D9 shader model 1.x-3.x) compilation, slots 145-149.  Like the
+ * SM50 family this is a CPU-only translator: it takes and returns plain
+ * memory and touches no Metal object, so it stays on whichever machine runs
+ * the guest and is deliberately not remote-guarded. */
+
+static NTSTATUS
+thunk_DXSOInitialize(void *args) {
+  struct dxso_initialize_params *params = args;
+
+  params->ret = DXSOInitialize(params->bytecode, params->bytecode_size, params->shader);
+
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk_DXSODestroy(void *args) {
+  struct dxso_destroy_params *params = args;
+
+  DXSODestroy(params->shader);
+
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk_DXSOCompile(void *args) {
+  struct dxso_compile_params *params = args;
+
+  params->ret = DXSOCompile(params->shader, params->args, params->func_name, params->bitcode);
+
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk_DXSOGetCompiledBitcode(void *args) {
+  struct dxso_get_compiled_bitcode_params *params = args;
+
+  DXSOGetCompiledBitcode(params->bitcode, params->data_out);
+
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk_DXSODestroyBitcode(void *args) {
+  struct dxso_destroy_bitcode_params *params = args;
+
+  DXSODestroyBitcode(params->bitcode);
+
+  return STATUS_SUCCESS;
+}
+
 /* MADEIRA, WOW64_DESIGN.md sections 2 and 7 ("shifted guest window").
  *
  * On iOS a 32-bit pseudo-process cannot own the low 4 GB: XNU forces a 4 GB
@@ -3935,6 +3985,273 @@ thunk32_SM50GetArgumentsInfo(void *args) {
 
   return STATUS_SUCCESS;
 }
+/* MADEIRA (WOW64_DESIGN.md section 7): imported from dacevedo12/dxmt
+ * tag v0.4-d3d9 (LGPL-2.1-or-later, see research/dxmt/LICENSE-MADEIRA.md).
+ * Unchanged except that UInt32ToPtr above is the guest-window conversion
+ * (+B) on iOS rather than a bare zero-extension, which is what makes the
+ * embedded `elements` / `next` / bytecode pointers usable here. */
+/* DXSO compilation argument chain: same shape as SM50's 32-bit
+   chain conversion (sm50_compilation_argument32_convert). DXSO has
+   its own enum + struct family so the d3d9 caller picks the right
+   types at compile time, but the wire-form is byte-identical to
+   SM50's so we reuse the same UInt32ToPtr unpack pattern. The IA
+   layout's `elements` pointer points at app-side memory: already
+   in the wow64 32-bit address space: so it round-trips through
+   UInt32ToPtr without further translation. */
+struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+};
+
+struct DXSO_SHADER_IA_INPUT_LAYOUT_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  enum DXSO_INDEX_BUFFER_FORMAT index_buffer_format;
+  uint32_t slot_mask;
+  uint32_t num_elements;
+  uint32_t elements;
+  uint32_t position_transformed;
+  uint32_t vs_float_const_count;
+};
+
+struct DXSO_SHADER_PSO_PIXEL_SHADER_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint32_t alpha_test_func;
+  uint32_t dual_source_blending;
+  uint32_t flat_shading;
+  uint32_t emit_sample_mask;
+  uint32_t unorm_output_reg_mask;
+};
+
+struct DXSO_SHADER_PS_SAMPLER_LAYOUT_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint8_t kinds[16];
+};
+
+struct DXSO_SHADER_PS_POINT_SPRITE_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+};
+
+struct DXSO_SHADER_PS_FOG_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint32_t mode;
+  uint32_t coord_is_w;
+};
+
+struct DXSO_SHADER_FFP_KEY_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint32_t kind;
+  uint32_t has_diffuse;
+  uint32_t has_texcoord0;
+  uint32_t has_specular;
+  uint32_t tex0_mode;
+  uint32_t stages[8][3];
+  uint32_t point_size;
+  uint32_t point_sprite;
+  uint32_t point_scale;
+  uint32_t texcoord_mask;
+  uint32_t texcoord_transform_key;
+  uint32_t lighting_key;
+  uint32_t fog_vertex_mode;
+  uint32_t vertex_blend;
+  uint32_t texgen_key;
+  uint32_t texcoord_index_key;
+  uint32_t sampler_kind_key;
+  uint32_t flat_shading;
+  uint32_t point_size_per_vertex;
+  uint32_t decl_has_diffuse;
+  uint32_t range_fog;
+  uint32_t emit_sample_mask;
+};
+
+struct DXSO_SHADER_VS_POINT_SIZE_DATA32 {
+  uint32_t next;
+  enum DXSO_SHADER_COMPILATION_ARGUMENT_TYPE type;
+};
+
+
+
+void
+dxso_compilation_argument32_convert(
+    struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA *first_arg, struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA32 *args32
+) {
+  struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA *last_arg = first_arg;
+
+  first_arg->type = DXSO_SHADER_ARGUMENT_TYPE_MAX;
+  first_arg->next = NULL;
+
+  while (args32) {
+    /* Make an unhandled arg type a hard error, not a silent drop: a new
+       DXSO_SHADER_* value added to the enum and the 64-bit caller but not to
+       this 32-bit converter would otherwise vanish on WoW64 only (the exact
+       shape of the historical alpha-test arg-drop). -Wswitch already flags it;
+       promote just this switch to an error so the build catches it. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic error "-Wswitch"
+    switch (args32->type) {
+    case DXSO_SHADER_IA_INPUT_LAYOUT: {
+      struct DXSO_SHADER_IA_INPUT_LAYOUT_DATA32 *src = (void *)args32;
+      struct DXSO_SHADER_IA_INPUT_LAYOUT_DATA *data = malloc(sizeof(struct DXSO_SHADER_IA_INPUT_LAYOUT_DATA));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      last_arg->next = NULL;
+      data->type = src->type;
+      data->index_buffer_format = src->index_buffer_format;
+      data->slot_mask = src->slot_mask;
+      data->num_elements = src->num_elements;
+      data->elements = UInt32ToPtr(src->elements);
+      data->position_transformed = src->position_transformed;
+      data->vs_float_const_count = src->vs_float_const_count;
+      break;
+    }
+    case DXSO_SHADER_PSO_PIXEL_SHADER: {
+      struct DXSO_SHADER_PSO_PIXEL_SHADER_DATA32 *src = (void *)args32;
+      struct DXSO_SHADER_PSO_PIXEL_SHADER_DATA *data = malloc(sizeof(struct DXSO_SHADER_PSO_PIXEL_SHADER_DATA));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      last_arg->next = NULL;
+      data->type = src->type;
+      data->alpha_test_func = src->alpha_test_func;
+      data->dual_source_blending = src->dual_source_blending;
+      data->flat_shading = src->flat_shading;
+      data->emit_sample_mask = src->emit_sample_mask;
+      data->unorm_output_reg_mask = src->unorm_output_reg_mask;
+      break;
+    }
+    case DXSO_SHADER_PS_SAMPLER_LAYOUT: {
+      struct DXSO_SHADER_PS_SAMPLER_LAYOUT_DATA32 *src = (void *)args32;
+      struct DXSO_SHADER_PS_SAMPLER_LAYOUT_DATA *data = malloc(sizeof(struct DXSO_SHADER_PS_SAMPLER_LAYOUT_DATA));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      last_arg->next = NULL;
+      data->type = src->type;
+      memcpy(data->kinds, src->kinds, sizeof(data->kinds));
+      break;
+    }
+    case DXSO_SHADER_PS_POINT_SPRITE: {
+      struct DXSO_SHADER_PS_POINT_SPRITE_DATA *data = malloc(sizeof(struct DXSO_SHADER_PS_POINT_SPRITE_DATA));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      last_arg->next = NULL;
+      data->type = DXSO_SHADER_PS_POINT_SPRITE;
+      break;
+    }
+    case DXSO_SHADER_FFP_KEY: {
+      struct DXSO_SHADER_FFP_KEY_DATA32 *src = (void *)args32;
+      struct DXSO_SHADER_FFP_KEY_DATA *data = malloc(sizeof(struct DXSO_SHADER_FFP_KEY_DATA));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      last_arg->next = NULL;
+      data->type = DXSO_SHADER_FFP_KEY;
+      data->kind = src->kind;
+      data->has_diffuse = src->has_diffuse;
+      data->has_texcoord0 = src->has_texcoord0;
+      data->has_specular = src->has_specular;
+      data->tex0_mode = src->tex0_mode;
+      memcpy(data->stages, src->stages, sizeof(data->stages));
+      data->point_size = src->point_size;
+      data->point_sprite = src->point_sprite;
+      data->point_scale = src->point_scale;
+      data->texcoord_mask = src->texcoord_mask;
+      data->texcoord_transform_key = src->texcoord_transform_key;
+      data->lighting_key = src->lighting_key;
+      data->fog_vertex_mode = src->fog_vertex_mode;
+      data->vertex_blend = src->vertex_blend;
+      data->texgen_key = src->texgen_key;
+      data->texcoord_index_key = src->texcoord_index_key;
+      data->sampler_kind_key = src->sampler_kind_key;
+      data->flat_shading = src->flat_shading;
+      data->point_size_per_vertex = src->point_size_per_vertex;
+      data->decl_has_diffuse = src->decl_has_diffuse;
+      data->range_fog = src->range_fog;
+      data->emit_sample_mask = src->emit_sample_mask;
+      break;
+    }
+    case DXSO_SHADER_VS_POINT_SIZE: {
+      struct DXSO_SHADER_VS_POINT_SIZE_DATA32 *src = (void *)args32;
+      struct DXSO_SHADER_VS_POINT_SIZE_DATA *data = malloc(sizeof(struct DXSO_SHADER_VS_POINT_SIZE_DATA));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      last_arg->next = NULL;
+      data->type = DXSO_SHADER_VS_POINT_SIZE;
+      (void)src;
+      break;
+    }
+    case DXSO_SHADER_PS_BUMP_ENV:
+      /* Reserved: bump-env now rides the shared PS uniform tail, so the
+         host never emits this arg. Skip it if an older caller does. */
+      break;
+    case DXSO_SHADER_PS_FOG: {
+      struct DXSO_SHADER_PS_FOG_DATA32 *src = (void *)args32;
+      struct DXSO_SHADER_PS_FOG_DATA *data = malloc(sizeof(struct DXSO_SHADER_PS_FOG_DATA));
+      last_arg->next = data;
+      last_arg = (void *)data;
+      last_arg->next = NULL;
+      data->type = DXSO_SHADER_PS_FOG;
+      data->mode = src->mode;
+      data->coord_is_w = src->coord_is_w;
+      break;
+    }
+    case DXSO_SHADER_ARGUMENT_TYPE_MAX:
+      break;
+    }
+#pragma GCC diagnostic pop
+    args32 = UInt32ToPtr(args32->next);
+  }
+}
+
+void
+dxso_compilation_argument32_free(struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA *first_arg) {
+  struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA *arg = first_arg->next;
+
+  while (arg) {
+    struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA *next = arg->next;
+    free(arg);
+    arg = next;
+  }
+}
+
+static NTSTATUS
+thunk32_DXSOInitialize(void *args) {
+  struct dxso_initialize_params32 *params = args;
+
+  params->ret = DXSOInitialize(
+      UInt32ToPtr(params->bytecode), params->bytecode_size, UInt32ToPtr(params->shader)
+  );
+
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk32_DXSOGetCompiledBitcode(void *args) {
+  struct dxso_get_compiled_bitcode_params32 *params = args;
+
+  DXSOGetCompiledBitcode(params->bitcode, UInt32ToPtr(params->data_out));
+
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+thunk32_DXSOCompile(void *args) {
+  struct dxso_compile_params32 *params = args;
+  struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA first_arg;
+  struct DXSO_SHADER_COMPILATION_ARGUMENT_DATA32 *args32 = UInt32ToPtr(params->args);
+  dxso_compilation_argument32_convert(&first_arg, args32);
+
+  params->ret = DXSOCompile(
+      params->shader, &first_arg, UInt32ToPtr(params->func_name), UInt32ToPtr(params->bitcode)
+  );
+
+  dxso_compilation_argument32_free(&first_arg);
+
+  return STATUS_SUCCESS;
+}
+
 #endif /* DXMT_NATIVE */
 
 static NTSTATUS
@@ -6043,7 +6360,7 @@ const void *__wine_unix_call_funcs[] = {
     &_rmg_MTLHeap_newTextureAtOffset,
     &_madeira_ctl,   /* ml1098 */
     /* 127-138 are madeira-d3d12 (above); 139-140 are the placement-heap buffers; 141-144 stay NULL;
-     * 145-149 are reserved for the DXSO (D3D9 shader) compiler; 150 is the unix-call benchmark nop.
+     * 145-149 are the DXSO (D3D9 shader) compiler; 150 is the unix-call benchmark nop.
      * The slot number is the ABI: never insert, never reuse. */
     &_MTLDevice_heapBufferSizeAndAlign,   /* ml1145: 139 */
     &_MTLHeap_newBufferAtOffset,          /* ml1145: 140 */
@@ -6051,11 +6368,11 @@ const void *__wine_unix_call_funcs[] = {
     NULL, /* 142 */
     NULL, /* 143 */
     NULL, /* 144 */
-    NULL, /* 145: reserved for the DXSO (D3D9 shader) compiler */
-    NULL, /* 146 */
-    NULL, /* 147 */
-    NULL, /* 148 */
-    NULL, /* 149 */
+    &thunk_DXSOInitialize,              /* 145 */
+    &thunk_DXSODestroy,
+    &thunk_DXSOCompile,
+    &thunk_DXSOGetCompiledBitcode,
+    &thunk_DXSODestroyBitcode,          /* 149 */
     /* MADEIRA (WOW64_DESIGN.md section 8.4, measurement 2): appended at the
      * END of both tables, which is the only place a slot may be added --
      * rules 3 and 4 of section 7.4. 150 in both. */
@@ -6204,7 +6521,7 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLHeap_newTextureAtOffset_wow64,
     &_madeira_ctl_wow64,
     /* 127-138 are madeira-d3d12 (above); 139-140 are the placement-heap buffers; 141-144 stay NULL;
-     * 145-149 are reserved for the DXSO (D3D9 shader) compiler; 150 is the unix-call benchmark nop.
+     * 145-149 are the DXSO (D3D9 shader) compiler; 150 is the unix-call benchmark nop.
      * The slot number is the ABI: never insert, never reuse. */
     &_MTLDevice_heapBufferSizeAndAlign_wow64,   /* 139 */
     &_MTLHeap_newBufferAtOffset_wow64,   /* 140 */
@@ -6212,11 +6529,11 @@ const void *__wine_unix_call_wow64_funcs[] = {
     NULL, /* 142 */
     NULL, /* 143 */
     NULL, /* 144 */
-    NULL, /* 145: reserved for the DXSO (D3D9 shader) compiler */
-    NULL, /* 146 */
-    NULL, /* 147 */
-    NULL, /* 148 */
-    NULL, /* 149 */
+    &thunk32_DXSOInitialize,            /* 145 */
+    &thunk_DXSODestroy,                 /* handle only, no conversion needed */
+    &thunk32_DXSOCompile,
+    &thunk32_DXSOGetCompiledBitcode,
+    &thunk_DXSODestroyBitcode,          /* handle only */
     /* 150: no `_d3d9_nop32`.  The block is two uint64_t with no embedded
      * pointer, so there is nothing for a 32-bit variant to convert and
      * sharing the 64-bit handler is correct, not a gap (section 7.11 says the

@@ -116,7 +116,7 @@ ROUTED = {
 # unix-call benchmark times. It has no handle to dereference and no output to
 # leave uninitialised, so the ⛔ rule below is satisfied trivially; guarding it
 # would mean the benchmark measured the guard rather than the crossing.
-LOCAL_OK = re.compile(r'^(madeira_ir_|thunk_SM50|CacheReader_|CacheWriter_|DispatchData_|'
+LOCAL_OK = re.compile(r'^(madeira_ir_|thunk_SM50|thunk_DXSO|CacheReader_|CacheWriter_|DispatchData_|'
                       r'NSAutoreleasePool_|SharedEventListener_|NSString_|'
                       r'WMTSetMetalShaderCachePath|WMTQueryDisplaySettingForLayer|'
                       r'MetalLayer_getEDRValue|DeveloperHUDProperties_|'
@@ -248,7 +248,7 @@ def main():
                 ' * Do not hand-edit. */\n\n')
         f.write('\n'.join(out) + '\n')
     print('wrote %s with %d guards (%d of them 32-bit variants, %d routed, '
-          'SM50 thunks intentionally local)'
+          'SM50/DXSO thunks intentionally local)'
           % (os.path.relpath(dst, HERE), n, len(guarded32), len(ROUTED)))
 
 main()
