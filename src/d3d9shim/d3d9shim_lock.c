@@ -32,6 +32,8 @@
 #define CINTERFACE
 #define COBJMACROS
 
+#include <stdio.h>
+
 #include "d3d9shim_object.h"
 
 #if defined(__i386__) || defined(__x86_64__)
@@ -53,12 +55,65 @@ try_lock(struct d3d9shim_device_extra *extra, LONG self)
     return 1;
 }
 
+/* MADEIRA ml2000: a waiter that has yielded for a long time switches
+ * SwitchToThread for Sleep(1) -- SwitchToThread only yields to a thread ready
+ * on the same core, so with few cores and QoS a preempted owner can starve
+ * behind a yielding waiter (MADEIRA_D9_LOCK_BACKOFF=0 keeps the pure yield).
+ * A wait over 1 s is reported once per wait with owner, depth and waiter:
+ * [d3d9-lock-spin] ml2000 (MADEIRA_D9_LOCK_DIAG=0 silences). */
+#define D3D9SHIM_BACKOFF_ROUNDS 256
+
+static LONG backoff_flag = -1, diag_flag = -1, lock_reports;
+
+static int
+lock_flag(LONG *flag, const char *name)
+{
+    LONG v = *flag;
+
+    if (v < 0) {
+        char value[8];
+        DWORD len = GetEnvironmentVariableA(name, value, sizeof(value));
+        v = !(len == 1 && value[0] == '0');
+        InterlockedExchange(flag, v);
+    }
+    return (int)v;
+}
+
+static int
+lock_report_spin(struct d3d9shim_device_extra *extra, LONG self, ULONGLONG start, unsigned int rounds)
+{
+    char msg[256];
+
+    if (InterlockedIncrement(&lock_reports) > 32)
+        return 0;
+    snprintf(msg, sizeof(msg), "[d3d9-lock-spin] ml2000 shim device lock waited %lu ms: waiter=%ld "
+             "owner=%ld owner-depth=%ld rounds=%u backoff=%s (MADEIRA_D9_LOCK_DIAG=0 silences, "
+             "MADEIRA_D9_LOCK_BACKOFF=0 pure yield)",
+             (unsigned long)(GetTickCount64() - start), (long)self, (long)extra->lock_owner,
+             (long)*(volatile LONG *)&extra->lock_depth, rounds,
+             lock_flag(&backoff_flag, "MADEIRA_D9_LOCK_BACKOFF") ? "sleep1" : "yield");
+    d3d9shim_trace(msg);
+    return 1;
+}
+
+static void
+lock_report_acquired(LONG self, ULONGLONG start)
+{
+    char msg[128];
+
+    snprintf(msg, sizeof(msg), "[d3d9-lock-spin] ml2000 shim waiter=%ld acquired the device lock after %lu ms",
+             (long)self, (unsigned long)(GetTickCount64() - start));
+    d3d9shim_trace(msg);
+}
+
 void
 d3d9shim_lock(struct d3d9shim_device *dev)
 {
     struct d3d9shim_device_extra *extra;
     LONG self;
-    unsigned int i;
+    unsigned int i, rounds = 0;
+    ULONGLONG start = 0;
+    int reported = 0;
 
     /* Called with a NULL device by every body on an object that has none
      * (IDirect3D9Ex), and by every body on a single-threaded device. */
@@ -69,14 +124,31 @@ d3d9shim_lock(struct d3d9shim_device *dev)
         return;
     self = (LONG)GetCurrentThreadId();
 
+    if (try_lock(extra, self))
+        return;
     while (!try_lock(extra, self)) {
         for (i = 0; i < 2000; i++) {
             D3D9SHIM_YIELD_PROCESSOR();
-            if (try_lock(extra, self))
+            if (try_lock(extra, self)) {
+                if (reported)
+                    lock_report_acquired(self, start);
                 return;
+            }
         }
-        SwitchToThread();
+        rounds++;
+        if (rounds == 1)
+            start = GetTickCount64();
+        /* ml2000: same backoff and diagnostic as D9RecursiveSpinlock. */
+        if (rounds >= D3D9SHIM_BACKOFF_ROUNDS && lock_flag(&backoff_flag, "MADEIRA_D9_LOCK_BACKOFF"))
+            Sleep(1);
+        else
+            SwitchToThread();
+        if (!reported && !(rounds & 15) && lock_flag(&diag_flag, "MADEIRA_D9_LOCK_DIAG") &&
+            GetTickCount64() - start > 1000)
+            reported = lock_report_spin(extra, self, start, rounds);
     }
+    if (reported)
+        lock_report_acquired(self, start);
 }
 
 void

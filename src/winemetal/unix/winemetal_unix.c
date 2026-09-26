@@ -5917,6 +5917,24 @@ static NTSTATUS _madeira_ctl(void *args) {
     a->ret = 1;
     break;
   }
+  case 7: {   /* ml2000: memory headroom for DXMT's automatic mip clamp.
+               * len = os_proc_available_memory() bytes, ptr = phys_footprint
+               * bytes (0 when task_info fails), ret = 1. ret stays 0 when the
+               * limit is unknown (0 from os_proc_available_memory) and in
+               * remote mode, where textures live on the other machine. No
+               * pointer is read or written, which is why the wow64 entry may
+               * forward this op unchanged. */
+    task_vm_info_data_t vmi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+    uint64_t avail;
+    if (wmtr_enabled()) break;
+    avail = (uint64_t)os_proc_available_memory();
+    if (!avail) break;
+    a->len = avail;
+    a->ptr = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &cnt) == KERN_SUCCESS
+                 ? (uint64_t)vmi.phys_footprint : 0;
+    a->ret = 1;
+    break;
+  }
   case 2: {
     char v[512];
     if (madeira_cfg_get(a->name, v, sizeof v)) {
@@ -5929,7 +5947,16 @@ static NTSTATUS _madeira_ctl(void *args) {
   }
   return STATUS_SUCCESS;
 }
-static NTSTATUS _madeira_ctl_wow64(void *args) { (void)args; return STATUS_NOT_IMPLEMENTED; }
+/* ml2000: the other ops carry guest pointers in ptr (which would need
+ * UInt32ToPtr) and stay unimplemented for 32-bit callers. Op 7 is pointer-free
+ * and struct madeira_ctl_args has the same offsets on i386 (two uint32, then
+ * uint64s at 8 and 16, name at 24), so the i386 d3d11.dll gets the same
+ * headroom reading. */
+static NTSTATUS _madeira_ctl_wow64(void *args) {
+  struct madeira_ctl_args *a = args;
+  if (a && a->op == 7) return _madeira_ctl(args);
+  return STATUS_NOT_IMPLEMENTED;
+}
 
 #if TARGET_OS_IOS
 /* On iOS we statically link DXMT's unix side into the host app (Madeira.app),

@@ -447,6 +447,27 @@ MTLD3D9Texture::materializeLevelForLock(uint32_t level) {
   // ensureMirror (run by the surface before this) re-allocated a blank backing;
   // download the level's bytes back from the Metal texture so the Lock hands
   // out the real contents.
+  // ml1980: every stale level in ONE drain. A title that locks a texture's mips one
+  // after another paid a full queue drain (flush, commit, CPU fence, GPU wait) per
+  // level -- ~45 drains/s serialising CPU and GPU in a device log. ensureMirror has
+  // already allocated the whole backing, so this costs no extra address space.
+  // MADEIRA_D3D9_MIRROR_BATCH=0 restores the per-level readback.
+  static const bool batch = env::getEnvVar("MADEIRA_D3D9_MIRROR_BATCH") != "0";
+  if (batch && m_mirrorBacking != nullptr && level < m_levels.size()) {
+    std::vector<MTLD3D9Surface *> pending;
+    uint32_t mask = 0;
+    for (size_t i = 0; i < m_levels.size() && i < 32; ++i) {
+      if (m_mirror_stale_mask & (1u << i)) {
+        pending.push_back(m_levels[i].ptr());
+        mask |= 1u << i;
+      }
+    }
+    if (!m_device->readbackSurfaceMirrors(pending.data(), pending.size()))
+      return;
+    ++m_mirror_download_count;
+    m_mirror_stale_mask &= ~mask;
+    return;
+  }
   if (m_mirrorBacking != nullptr && level < m_levels.size()) {
     if (!m_device->readbackSurfaceMirror(m_levels[level].ptr()))
       return;

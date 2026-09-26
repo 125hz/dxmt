@@ -1011,6 +1011,7 @@ MTLD3D9Device::commitCurrentChunkTimed(unsigned reason) {
   // retires, so the pressure this counter tracks is now the next one's to carry.
   m_renamedBytesSinceCommit = 0;
   m_uploadedBytesSinceCommit = 0;
+  m_batchBytesSinceCommit = 0;
 }
 
 // Sampler cache lookup. Builds the prefix key from the input info,
@@ -1696,10 +1697,20 @@ MTLD3D9Device::readbackSurfaceMirrors(MTLD3D9Surface *const *surfaces, size_t co
     chunk->emitcc([event, signal](ArgumentEncodingContext &ctx) { ctx.signalEventByHandle(event, signal); });
     refreshSignaledAndTrimRings();
     const auto seq = m_dxmtQueue->CurrentSeqId();
+    // ml1980: how many full drains readbacks cost and how long the caller waited.
+    const auto drain_start = std::chrono::steady_clock::now();
     commitCurrentChunkTimed(3);
     m_dxmtQueue->WaitCPUFence(seq);
     if (!waitForGpuOrDeviceError(signal))
       return false;
+    {
+      static uint64_t drains = 0, drain_us = 0;
+      drain_us += (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - drain_start).count();
+      if (++drains <= 2 || !(drains % 512))
+        Logger::warn(str::format("[d9-drain] ml1980 readback-drains=", drains, " avg-us=", drain_us / drains,
+            " surfaces=", copies.size()));
+    }
     // No allocation/trim is allowed between completion and these copies: the
     // ring span must remain owned until every CPU mirror has been populated.
     for (const auto &copy : copies)
@@ -10641,6 +10652,30 @@ MTLD3D9Device::FlushDrawBatch() {
   if (m_pendingOps.empty())
     return D3D_OK;
 
+  static const bool bounded_batches = [] {
+    bool enabled = env::getEnvVar("MADEIRA_D3D9_BATCH_BUDGET") != "0";
+    Logger::warn(str::format("[d9-batch-budget] ml1960 enabled=", enabled,
+        " reserve-kib=64 submit-mib=8"));
+    return enabled;
+  }();
+  // ml1970: charge used bytes and trim sparse small captures, so retention
+  // and the pressure submit follow real work. MADEIRA_D3D9_BATCH_USED=0
+  // restores ml1960's capacity charge and 8 MiB threshold.
+  static const bool charge_used = [] {
+    bool enabled = env::getEnvVar("MADEIRA_D3D9_BATCH_USED") != "0";
+    Logger::warn(str::format("[d9-batch-budget] ml1970 charge-used=", enabled,
+        " submit-mib=", (enabled ? kD9BatchCommitBytes : kD9BatchLegacyCommitBytes) >> 20));
+    return enabled;
+  }();
+  d9CompactBatch(m_pendingOps, bounded_batches, charge_used);
+  d9CompactBatch(m_pendingDraws, bounded_batches, charge_used);
+  d9CompactBatch(m_pendingBlits, bounded_batches, charge_used);
+  d9CompactBatch(m_pendingRefOps, bounded_batches, charge_used);
+  m_batchBytesSinceCommit += d9BatchCharge(m_pendingOps, charge_used) +
+      d9BatchCharge(m_pendingDraws, charge_used) +
+      d9BatchCharge(m_pendingBlits, charge_used) +
+      d9BatchCharge(m_pendingRefOps, charge_used);
+
   // Post pending-clear + AUTOGENMIPMAP BEFORE op-stream emit (EMIT-order within chunk).
   // Without this, pending clear drops silently when all draws fail Resolve.
   flushOpenWork();
@@ -10863,21 +10898,30 @@ MTLD3D9Device::FlushDrawBatch() {
   ++m_currentCmdSeq;
   refreshSignaledAndTrimRings();
 
-  // Restore capacity for the next batch. Single upfront alloc instead
-  // of log2(size) geometric grows. See snapshot comment at the
-  // chunk->emitcc site above for the heap-churn math. The high-water rather
-  // than the last size: batches are flushed per render-target pass, so their
-  // sizes alternate between a handful of draws and several hundred, and
-  // restoring the last one makes every large batch after a small one grow
-  // geometrically from almost nothing.
+  // Seed the next batch from its historical size, capped under ml1960's
+  // policy. Large batches can still grow, but a previous large pass must
+  // not give every later tiny pass a large allocation to retain in a chunk.
+  // The rollback preserves the original unbounded high-water reservation.
   m_pendingOpsPeak = std::max(m_pendingOpsPeak, prev_ops_size);
   m_pendingDrawsPeak = std::max(m_pendingDrawsPeak, prev_draws_size);
   m_pendingBlitsPeak = std::max(m_pendingBlitsPeak, prev_blits_size);
   m_pendingRefOpsPeak = std::max(m_pendingRefOpsPeak, prev_refops_size);
-  m_pendingOps.reserve(m_pendingOpsPeak);
-  m_pendingDraws.reserve(m_pendingDrawsPeak);
-  m_pendingBlits.reserve(m_pendingBlitsPeak);
-  m_pendingRefOps.reserve(m_pendingRefOpsPeak);
+  m_pendingOps.reserve(d9BatchReserve<PendingOpRef>(m_pendingOpsPeak, bounded_batches));
+  m_pendingDraws.reserve(d9BatchReserve<BatchedDraw>(m_pendingDrawsPeak, bounded_batches));
+  m_pendingBlits.reserve(d9BatchReserve<PendingBlitOp>(m_pendingBlitsPeak, bounded_batches));
+  m_pendingRefOps.reserve(d9BatchReserve<PendingRefOp>(m_pendingRefOpsPeak, bounded_batches));
+  // Record order is complete here; commit through the usual queue so its
+  // 32-chunk retirement fence bounds queued CPU batches even without Present.
+  // No GPU resource is released early and no application pointer is moved.
+  if (bounded_batches &&
+      m_batchBytesSinceCommit >= (charge_used ? kD9BatchCommitBytes : kD9BatchLegacyCommitBytes)) {
+    if (++m_batchPressureCommits == 1 || !(m_batchPressureCommits % 256))
+      Logger::warn(str::format("[d9-batch-budget] ml1960 pressure-commits=", m_batchPressureCommits,
+          " queued-kib=", m_batchBytesSinceCommit / 1024));
+    flushOpenWork();
+    emitCmdbufTailSignal();
+    commitCurrentChunkTimed(0);
+  }
   return D3D_OK;
 }
 

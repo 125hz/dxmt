@@ -4,6 +4,7 @@
 #include "com/com_object.hpp"
 #include "com/com_pointer.hpp"
 #include "d3d9.h"
+#include "d3d9_batch_budget.hpp"
 #include "d3d9_clear_quad.hpp"
 #include "d3d9_common_texture.hpp"
 #include "d3d9_diag.hpp"
@@ -1168,6 +1169,8 @@ private:
   size_t m_pendingDrawsPeak = 0;
   size_t m_pendingBlitsPeak = 0;
   size_t m_pendingRefOpsPeak = 0;
+  size_t m_batchBytesSinceCommit = 0;
+  uint64_t m_batchPressureCommits = 0;
 
   // Encode-thread-only mirror of ref-counted state. Mutated by walker
   // on SetRef ops in arrival order (wined3d CS / d3d11 shape). SoR for

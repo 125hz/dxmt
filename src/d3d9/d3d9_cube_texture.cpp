@@ -6,6 +6,7 @@
 #include "d3d9_image_lock.hpp"
 #include "d3d9_private_data.hpp"
 #include "d3d9_resource_priority.hpp"
+#include "util_env.hpp"
 #include "wsi_platform.hpp"
 
 #include <algorithm>
@@ -243,6 +244,24 @@ MTLD3D9CubeTexture::materializeLevelForLock(uint32_t subresource) {
   // ensureMirror (run by the surface before this) re-allocated a blank
   // backing; download the face's bytes back from the Metal texture so
   // the Lock hands out the real contents.
+  // ml1980: every stale face/level in one drain (see MTLD3D9Texture::materializeLevelForLock).
+  static const bool batch = env::getEnvVar("MADEIRA_D3D9_MIRROR_BATCH") != "0";
+  if (batch && m_mirrorBacking != nullptr && subresource < m_levels.size()) {
+    std::vector<MTLD3D9Surface *> pending;
+    std::vector<size_t> indices;
+    for (size_t i = 0; i < m_levels.size() && i < m_staleSubres.size(); ++i) {
+      if (m_staleSubres.test(i)) {
+        pending.push_back(m_levels[i].ptr());
+        indices.push_back(i);
+      }
+    }
+    if (!m_device->readbackSurfaceMirrors(pending.data(), pending.size()))
+      return;
+    ++m_mirror_download_count;
+    for (size_t i : indices)
+      m_staleSubres.reset(i);
+    return;
+  }
   if (m_mirrorBacking != nullptr && subresource < m_levels.size()) {
     if (!m_device->readbackSurfaceMirror(m_levels[subresource].ptr()))
       return;
