@@ -12,6 +12,22 @@ subdir('dxgi')
 subdir('d3d11')
 subdir('d3d10')
 
+# The Direct3D 9 frontend is a Windows module only: it is built against wine's
+# import libraries and reaches Metal through winemetal's unix calls, so there is
+# no native (macOS) variant of it. Which architectures actually get built, and
+# which of the built DLLs are installed into the app bundle, is decided by
+# build/dxmt-ios/build-pe.sh (--targets / --install), not here.
+#
+# MADEIRA (WOW64_DESIGN.md section 8): dxmt_madeira_native is the exception --
+# there the frontend IS the native half, compiled iOS-arm64 into
+# libdxmt_unix.a behind a 32-bit shim, and the comment above was the only
+# thing excluding it (section 8.2(a)). The objects that actually ship are
+# produced by build/dxmt-ios/build.sh rather than by meson; this arm keeps the
+# two descriptions of the configuration from drifting.
+if (not dxmt_native) or dxmt_madeira
+subdir('d3d9')
+endif
+
 if get_option('enable_nvapi')
 subdir('nvapi')
 endif

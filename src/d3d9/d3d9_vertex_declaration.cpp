@@ -5,6 +5,8 @@
 
 #include <cstring>
 
+#include "d3d9_census.hpp"
+
 namespace dxmt {
 
 namespace {
@@ -65,6 +67,7 @@ MTLD3D9VertexDeclaration::~MTLD3D9VertexDeclaration() = default;
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9VertexDeclaration::AddRef() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VertexDeclaration_AddRef);
   ULONG ref = ComObject::AddRef();
   if (ref == 1)
     m_device->AddRef();
@@ -73,6 +76,7 @@ MTLD3D9VertexDeclaration::AddRef() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9VertexDeclaration::Release() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VertexDeclaration_Release);
   // D3D9 Release-at-0 clamp: handed out at public 0 while self-pinned / bound
   // (DXVK clamps every device child); guard the underflow before the decrement.
   if (m_refCount.load() == 0)
@@ -90,6 +94,7 @@ MTLD3D9VertexDeclaration::Release() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VertexDeclaration::QueryInterface(REFIID riid, void **ppvObject) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VertexDeclaration_QueryInterface);
   if (!ppvObject)
     return E_POINTER;
   *ppvObject = nullptr;
@@ -104,6 +109,7 @@ MTLD3D9VertexDeclaration::QueryInterface(REFIID riid, void **ppvObject) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VertexDeclaration::GetDevice(IDirect3DDevice9 **ppDevice) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VertexDeclaration_GetDevice);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppDevice)
     return D3DERR_INVALIDCALL;
@@ -113,6 +119,7 @@ MTLD3D9VertexDeclaration::GetDevice(IDirect3DDevice9 **ppDevice) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VertexDeclaration::GetDeclaration(D3DVERTEXELEMENT9 *pElement, UINT *pNumElements) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VertexDeclaration_GetDeclaration);
   D9DeviceLock lock = m_device->LockDevice();
   // wined3d dlls/d3d9/vertexdeclaration.c; pElement is allowed
   // to be NULL; callers do that to query the count first. pNumElements

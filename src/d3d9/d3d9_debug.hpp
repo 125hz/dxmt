@@ -30,4 +30,21 @@ d9PresentDbgEnabled() {
   return on;
 }
 
+// ml1100 — THE EXTENT LINE IS NOT A TRACE, IT IS THE ANSWER.
+//
+// "The right fifth of the picture is missing" has exactly one arithmetic
+// cause in this path -- a back buffer presented 1:1 into a destination
+// narrower than it is -- and exactly one line that can tell blit from scale:
+// the `d9 layer extent` line in d3d9_swapchain.cpp. It was behind
+// DXMT_D9_PRESENTDBG, so every device log taken so far is silent about the
+// one number that decides it, and two rounds of reading could not rule the
+// present path in or out. It is deduped to one line per distinct
+// (window, drawable, backbuffer) triple, so a stable configuration emits a
+// handful for a whole session. DXMT_D9_EXTENTLOG=0 silences it.
+inline bool
+d9ExtentLogEnabled() {
+  static const bool on = env::getEnvVar("DXMT_D9_EXTENTLOG") != "0";
+  return on;
+}
+
 } // namespace dxmt

@@ -4,6 +4,7 @@
 #include "com/com_object.hpp"
 #include "com/com_pointer.hpp"
 #include "d3d9.h"
+#include "d3d9_batch_budget.hpp"
 #include "d3d9_clear_quad.hpp"
 #include "d3d9_common_texture.hpp"
 #include "d3d9_diag.hpp"
@@ -144,6 +145,24 @@ public:
   metalDevice() const {
     return m_metalDevice;
   }
+  // MADEIRA: does this GPU sample BC (DXTn / 3Dc) textures natively?
+  //
+  // FALSE on every pre-Apple9 GPU, which is most of the installed base. On
+  // such a device to_metal_pixel_format (winemetal_unix.c remap_unsupported_bc)
+  // silently creates a BC descriptor as RGBA8 / R8 / RG8 of the SAME texel
+  // extent, so the resource is real and samplable but its bytes have to be
+  // supplied decoded. Everything above this line -- the D3DFORMAT, the reported
+  // LockRect pitch, the mirror layout, CheckDeviceFormat -- keeps speaking BC,
+  // because surfacing the physical format to the application would break D3D9
+  // semantics for anything that computes its own pitches. The ONE place the
+  // physical layout is used is stageTextureUpload.
+  //
+  // Cached at device construction: it is a fixed property of the adapter, and
+  // the query is a wine_unix_call that the upload path must not pay per level.
+  bool
+  bcTexturesSupported() const {
+    return m_bcSupported;
+  }
   // Size of the vertex float constant register file this device exposes: 256
   // on a hardware-VP device, 8192 on a software / mixed-VP device. The shader
   // compile path threads it into the DXSO codegen so the constant ceiling and
@@ -182,7 +201,14 @@ public:
   // can block here on a free chunk while the encode thread is busy). Every
   // d3d9 calling-thread commit routes through here, including the swapchain
   // Present and query flush paths, whose queue is this device's queue.
-  void commitCurrentChunkTimed();
+  void commitCurrentChunkTimed(unsigned reason = 0);
+  uint64_t m_submitReasons[5] = {};
+  uint64_t m_submitCount = 0;
+  void noteReadback(unsigned kind, const D3DSURFACE_DESC &desc);
+  uint64_t m_readbackKinds[4] = {};
+  uint64_t m_readbackCount = 0;
+  uint64_t m_readbackBatches = 0, m_readbackWaitsSaved = 0;
+  uint64_t m_readbackBytes = 0;
   // Current device-wide frame latency, as Set/Get via the d3d9Ex API.
   // Read by MTLD3D9SwapChain to clamp the queue's max_latency_ to
   // min(m_frameLatency, BackBufferCount + 1): DXVK d3d9_swapchain.cpp
@@ -272,6 +298,31 @@ public:
   noteDynamicRenameBytes(uint64_t bytes) {
     m_renamedBytesSinceCommit += bytes;
   }
+
+  // MADEIRA ml1490: the same pressure from texture uploads, which stage their
+  // bytes in m_uploadRing. A ring block is recycled only once the command
+  // buffer that reads it retires, so a loading screen that uploads hundreds of
+  // MB between Presents grew the ring without bound (device census: staging
+  // ring 955 MB live in 83 blocks with 3 frees, the process pinned at its
+  // memory ceiling and the load crawling under compression). Commit once the
+  // threshold is staged, at the end of the upload call, and wait for the
+  // previous threshold's copies to retire before queueing another, so at most
+  // two are in flight however fast the CPU stages.
+  // DXMT_D9_UPLOAD_COMMIT_MB (default 64, 0 disables) sets the threshold.
+  uint64_t m_uploadedBytesSinceCommit = 0;
+  uint64_t m_uploadCommitSignal = 0;
+  uint64_t m_uploadCommits = 0;
+  uint64_t m_uploadCommitWaits = 0;
+
+  void
+  noteUploadBytes(uint64_t bytes) {
+    m_uploadedBytesSinceCommit += bytes;
+  }
+
+  // Call at a boundary where no draw is half recorded: the end of an upload
+  // API call (Unlock / UpdateTexture / UpdateSurface), never from the
+  // pre-draw managed sweep.
+  void settleUploadPressure();
 
   HRESULT STDMETHODCALLTYPE TestCooperativeLevel() override;
   UINT STDMETHODCALLTYPE GetAvailableTextureMem() override;
@@ -1118,6 +1169,8 @@ private:
   size_t m_pendingDrawsPeak = 0;
   size_t m_pendingBlitsPeak = 0;
   size_t m_pendingRefOpsPeak = 0;
+  size_t m_batchBytesSinceCommit = 0;
+  uint64_t m_batchPressureCommits = 0;
 
   // Encode-thread-only mirror of ref-counted state. Mutated by walker
   // on SetRef ops in arrival order (wined3d CS / d3d11 shape). SoR for
@@ -1510,6 +1563,9 @@ private:
   LONG m_savedWindowStyle = 0;
   LONG m_savedWindowExStyle = 0;
   RECT m_savedWindowRect = {};
+  // The iOS virtual display has no physical mode switch. Keep its coordinates
+  // in step with exclusive fullscreen, and restore the prior mode on exit.
+  uint32_t m_savedVirtualWidth = 0, m_savedVirtualHeight = 0;
   // Output the device window went fullscreen on, kept because the focus-gain
   // reposition runs while that window is minimized. Written on the device
   // thread at fullscreen entry, read on the focus-window thread, so atomic for
@@ -1548,6 +1604,8 @@ private:
   // GetMaximumFrameLatency expect their last Set value back.
   UINT m_frameLatency = 3;
   WMT::Reference<WMT::Device> m_metalDevice;
+  // See bcTexturesSupported(). Set once in the constructor body, never again.
+  bool m_bcSupported = true;
   // COW snapshot cache for BatchedDraw::pod_snapshot. m_encShadowDirty
   // bitmask; setters OR category on value-change. Fresh snapshot copies
   // only dirty axes; consecutive draws with no setters share one snapshot.
@@ -1746,6 +1804,9 @@ private:
   // rejection only; the eventual flush hint at EndScene will hang off
   // the same flag.
   bool m_inScene = false;
+  bool m_batchScenes = true;
+  uint64_t m_batchedSceneEnds = 0;
+  uint32_t m_anisotropyLimit = 16;
 
   // D3D9 ClipStatus: vestigial occlusion-test bookkeeping from FFP.
   // Set/Get round-trip the struct; nothing else consumes it. wined3d
@@ -2030,9 +2091,12 @@ public:
   }
 
   // Bump the deferred-MANAGED-upload sweep epoch. Called when a MANAGED texture
-  // with pending upload levels is bound (SetTexture / StateBlock Apply) and from
-  // EvictManagedResources, so the next QueueBatchedDraw re-pushes those levels
-  // from the sysmem mirror before the draws that sample them.
+  // with pending upload levels is bound (SetTexture / StateBlock Apply), from
+  // EvictManagedResources, and from a NO_DIRTY_UPDATE write-Unlock that deferred
+  // its own upload (ml1110, MTLD3D9Texture::noteLevelDeferredWrite) -- that one
+  // must bump it itself, because a title that rewrites an already-bound texture
+  // never re-enters SetTexture. The next QueueBatchedDraw then re-pushes those
+  // levels from the sysmem mirror before the draws that sample them.
   void
   markManagedUploadPending() {
     m_managedUploadEpoch.fetch_add(1, std::memory_order_relaxed);
@@ -2066,9 +2130,16 @@ public:
   // cross-encoder ordering (a same-chunk sampling draw must observe it).
   // src_slice_pitch is the source stride between depth slices for a 3D
   // (volume) upload; 0 = contiguous (2D, or a full-box 3D upload).
+  // src_row_bytes is how many bytes of each source row this region actually
+  // occupies, for a SUB-RECT upload whose src_pitch is the whole level's
+  // stride: the staging copy would otherwise read src_pitch bytes for the LAST
+  // row too, and a rect flush against the bottom edge with a non-zero left
+  // edge has only (pitch - left*bpp) bytes left in the level after it. 0 means
+  // "the rows are full-pitch", which is right for every whole-level upload.
   void stageTextureUpload(
       WMT::Texture dst, const Rc<dxmt::Texture> &dst_alloc, uint32_t mip_level, uint32_t slice, WMTOrigin origin,
-      WMTSize size, const void *src, uint32_t src_pitch, bool is_compressed, uint32_t src_slice_pitch = 0
+      WMTSize size, const void *src, uint32_t src_pitch, bool is_compressed, uint32_t src_slice_pitch = 0,
+      uint32_t src_row_bytes = 0
   );
 
   // A ring block that has been checked before anything writes through it. A
@@ -2152,7 +2223,8 @@ public:
   // through whatever its own contract allows.
   bool waitForGpuOrDeviceError(uint64_t value);
 
-  void readbackSurfaceMirror(class MTLD3D9Surface *surface);
+  bool readbackSurfaceMirror(class MTLD3D9Surface *surface);
+  bool readbackSurfaceMirrors(class MTLD3D9Surface *const *surfaces, size_t count);
 
   // Force a staged Clear (m_pendingClear) onto the CURRENT bindings by
   // posting a chunk lambda that opens a clear-only render pass against

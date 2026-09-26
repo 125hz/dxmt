@@ -7,6 +7,8 @@
 #include "d3d9_surface.hpp"
 #include "d3d9_vertex_declaration.hpp"
 #include <cstring>
+#include "d3d9_census.hpp"
+
 namespace dxmt {
 
 MTLD3D9StateBlock::MTLD3D9StateBlock(MTLD3D9Device *device, D3DSTATEBLOCKTYPE type) : m_device(device), m_type(type) {
@@ -30,6 +32,7 @@ MTLD3D9StateBlock::markLosable() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9StateBlock::AddRef() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9StateBlock_AddRef);
   ULONG ref = ComObject::AddRef();
   // Pin the device. Same shape as MTLD3D9Texture::AddRef: currently
   // safe because CreateStateBlock runs post-device-ctor (the device
@@ -45,6 +48,7 @@ MTLD3D9StateBlock::AddRef() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9StateBlock::Release() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9StateBlock_Release);
   // D3D9 Release-at-0 clamp: handed out at public 0 while self-pinned / bound
   // (DXVK clamps every device child); guard the underflow before the decrement.
   if (m_refCount.load() == 0)
@@ -74,6 +78,7 @@ MTLD3D9StateBlock::Release() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9StateBlock::QueryInterface(REFIID riid, void **ppvObject) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9StateBlock_QueryInterface);
   if (!ppvObject)
     return E_POINTER;
   *ppvObject = nullptr;
@@ -88,6 +93,7 @@ MTLD3D9StateBlock::QueryInterface(REFIID riid, void **ppvObject) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9StateBlock::GetDevice(IDirect3DDevice9 **ppDevice) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9StateBlock_GetDevice);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppDevice)
     return D3DERR_INVALIDCALL;
@@ -112,6 +118,7 @@ MTLD3D9StateBlock::seedLightsFromDevice() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9StateBlock::Capture() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9StateBlock_Capture);
   D9DeviceLock lock = m_device->LockDevice();
   // Capture between Begin/EndStateBlock is INVALIDCALL (wine
   // dlls/d3d9/tests/device.c test_begin_end_state_block asserts it).
@@ -288,6 +295,7 @@ MTLD3D9StateBlock::Capture() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9StateBlock::Apply() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9StateBlock_Apply);
   D9DeviceLock lock = m_device->LockDevice();
   // Same mid-recording gate as Capture: the wine test asserts Apply
   // also fails between Begin/EndStateBlock.

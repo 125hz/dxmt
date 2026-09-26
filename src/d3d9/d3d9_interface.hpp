@@ -21,6 +21,21 @@ namespace dxmt {
 // Reference: wined3d swapchain.c.
 bool CanonicalisePresentParams(D3DPRESENT_PARAMETERS &p, HWND hwndFallback, UINT adapter);
 
+// MADEIRA: the [d3d9-modes] trace. Two things, and only these two, because the
+// question they answer is "which mode did the application ask for, and why was
+// it refused" -- the one thing a log of a failed renderer init never showed.
+//
+//  - LogAdapterModesOnce() dumps, once per process, the adapter's mode count
+//    and its first eight modes. Called from the mode-enumeration entry points,
+//    so it fires for an application that never reaches CreateDevice.
+//  - LogPresentRequest() logs every CreateDevice / CreateDeviceEx / Reset /
+//    ResetEx / CreateAdditionalSwapChain request as
+//    "WxH fmt refresh windowed=" with the HRESULT it returned.
+//
+// Both write through Logger::info, which reaches the Wine debug channel.
+void LogAdapterModesOnce(UINT adapter);
+void LogPresentRequest(const char *what, const D3DPRESENT_PARAMETERS &p, HRESULT hr);
+
 class MTLD3D9Interface final : public ComObject<IDirect3D9Ex> {
 public:
   MTLD3D9Interface(UINT SDKVersion, bool isEx);
@@ -73,6 +88,37 @@ public:
   HRESULT STDMETHODCALLTYPE GetAdapterLUID(UINT Adapter, LUID *pLUID) override;
 
 private:
+  // MADEIRA [d3d9-caps]: the bodies of the five format/capability probes.
+  //
+  // The public methods above are thin wrappers that count the call, run one
+  // of these, and print the query and its HRESULT once per distinct tuple.
+  // The split exists because CheckDeviceFormat alone returns from two dozen
+  // places, and a trace threaded through all of them would drift the first
+  // time one moved.
+  //
+  // These are deliberately NOT declared STDMETHODCALLTYPE: gen_d3d9_census.py
+  // scans for that keyword to place the per-method counters and to build the
+  // code table, so a second definition carrying it would renumber every
+  // method after it. Same reason they are not in the vtable.
+  HRESULT CheckDeviceTypeProbe(
+      UINT Adapter, D3DDEVTYPE DevType, D3DFORMAT DisplayFormat, D3DFORMAT BackBufferFormat, BOOL bWindowed
+  );
+  HRESULT CheckDeviceFormatProbe(
+      UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT AdapterFormat, DWORD Usage, D3DRESOURCETYPE RType,
+      D3DFORMAT CheckFormat
+  );
+  HRESULT CheckDeviceMultiSampleTypeProbe(
+      UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT SurfaceFormat, BOOL Windowed,
+      D3DMULTISAMPLE_TYPE MultiSampleType, DWORD *pQualityLevels
+  );
+  HRESULT CheckDepthStencilMatchProbe(
+      UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT AdapterFormat, D3DFORMAT RenderTargetFormat,
+      D3DFORMAT DepthStencilFormat
+  );
+  HRESULT CheckDeviceFormatConversionProbe(
+      UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT SourceFormat, D3DFORMAT TargetFormat
+  );
+
   const UINT m_sdkVersion;
   const bool m_isEx;
   // Adapter list cached at construction. macOS GPUs do not hotplug

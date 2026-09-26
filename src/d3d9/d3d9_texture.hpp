@@ -122,6 +122,7 @@ public:
   // (wined3d's download_count heuristic) to avoid re-download thrash.
   void noteLevelUploaded(uint32_t level) override;
   void materializeLevelForLock(uint32_t level) override;
+  void noteLevelDeferredWrite(uint32_t level) override;
   void restoreMirrorForSource();
 
   // Deferred MANAGED upload (see MTLD3D9CommonTexture). A 2D MANAGED texture is
@@ -282,6 +283,7 @@ private:
   uint32_t m_uploaded_mask = 0;
   uint32_t m_mirror_stale_mask = 0;
   uint32_t m_mirror_download_count = 0;
+  size_t m_retainedMirrorBytes = 0;
   // Deferred-upload bitset (see the sweepManagedUpload / hasPendingManagedUpload
   // block above): one bit per mip level that the app has written (or that create
   // / EvictManagedResources marked) but that has not been pushed to the Metal

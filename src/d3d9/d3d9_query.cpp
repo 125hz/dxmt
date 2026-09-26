@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
+
+#include "d3d9_census.hpp"
 
 namespace dxmt {
 
@@ -32,6 +35,7 @@ MTLD3D9Query::endOcclusionIfActive() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9Query::AddRef() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_AddRef);
   ULONG ref = ComObject::AddRef();
   if (ref == 1)
     m_device->AddRef();
@@ -40,6 +44,7 @@ MTLD3D9Query::AddRef() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9Query::Release() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_Release);
   // D3D9 Release-at-0 clamp: handed out at public 0 while self-pinned / bound
   // (DXVK clamps every device child); guard the underflow before the decrement.
   if (m_refCount.load() == 0)
@@ -71,6 +76,7 @@ MTLD3D9Query::Release() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Query::QueryInterface(REFIID riid, void **ppvObject) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_QueryInterface);
   if (!ppvObject)
     return E_POINTER;
   *ppvObject = nullptr;
@@ -85,6 +91,7 @@ MTLD3D9Query::QueryInterface(REFIID riid, void **ppvObject) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Query::GetDevice(IDirect3DDevice9 **ppDevice) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_GetDevice);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppDevice)
     return D3DERR_INVALIDCALL;
@@ -94,13 +101,28 @@ MTLD3D9Query::GetDevice(IDirect3DDevice9 **ppDevice) {
 
 D3DQUERYTYPE STDMETHODCALLTYPE
 MTLD3D9Query::GetType() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_GetType);
   D9DeviceLock lock = m_device->LockDevice();
   return m_type;
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Query::GetDataSize() {
-  D9DeviceLock lock = m_device->LockDevice();
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_GetDataSize);
+  // MADEIRA: constant time, and deliberately lock-free. m_type is written once
+  // in the constructor and never again, so there is nothing for the device
+  // lock to protect here -- and this is the single hottest const accessor in
+  // the frontend: a fence-polling render thread calls it once per GetData.
+  // Under D3DCREATE_MULTITHREADED the lock it used to take was a recursive
+  // spinlock acquire/release (an atomic CAS plus a release store) for a value
+  // that cannot change, on a path the application executes tens of thousands
+  // of times a frame.
+  //
+  // It stays defined here rather than moving to the header as a true inline:
+  // gen_d3d9_census.py scans the .cpp files and the census code IS the index
+  // into d3d9_census_names[], so lifting one definition out would renumber
+  // every method after it.
+  //
   // Pure per-type table. Getting these wrong
   // corrupts memory when the app passes a buffer sized to the documented type.
   return d3d9_query_data_size(m_type);
@@ -108,6 +130,7 @@ MTLD3D9Query::GetDataSize() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Query::Issue(DWORD dwIssueFlags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_Issue);
   D9DeviceLock lock = m_device->LockDevice();
   // D3DISSUE_BEGIN starts a query (only OCCLUSION uses BEGIN; EVENT
   // and TIMESTAMP are END-only). D3DISSUE_END signals the GPU to
@@ -157,6 +180,19 @@ MTLD3D9Query::Issue(DWORD dwIssueFlags) {
       m_event_seq = queue.CurrentSeqId();
     }
     m_ended = true;
+    // MADEIRA: a fresh result window. The next GetData owns the one-off
+    // D3DGETDATA_FLUSH submit and starts a fresh poll ramp; see the
+    // m_flushed_since_issue / kPollsBeforePark comments in the header.
+    m_flushed_since_issue = false;
+    m_polls_since_issue = 0;
+    m_last_pending_poll_ns = 0;
+    m_poll_burst = 0;
+    if (m_type == D3DQUERYTYPE_EVENT || m_type == D3DQUERYTYPE_OCCLUSION) {
+      m_issue_ns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+              .count();
+      census::queryIssued();
+    }
     if (m_type == D3DQUERYTYPE_EVENT) {
       // Snapshot the chunk-in-flight's seq id. All prior calling-thread
       // work landed on this chunk (or earlier); once cpu_coherent
@@ -178,15 +214,128 @@ MTLD3D9Query::Issue(DWORD dwIssueFlags) {
   return D3D_OK;
 }
 
+// MADEIRA: [d3d9-query] bookkeeping for the moment a query's result becomes
+// available. Folded out of GetData because both of the exits that can observe
+// it (the immediate hit and the post-park retry) have to run it. The poll
+// itself is counted by the caller, once per GetData call, so that a parked
+// poll that then succeeds is one poll and not two.
+void
+MTLD3D9Query::noteCompletion() {
+  if (!m_issue_ns)
+    return;
+  uint64_t now =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  census::queryCompleted(now - m_issue_ns, m_polls_since_issue);
+  // One completion is reported once: a caller that keeps polling a finished
+  // query (several of them do, to re-read the pixel count) must not multiply
+  // the completion count and drag the average latency to zero.
+  m_issue_ns = 0;
+}
+
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Query::GetData(void *pData, DWORD dwSize, DWORD dwGetDataFlags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Query_GetData);
+  // MADEIRA: the shape of this function is the fix for the census finding that
+  // a 32-bit title spent ~85k GetData calls per frame (at ~30fps, i.e. the
+  // single busiest slot in the whole frontend) spinning on a GPU fence.
+  //
+  // Two things were wrong, and only the second one is dxmt's own doing:
+  //
+  //  1. The poll was cheap but not free -- a device-lock acquire, a census
+  //     add, a nested virtual GetDataSize (which took the lock AGAIN and
+  //     counted itself, which is why GetDataSize's census count matched
+  //     GetData's exactly: the application was barely calling it at all), and
+  //     a re-read of the queue's submission state. Multiplied by 85k that is
+  //     real frame time. getDataImpl no longer calls the virtual, and
+  //     GetDataSize no longer locks.
+  //
+  //  2. The loop had no back-pressure at all. Between the FLUSH submit and
+  //     the GPU retiring that command buffer there is nothing the calling
+  //     thread can usefully do, but it burned a core asking, on a device
+  //     where the encode and finish threads want that core. GetData may not
+  //     block -- S_FALSE while the GPU is busy is the contract, and an
+  //     application is free to go do something else on it -- so the answer is
+  //     a CAPPED park, not a wait: after kPollsBeforePark consecutive
+  //     S_FALSEs, hand the core away for at most kPollParkNanos and then
+  //     return S_FALSE regardless. The caller keeps polling; it just does so
+  //     a few hundred times a frame instead of a hundred thousand, and it
+  //     sees the completion within tens of microseconds of it happening.
+  //
+  // The park happens with the device lock DROPPED. Holding an API lock across
+  // it would be a deadlock hazard in the other direction: under
+  // D3DCREATE_MULTITHREADED a second application thread trying to enter any
+  // entry point would spin on D9RecursiveSpinlock for the whole park.
+  uint64_t park_seq = 0;
+  {
+    D9DeviceLock lock = m_device->LockDevice();
+    HRESULT hr = getDataImpl(pData, dwSize, dwGetDataFlags);
+    if (hr != S_FALSE) {
+      census::queryPoll(true, false);
+      noteCompletion();
+      return hr;
+    }
+    m_polls_since_issue++;
+    // ml1150: the old lifetime count penalized an asynchronous culling loop
+    // after its third check, even if those checks were a frame apart. Keep
+    // cooperative back-pressure for tight polling only. A 250us gap starts
+    // a new burst; completed queries never pay for this clock read.
+    static const bool adaptive = [] {
+      const char *value = std::getenv("DXMT_D9_QUERY_ADAPTIVE");
+      bool enabled = !value || std::strcmp(value, "0");
+      Logger::warn(str::format("[query-pacing] ml1150 burst-aware=", enabled,
+                              " (DXMT_D9_QUERY_ADAPTIVE=0 restores lifetime polling)"));
+      return enabled;
+    }();
+    uint32_t pending_polls = m_polls_since_issue;
+    if (adaptive) {
+      uint64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
+      m_poll_burst = m_last_pending_poll_ns && now - m_last_pending_poll_ns <= 250000
+          ? std::min(m_poll_burst + 1, kPollsBeforePark + 1) : 1;
+      m_last_pending_poll_ns = now;
+      pending_polls = m_poll_burst;
+    }
+    // Only the two GPU-backed types have a fence to park on. m_event_seq == 0
+    // means Issue(END) never ran for this type (TIMESTAMP and friends resolve
+    // on the calling thread), so there is nothing to wait for.
+    if (pending_polls <= kPollsBeforePark || !m_event_seq ||
+        (m_type != D3DQUERYTYPE_EVENT && m_type != D3DQUERYTYPE_OCCLUSION)) {
+      census::queryPoll(false, false);
+      return S_FALSE;
+    }
+    park_seq = m_event_seq;
+  }
+
+  // Both backends resolve off the same watermark: the finish thread retires
+  // command buffer N (which is what publishes an OCCLUSION query's readback,
+  // in CommandChunk::reset) and only then signals cpu_coherent to N, so
+  // CoherentSeqId() >= m_event_seq is exactly "the work this query was issued
+  // behind is done" for EVENT and OCCLUSION alike.
+  bool ready = m_device->dxmtQueue().WaitCPUFenceBounded(park_seq, kPollParkNanos);
+  if (!ready) {
+    census::queryPoll(false, true);
+    return S_FALSE;
+  }
+
+  // The fence landed inside the budget, so answer now instead of making the
+  // caller come back for it -- that is the difference between "the spin is
+  // bounded" and "the spin is bounded AND the result is timely". getDataImpl
+  // cannot re-submit here: the issuing chunk was committed on the first poll.
   D9DeviceLock lock = m_device->LockDevice();
-  return getDataImpl(pData, dwSize, dwGetDataFlags);
+  HRESULT hr = getDataImpl(pData, dwSize, dwGetDataFlags);
+  census::queryPoll(hr != S_FALSE, true);
+  if (hr != S_FALSE)
+    noteCompletion();
+  return hr;
 }
 
 HRESULT
 MTLD3D9Query::getDataImpl(void *pData, DWORD dwSize, DWORD dwGetDataFlags) {
-  const DWORD data_size = GetDataSize();
+  // MADEIRA: the free inline table, not the virtual GetDataSize override. The
+  // override is a counted census slot and used to re-take the device lock, so
+  // calling it from here made every poll pay for a second locked virtual call
+  // and double-counted itself in the census (see GetDataSize).
+  const DWORD data_size = d3d9_query_data_size(m_type);
 
   // wined3d query.c state machine, surfaced through dlls/d3d9 query.c GetData.
   // QUERY_BUILDING (BEGIN issued, END pending): the result window is still
@@ -221,9 +370,24 @@ MTLD3D9Query::getDataImpl(void *pData, DWORD dwSize, DWORD dwGetDataFlags) {
     // Submit issuing chunk for forward progress regardless of FLUSH flag.
     // Apps polling without D3DGETDATA_FLUSH would deadlock: chunk never
     // submits, 100% CPU spin with encode/finish threads idle. D3D9 contract.
-    if (queue.CurrentSeqId() == m_event_seq) {
-      m_device->FlushDrawBatch();
-      m_device->commitCurrentChunkTimed();
+    //
+    // MADEIRA: once per Issue, not once per poll. Present is the only commit
+    // point a normal d3d9 frame otherwise has (d3d9_swapchain.cpp:1114; the
+    // rest are teardown, Reset, forceFlushAndCommit and the synchronous
+    // readbacks), so without this submit a fence issued mid-frame could not
+    // possibly retire before the frame ended -- the poll loop would spin for a
+    // whole frame by construction. With it, the very first poll puts the work
+    // in flight. Repeating the submit on later polls does no good and some
+    // harm: each one cuts the chunk the application is still filling into
+    // another command buffer, and can block the calling thread on the
+    // 32-entry chunk ring (CommitCurrentChunk's chunk_ongoing.wait).
+    if (!m_flushed_since_issue) {
+      m_flushed_since_issue = true;
+      if (queue.CurrentSeqId() == m_event_seq) {
+        m_device->FlushDrawBatch();
+        m_device->commitCurrentChunkTimed(2);
+        census::queryFlushed();
+      }
     }
     if (queue.CoherentSeqId() < m_event_seq) {
       // Caller polling readiness with no-buffer call: S_FALSE on
@@ -254,9 +418,18 @@ MTLD3D9Query::getDataImpl(void *pData, DWORD dwSize, DWORD dwGetDataFlags) {
     // current chunk. Committing without draining them retires that chunk while
     // those snapshots are live, and the encode thread reads freed ring memory
     // when it resolves the draws on the next chunk.
-    if (queue.CurrentSeqId() == m_event_seq) {
-      m_device->FlushDrawBatch();
-      m_device->commitCurrentChunkTimed();
+    //
+    // MADEIRA: one submit per Issue, for the reasons spelled out on the EVENT
+    // arm above. It matters more here: a visibility-cull loop issues hundreds
+    // of occlusion queries per frame and polls them interleaved, so a per-poll
+    // submit would have turned one frame into hundreds of command buffers.
+    if (!m_flushed_since_issue) {
+      m_flushed_since_issue = true;
+      if (queue.CurrentSeqId() == m_event_seq) {
+        m_device->FlushDrawBatch();
+        m_device->commitCurrentChunkTimed(2);
+        census::queryFlushed();
+      }
     }
     uint64_t probe = 0;
     if (!m_visibility_query->getValue(&probe)) {
