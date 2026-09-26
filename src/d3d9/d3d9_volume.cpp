@@ -6,6 +6,8 @@
 #include "d3d9_private_data.hpp"
 #include "d3d9_volume_texture.hpp"
 
+#include "d3d9_census.hpp"
+
 namespace dxmt {
 
 MTLD3D9Volume::MTLD3D9Volume(
@@ -28,6 +30,7 @@ MTLD3D9Volume::~MTLD3D9Volume() = default;
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9Volume::AddRef() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Volume_AddRef);
   // A volume is always a sub-resource of its volume texture (never
   // standalone), so it shares the parent's public counter:
   // get_refcount(volume) == get_refcount(volume texture), per the D3D9
@@ -38,11 +41,13 @@ MTLD3D9Volume::AddRef() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9Volume::Release() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Volume_Release);
   return static_cast<IDirect3DVolumeTexture9 *>(m_container)->Release();
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Volume::QueryInterface(REFIID riid, void **ppvObject) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Volume_QueryInterface);
   if (!ppvObject)
     return E_POINTER;
   *ppvObject = nullptr;
@@ -56,6 +61,7 @@ MTLD3D9Volume::QueryInterface(REFIID riid, void **ppvObject) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Volume::GetDevice(IDirect3DDevice9 **ppDevice) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Volume_GetDevice);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppDevice)
     return D3DERR_INVALIDCALL;
@@ -65,24 +71,28 @@ MTLD3D9Volume::GetDevice(IDirect3DDevice9 **ppDevice) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Volume::SetPrivateData(REFGUID refguid, const void *pData, DWORD SizeOfData, DWORD Flags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Volume_SetPrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9SetPrivateData(m_privateData, refguid, pData, SizeOfData, Flags);
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Volume::GetPrivateData(REFGUID refguid, void *pData, DWORD *pSizeOfData) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Volume_GetPrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9GetPrivateData(m_privateData, refguid, pData, pSizeOfData);
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Volume::FreePrivateData(REFGUID refguid) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Volume_FreePrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9FreePrivateData(m_privateData, refguid);
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Volume::GetContainer(REFIID riid, void **ppContainer) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Volume_GetContainer);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppContainer)
     return D3DERR_INVALIDCALL;
@@ -92,6 +102,7 @@ MTLD3D9Volume::GetContainer(REFIID riid, void **ppContainer) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Volume::GetDesc(D3DVOLUME_DESC *pDesc) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Volume_GetDesc);
   D9DeviceLock lock = m_device->LockDevice();
   if (!pDesc)
     return D3DERR_INVALIDCALL;
@@ -101,6 +112,7 @@ MTLD3D9Volume::GetDesc(D3DVOLUME_DESC *pDesc) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Volume::LockBox(D3DLOCKED_BOX *pLockedVolume, const D3DBOX *pBox, DWORD Flags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Volume_LockBox);
   D9DeviceLock lock = m_device->LockDevice();
   if (!pLockedVolume)
     return D3DERR_INVALIDCALL;
@@ -186,6 +198,7 @@ MTLD3D9Volume::LockBox(D3DLOCKED_BOX *pLockedVolume, const D3DBOX *pBox, DWORD F
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Volume::UnlockBox() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Volume_UnlockBox);
   D9DeviceLock lock = m_device->LockDevice();
   if (!m_locked)
     return D3DERR_INVALIDCALL;

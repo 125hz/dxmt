@@ -7,6 +7,7 @@
 #include "dxmt_shader_cache.hpp"
 #include "log/log.hpp"
 #include "sha1/sha1_util.hpp"
+#include "util_futex.hpp"
 #include <version.h>
 
 #include <cerrno>
@@ -25,6 +26,8 @@
 #include <sys/stat.h>
 #define DXMT_MKDIR(p) ::mkdir((p), 0755)
 #endif
+
+#include "d3d9_census.hpp"
 
 namespace dxmt {
 
@@ -675,7 +678,7 @@ public:
   void
   SetDone(bool s) noexcept override {
     m_ready.store(s, std::memory_order_release);
-    m_ready.notify_all();
+    dxmt::atomic_notify_all(m_ready);
   }
 
   WMT::Function
@@ -1091,6 +1094,7 @@ MTLD3D9VertexShader::~MTLD3D9VertexShader() = default;
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9VertexShader::AddRef() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VertexShader_AddRef);
   ULONG ref = ComObject::AddRef();
   if (ref == 1)
     m_device->AddRef();
@@ -1099,6 +1103,7 @@ MTLD3D9VertexShader::AddRef() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9VertexShader::Release() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VertexShader_Release);
   // D3D9 Release-at-0 clamp: handed out at public 0 while self-pinned / bound
   // (DXVK clamps every device child); guard the underflow before the decrement.
   if (m_refCount.load() == 0)
@@ -1116,6 +1121,7 @@ MTLD3D9VertexShader::Release() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VertexShader::QueryInterface(REFIID riid, void **ppv) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VertexShader_QueryInterface);
   if (!ppv)
     return E_POINTER;
   *ppv = nullptr;
@@ -1130,6 +1136,7 @@ MTLD3D9VertexShader::QueryInterface(REFIID riid, void **ppv) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VertexShader::GetDevice(IDirect3DDevice9 **ppDevice) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VertexShader_GetDevice);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppDevice)
     return D3DERR_INVALIDCALL;
@@ -1139,6 +1146,7 @@ MTLD3D9VertexShader::GetDevice(IDirect3DDevice9 **ppDevice) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9VertexShader::GetFunction(void *pData, UINT *pSizeOfData) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9VertexShader_GetFunction);
   D9DeviceLock lock = m_device->LockDevice();
   // wined3d/dxvk shape: pSizeOfData is required (in/out). pData is
   // optional: when null, the call returns the required size only,
@@ -1191,6 +1199,23 @@ MTLD3D9PixelShaderModule::getVariantTask(
     uint32_t alpha_test_func, const uint8_t samp_kinds[16], bool point_sprite, int fog_mode, bool fog_coord_w,
     bool dual_source, bool flat_shading, bool emit_sample_mask, uint32_t unorm_snap_mask
 ) {
+  // The compiler's binding pre-scan and this metadata mask use the same
+  // dxso_opcode_samples/dxso_sampling_slot helpers (including SM1 implicit
+  // stages). Unread slots never enter its signature or lowering. Keeping
+  // their live texture kinds in the key needlessly compiles identical AIR
+  // and links new PSOs when an application changes an unrelated binding.
+  static const bool prune_unused = [] {
+    const char *value = std::getenv("DXMT_D9_SHADER_PRUNE");
+    bool enabled = !value || std::strcmp(value, "0");
+    Logger::warn(str::format("[shader-variants] ml1170 unused-sampler-pruning=", enabled));
+    return enabled;
+  }();
+  uint8_t canonical_kinds[16];
+  if (prune_unused) {
+    for (unsigned i = 0; i < 16; ++i)
+      canonical_kinds[i] = (m_metadata.sampler_usage_mask & (1u << i)) ? samp_kinds[i] : 0;
+    samp_kinds = canonical_kinds;
+  }
   // FNV-1a over the (alpha FUNC, sampler-kinds, point-sprite, fog-mode,
   // dual-source, flat) bounded tuple. The alpha REF and the bump-env
   // matrix / luminance scale + offset ride the shared PS uniform tail and
@@ -1257,6 +1282,7 @@ MTLD3D9PixelShader::~MTLD3D9PixelShader() = default;
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9PixelShader::AddRef() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9PixelShader_AddRef);
   ULONG ref = ComObject::AddRef();
   if (ref == 1)
     m_device->AddRef();
@@ -1265,6 +1291,7 @@ MTLD3D9PixelShader::AddRef() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9PixelShader::Release() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9PixelShader_Release);
   // D3D9 Release-at-0 clamp (see MTLD3D9VertexShader::Release).
   if (m_refCount.load() == 0)
     return 0;
@@ -1281,6 +1308,7 @@ MTLD3D9PixelShader::Release() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9PixelShader::QueryInterface(REFIID riid, void **ppv) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9PixelShader_QueryInterface);
   if (!ppv)
     return E_POINTER;
   *ppv = nullptr;
@@ -1295,6 +1323,7 @@ MTLD3D9PixelShader::QueryInterface(REFIID riid, void **ppv) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9PixelShader::GetDevice(IDirect3DDevice9 **ppDevice) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9PixelShader_GetDevice);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppDevice)
     return D3DERR_INVALIDCALL;
@@ -1304,6 +1333,7 @@ MTLD3D9PixelShader::GetDevice(IDirect3DDevice9 **ppDevice) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9PixelShader::GetFunction(void *pData, UINT *pSizeOfData) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9PixelShader_GetFunction);
   D9DeviceLock lock = m_device->LockDevice();
   if (!pSizeOfData)
     return D3DERR_INVALIDCALL;

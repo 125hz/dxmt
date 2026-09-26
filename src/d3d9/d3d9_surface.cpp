@@ -1,4 +1,5 @@
 #include "d3d9_surface.hpp"
+#include "d3d9_guest_alloc.hpp"
 
 #include <mutex>
 #include <set>
@@ -11,8 +12,12 @@
 #include "d3d9_image_lock.hpp"
 #include "d3d9_private_data.hpp"
 #include "d3d9_texture.hpp"
+#include "util_env.hpp"
+#include "util_string.hpp"
 #include "wsi_platform.hpp"
 #include <cstring>
+
+#include "d3d9_census.hpp"
 
 namespace dxmt {
 
@@ -55,6 +60,71 @@ d3dkmtDestroyDCFromMemory(const D3DKMT_DESTROYDCFROMMEMORY *arg) {
 }
 } // namespace
 #endif
+
+namespace {
+// ml1110 - WHICH UPLOAD POLICY A SURFACE'S UNLOCK TOOK IS NOT A TRACE, IT IS
+// THE ANSWER.
+//
+// "Progressively drawn text appears as fragments" has several arithmetic
+// causes that a screenshot cannot tell apart, and the one that decides between
+// them is not visible in any device log taken so far: what FLAGS the title
+// locks with and what this code then does with the bytes. A READONLY lock
+// uploads nothing by contract, a NO_DIRTY_UPDATE lock defers to the pre-draw
+// managed sweep, a plain lock pushes its own rect, and a SYSTEMMEM lock pushes
+// nothing because UpdateTexture is the consumer. Those are four different bugs
+// wearing one symptom.
+//
+// Deduped on (pool, usage, format, extent, full-vs-sub, flags) and capped, so a
+// title that locks the same few shapes every frame emits a handful of lines for
+// a whole session. DXMT_D9_LOCKLOG=0 silences it.
+constexpr size_t kLockPolicyLineCap = 24;
+
+void
+d9LogLockPolicy(
+    const D3DSURFACE_DESC &desc, uint32_t locked_w, uint32_t locked_h, bool readonly, bool no_dirty_update,
+    bool deferred
+) {
+  static const bool enabled = env::getEnvVar("DXMT_D9_LOCKLOG") != "0";
+  if (!enabled)
+    return;
+  const bool sub_rect = locked_w < desc.Width || locked_h < desc.Height;
+  auto key = std::make_tuple(
+      static_cast<uint32_t>(desc.Pool), static_cast<uint32_t>(desc.Usage), static_cast<uint32_t>(desc.Format),
+      desc.Width, desc.Height,
+      static_cast<uint32_t>(sub_rect) | (static_cast<uint32_t>(readonly) << 1) |
+          (static_cast<uint32_t>(no_dirty_update) << 2) | (static_cast<uint32_t>(deferred) << 3)
+  );
+  static std::mutex seen_mutex;
+  static std::set<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>> seen;
+  {
+    std::lock_guard<std::mutex> guard(seen_mutex);
+    if (seen.size() >= kLockPolicyLineCap || !seen.insert(key).second)
+      return;
+    if (seen.size() == 1)
+      Logger::info(
+          "[d9-lock] ml1110 upload policy: a write-Unlock pushes its own locked rect through the upload ring; "
+          "READONLY pushes nothing; NO_DIRTY_UPDATE on MANAGED defers to the pre-draw sweep and re-arms the level "
+          "(DXMT_D9_NODIRTY_SWEEP=0 drops it instead); SYSTEMMEM/SCRATCH are CPU masters that UpdateTexture / "
+          "UpdateSurface consume. DXMT_D9_LOCKLOG=0 silences these lines."
+      );
+  }
+  const char *policy = "upload locked rect on unlock";
+  if (readonly)
+    policy = "no upload (READONLY)";
+  else if (deferred)
+    policy = "defer to pre-draw managed sweep";
+  else if (desc.Pool == D3DPOOL_SYSTEMMEM || desc.Pool == D3DPOOL_SCRATCH)
+    policy = "cpu master, no upload (UpdateTexture/UpdateSurface consumes)";
+  Logger::info(
+      str::format(
+          "[d9-lock] ml1110 pool=", static_cast<uint32_t>(desc.Pool), " usage=", desc.Usage,
+          " fmt=", static_cast<uint32_t>(desc.Format), " ", desc.Width, "x", desc.Height, " locked=", locked_w, "x",
+          locked_h, sub_rect ? " (sub-rect)" : " (full)", readonly ? " READONLY" : "",
+          no_dirty_update ? " NO_DIRTY_UPDATE" : "", " -> ", policy
+      )
+  );
+}
+} // namespace
 
 MTLD3D9Surface::MTLD3D9Surface(
     MTLD3D9Device *device, const D3DSURFACE_DESC &desc, IUnknown *container, WMT::Reference<WMT::Texture> texture,
@@ -107,7 +177,7 @@ MTLD3D9Surface::~MTLD3D9Surface() {
   m_texture = WMT::Reference<WMT::Texture>{};
   m_buffer = WMT::Reference<WMT::Buffer>{};
   if (m_owned_backing)
-    wsi::aligned_free(m_owned_backing);
+    guest_free(m_owned_backing);
   if (m_isLosable)
     m_device->onLosableResourceDestroyed(m_losableBytes);
 }
@@ -145,7 +215,7 @@ MTLD3D9Surface::ensureHostMirror() {
 void
 MTLD3D9Surface::resetLockableMirror(void *cpuPtr, uint32_t pitch, void *ownedBacking) {
   if (m_owned_backing)
-    wsi::aligned_free(m_owned_backing);
+    guest_free(m_owned_backing);
   m_owned_backing = ownedBacking;
   m_cpu_ptr = cpuPtr;
   m_pitch = pitch;
@@ -153,6 +223,7 @@ MTLD3D9Surface::resetLockableMirror(void *cpuPtr, uint32_t pitch, void *ownedBac
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9Surface::AddRef() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_AddRef);
   // Texture / cube mip-level surface: share the parent texture's public
   // counter so get_refcount(level) == get_refcount(parent), per the D3D9
   // sub-resource contract (DXVK D3D9Subresource). The parent owns this level,
@@ -178,6 +249,7 @@ MTLD3D9Surface::AddRef() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9Surface::Release() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_Release);
   // Sub-resource: delegate the whole public Release to the parent texture.
   // The parent can destruct synchronously inside this call (its m_levels
   // clears and deletes `this`), so the result must come from the delegated
@@ -223,6 +295,7 @@ MTLD3D9Surface::Release() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::QueryInterface(REFIID riid, void **ppvObject) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_QueryInterface);
   if (!ppvObject)
     return E_POINTER;
   *ppvObject = nullptr;
@@ -237,6 +310,7 @@ MTLD3D9Surface::QueryInterface(REFIID riid, void **ppvObject) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::GetDevice(IDirect3DDevice9 **ppDevice) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_GetDevice);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppDevice)
     return D3DERR_INVALIDCALL;
@@ -246,24 +320,28 @@ MTLD3D9Surface::GetDevice(IDirect3DDevice9 **ppDevice) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::SetPrivateData(REFGUID refguid, const void *pData, DWORD SizeOfData, DWORD Flags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_SetPrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9SetPrivateData(m_privateData, refguid, pData, SizeOfData, Flags);
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::GetPrivateData(REFGUID refguid, void *pData, DWORD *pSizeOfData) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_GetPrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9GetPrivateData(m_privateData, refguid, pData, pSizeOfData);
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::FreePrivateData(REFGUID refguid) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_FreePrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9FreePrivateData(m_privateData, refguid);
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Surface::SetPriority(DWORD) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_SetPriority);
   D9DeviceLock lock = m_device->LockDevice();
   // d3d9_surface_SetPriority ignores priority unconditionally: a surface is
   // either a texture sub-resource (priority lives on the container) or a
@@ -273,12 +351,14 @@ MTLD3D9Surface::SetPriority(DWORD) {
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Surface::GetPriority() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_GetPriority);
   D9DeviceLock lock = m_device->LockDevice();
   return 0;
 }
 
 void STDMETHODCALLTYPE
 MTLD3D9Surface::PreLoad() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_PreLoad);
   D9DeviceLock lock = m_device->LockDevice();
   // Hint to upload MANAGED contents to VRAM ahead of the next draw.
   // Apple Silicon's unified memory makes this a no-op; the texture
@@ -287,12 +367,14 @@ MTLD3D9Surface::PreLoad() {
 
 D3DRESOURCETYPE STDMETHODCALLTYPE
 MTLD3D9Surface::GetType() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_GetType);
   D9DeviceLock lock = m_device->LockDevice();
   return D3DRTYPE_SURFACE;
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::GetContainer(REFIID riid, void **ppContainer) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_GetContainer);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppContainer)
     return D3DERR_INVALIDCALL;
@@ -357,6 +439,7 @@ MTLD3D9Surface::flagContainerDirtyRegion(const RECT *rect) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::GetDesc(D3DSURFACE_DESC *pDesc) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_GetDesc);
   D9DeviceLock lock = m_device->LockDevice();
   if (!pDesc)
     return D3DERR_INVALIDCALL;
@@ -373,6 +456,7 @@ MTLD3D9Surface::GetDesc(D3DSURFACE_DESC *pDesc) {
 // cpu_ptr and correctly falls out at the null check below.
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::LockRect(D3DLOCKED_RECT *pLockedRect, const RECT *pRect, DWORD Flags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_LockRect);
   D9DeviceLock lock = m_device->LockDevice();
   if (!pLockedRect)
     return D3DERR_INVALIDCALL;
@@ -565,6 +649,7 @@ MTLD3D9Surface::LockRect(D3DLOCKED_RECT *pLockedRect, const RECT *pRect, DWORD F
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::UnlockRect() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_UnlockRect);
   D9DeviceLock lock = m_device->LockDevice();
   // Unlock of a surface that is not currently mapped. DXVK and wined3d forgive
   // it for a D3DRTYPE_TEXTURE container (m_is_texture_mip) and reject it with
@@ -604,6 +689,12 @@ MTLD3D9Surface::UnlockRect() {
   // the eager upload below (deferManagedNoDirtyUpload() gates on the 2D host).
   const bool defer_no_dirty = m_locked_no_dirty_update && m_desc.Pool == D3DPOOL_MANAGED && m_lazyMirrorParent &&
                               m_lazyMirrorParent->deferManagedNoDirtyUpload();
+  // ml1110: hand the deferral to something that will actually perform it. See
+  // D9LazyMirrorHost::noteLevelDeferredWrite -- without this the bytes stay in
+  // the mirror forever once the level has been uploaded once.
+  if (defer_no_dirty && !m_locked_readonly && m_locked_w > 0 && m_locked_h > 0)
+    m_lazyMirrorParent->noteLevelDeferredWrite(m_lazy_subresource);
+  d9LogLockPolicy(m_desc, m_locked_w, m_locked_h, m_locked_readonly, m_locked_no_dirty_update, defer_no_dirty);
   if (m_buffer == nullptr && m_cpu_ptr != nullptr && m_texture != nullptr &&
       (m_desc.Pool == D3DPOOL_MANAGED || m_desc.Pool == D3DPOOL_DEFAULT) && !m_locked_readonly && !defer_no_dirty &&
       !IsNullFormat(m_desc.Format) && m_locked_w > 0 && m_locked_h > 0) {
@@ -639,8 +730,12 @@ MTLD3D9Surface::UnlockRect() {
     // but next Lock could overwrite them (Apple Silicon UMA). Per-surface
     // rename ring on mirror would recover perf; follow-on work.
     const void *src = static_cast<const uint8_t *>(m_cpu_ptr) + src_offset;
+    // The locked region owns only its own row length inside the mirror, not
+    // the whole stride: a rect flush against the bottom edge with a non-zero
+    // left edge has nothing after its last row (see stageTextureUpload).
     m_device->stageTextureUpload(
-        m_texture, m_dxmtTexture, m_mip_level, m_array_slice, origin, size, src, m_pitch, compressed
+        m_texture, m_dxmtTexture, m_mip_level, m_array_slice, origin, size, src, m_pitch, compressed,
+        /*src_slice_pitch=*/0, D3DFormatRowPitch(m_desc.Format, m_locked_w)
     );
     // The bytes are now snapshotted into the upload ring; the mirror is no
     // longer referenced. A MANAGED parent reclaims it once every level has
@@ -663,11 +758,14 @@ MTLD3D9Surface::UnlockRect() {
   m_locked_readonly = false;
   m_locked_no_dirty_update = false;
   m_locked_x = m_locked_y = m_locked_w = m_locked_h = 0;
+  // ml1490: the lock is released and nothing is half recorded.
+  m_device->settleUploadPressure();
   return D3D_OK;
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::GetDC(HDC *phdc) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_GetDC);
   D9DeviceLock lock = m_device->LockDevice();
   // Which surfaces a title paints through GDI decides which lock sub-path runs,
   // and the sub-paths differ in kind: a DEFAULT-pool surface is GPU-authoritative
@@ -758,6 +856,7 @@ MTLD3D9Surface::GetDC(HDC *phdc) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Surface::ReleaseDC(HDC hdc) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Surface_ReleaseDC);
   D9DeviceLock lock = m_device->LockDevice();
 #ifdef _WIN32
   if (m_gdi_dc == nullptr || hdc != m_gdi_dc)

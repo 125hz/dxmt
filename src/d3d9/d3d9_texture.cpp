@@ -1,13 +1,19 @@
 #include "d3d9_texture.hpp"
+#include "d3d9_guest_alloc.hpp"
 
 #include "d3d9_device.hpp"
 #include "d3d9_format.hpp"
 #include "d3d9_image_lock.hpp"
 #include "d3d9_private_data.hpp"
 #include "d3d9_resource_priority.hpp"
+#include "util_env.hpp"
 #include "wsi_platform.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include "log/log.hpp"
+
+#include "d3d9_census.hpp"
 
 namespace dxmt {
 
@@ -260,7 +266,7 @@ MTLD3D9Texture::ensureMirror() {
   uint64_t mirror_gpu_addr = 0;
   void *mirror_host = nullptr;
   if (!m_device->acquireBufferBacking(total_bytes, m_mirrorBuffer, mirror_gpu_addr, mirror_host, m_mirrorBacking)) {
-    m_mirrorBacking = wsi::aligned_malloc(total_bytes, DXMT_PAGE_SIZE);
+    m_mirrorBacking = guest_alloc(total_bytes, DXMT_PAGE_SIZE);
     if (!m_mirrorBacking)
       return;
     std::memset(m_mirrorBacking, 0, total_bytes);
@@ -276,7 +282,7 @@ MTLD3D9Texture::ensureMirror() {
     binfo.memory.set(m_mirrorBacking);
     m_mirrorBuffer = m_device->metalDevice().newBuffer(binfo);
     if (m_mirrorBuffer == nullptr) {
-      wsi::aligned_free(m_mirrorBacking);
+      guest_free(m_mirrorBacking);
       m_mirrorBacking = nullptr;
       return;
     }
@@ -302,9 +308,44 @@ MTLD3D9Texture::ensureMirror() {
 // wins arrives much sooner.
 static constexpr uint32_t kMirrorReadEvictThreshold = 4;
 
+// Small MANAGED mirrors are inexpensive, but reconstructing even a tiny one
+// drains the GPU queue. Keep a bounded working set without changing LockRect
+// visibility or discarding the CPU's authoritative bytes. Shared across devices
+// in this module; destructors may run on the encode thread.
+static std::atomic<size_t> retainedMirrorBytes{0};
+static constexpr size_t kMirrorRetentionBudget = 32u * 1024u * 1024u;
+static bool smallMirrorRetentionEnabled() {
+  static const bool enabled = [] {
+    const bool value = env::getEnvVar("DXMT_D9_SMALL_MIRROR_CACHE") != "0";
+    Logger::warn(str::format("[mirror-cache] ml1180 enabled=", value,
+        " budget=33554432 max-resource=262144"));
+    return value;
+  }();
+  return enabled;
+}
+
+// MADEIRA: is this resource's sysmem mirror the ONLY copy of its bytes?
+//
+// True for a block-compressed format on an adapter that cannot sample BC. The
+// Metal texture there holds DECODED texels (see stageTextureUpload), and
+// nothing re-encodes them, so the mirror is a one-way master: evicting it
+// would discard the BC blocks permanently and the next read-Lock would hand
+// the application whatever a failed readback left behind. Pinning it costs the
+// compressed footprint -- an eighth to a quarter of what the decoded GPU copy
+// already costs -- which is the cheaper half of the trade.
+//
+// On a BC-capable adapter this is false for every format and the eviction
+// machinery is byte-for-byte what it was.
+static bool
+mirrorIsSoleCopy(MTLD3D9Device *device, D3DFORMAT format) {
+  return !device->bcTexturesSupported() && (IsCompressedFormat(format) || Is3DcFormat(format));
+}
+
 void
 MTLD3D9Texture::dropMirror() {
   if (m_userMemory || m_mirrorBacking == nullptr)
+    return;
+  if (mirrorIsSoleCopy(m_device, m_format))
     return;
   // The level surfaces share one backing, and D3D9 lets an app hold two mip
   // levels locked at once: freeing while any level is locked would yank the
@@ -320,6 +361,10 @@ MTLD3D9Texture::dropMirror() {
   // cap there returns it to the OS when the pool is over budget).
   for (auto &level : m_levels)
     level->clearMirrorPatch();
+  if (m_retainedMirrorBytes) {
+    retainedMirrorBytes.fetch_sub(m_retainedMirrorBytes, std::memory_order_relaxed);
+    m_retainedMirrorBytes = 0;
+  }
   const size_t mirror_bytes = m_mirrorOffsets.empty() ? 0u : m_mirrorOffsets.back();
   m_device->releaseBufferBacking(std::move(m_mirrorBuffer), m_mirrorBacking, /*gpu_address=*/0, mirror_bytes);
   m_mirrorBacking = nullptr;
@@ -342,8 +387,57 @@ MTLD3D9Texture::noteLevelUploaded(uint32_t level) {
     // reaches here and the bit (if set) stays for the sweep.
     m_needs_upload_mask &= ~(1u << level);
   }
+  if (m_uploaded_mask == m_all_levels_mask && smallMirrorRetentionEnabled()) {
+    if (m_retainedMirrorBytes)
+      return;
+    const size_t bytes = m_mirrorOffsets.empty() ? 0 : m_mirrorOffsets.back();
+    // Sole-copy compressed mirrors already have to remain resident, so do not
+    // charge those against this optional cache. No new allocation is made.
+    if (mirrorIsSoleCopy(m_device, m_format))
+      return;
+    if (bytes && bytes <= 256u * 1024u) {
+      size_t used = retainedMirrorBytes.load(std::memory_order_relaxed);
+      while (used <= kMirrorRetentionBudget - bytes) {
+        if (retainedMirrorBytes.compare_exchange_weak(used, used + bytes, std::memory_order_relaxed)) {
+          m_retainedMirrorBytes = bytes;
+          return;
+        }
+      }
+    }
+  }
   if (m_uploaded_mask == m_all_levels_mask && m_mirror_download_count <= kMirrorReadEvictThreshold)
     dropMirror();
+}
+
+// ml1110: a NO_DIRTY_UPDATE write-Unlock skipped the eager upload, so re-arm
+// the level for the pre-draw managed sweep.
+//
+// BEFORE: UnlockRect saw defer_no_dirty, skipped stageTextureUpload and
+// skipped noteLevelUploaded, and nothing else touched m_needs_upload_mask. The
+// bit was set once at create and cleared by the FIRST eager upload of that
+// level, so the very first deferred write to a fresh texture was picked up by
+// the sweep and every later one was dropped on the floor: the bytes sat in the
+// mirror, the GPU copy kept whatever it last received, and only an explicit
+// AddDirtyRect or EvictManagedResources could ever dislodge them. A texture
+// that is written once, drawn, then rewritten in place therefore kept showing
+// its first contents.
+//
+// AFTER: the deferred write sets the level's bit and moves the sweep epoch, so
+// the next draw that has this texture bound pushes the level at full extent
+// from the mirror (MTLD3D9Texture::sweepManagedUpload) ahead of the draw, the
+// DXVK UploadManagedTextures ordering. Idempotent: repeated deferred writes
+// before a draw collapse into one push, and the sweep clears the bit again.
+//
+// DXMT_D9_NODIRTY_SWEEP=0 restores the drop-on-the-floor behaviour.
+void
+MTLD3D9Texture::noteLevelDeferredWrite(uint32_t level) {
+  static const bool enabled = env::getEnvVar("DXMT_D9_NODIRTY_SWEEP") != "0";
+  if (!enabled || m_pool != D3DPOOL_MANAGED || m_userMemory || level >= 32)
+    return;
+  m_needs_upload_mask |= (1u << level);
+  // The mask alone is not enough: the sweep only runs when the epoch moves, and
+  // a same-texture rebind early-outs in SetTexture without bumping it.
+  m_device->markManagedUploadPending();
 }
 
 void
@@ -353,8 +447,30 @@ MTLD3D9Texture::materializeLevelForLock(uint32_t level) {
   // ensureMirror (run by the surface before this) re-allocated a blank backing;
   // download the level's bytes back from the Metal texture so the Lock hands
   // out the real contents.
+  // ml1980: every stale level in ONE drain. A title that locks a texture's mips one
+  // after another paid a full queue drain (flush, commit, CPU fence, GPU wait) per
+  // level -- ~45 drains/s serialising CPU and GPU in a device log. ensureMirror has
+  // already allocated the whole backing, so this costs no extra address space.
+  // MADEIRA_D3D9_MIRROR_BATCH=0 restores the per-level readback.
+  static const bool batch = env::getEnvVar("MADEIRA_D3D9_MIRROR_BATCH") != "0";
+  if (batch && m_mirrorBacking != nullptr && level < m_levels.size()) {
+    std::vector<MTLD3D9Surface *> pending;
+    uint32_t mask = 0;
+    for (size_t i = 0; i < m_levels.size() && i < 32; ++i) {
+      if (m_mirror_stale_mask & (1u << i)) {
+        pending.push_back(m_levels[i].ptr());
+        mask |= 1u << i;
+      }
+    }
+    if (!m_device->readbackSurfaceMirrors(pending.data(), pending.size()))
+      return;
+    ++m_mirror_download_count;
+    m_mirror_stale_mask &= ~mask;
+    return;
+  }
   if (m_mirrorBacking != nullptr && level < m_levels.size()) {
-    m_device->readbackSurfaceMirror(m_levels[level].ptr());
+    if (!m_device->readbackSurfaceMirror(m_levels[level].ptr()))
+      return;
     ++m_mirror_download_count;
   }
   m_mirror_stale_mask &= ~(1u << level);
@@ -367,10 +483,13 @@ MTLD3D9Texture::restoreMirrorForSource() {
   if (m_mirror_stale_mask == 0)
     return;
   ensureMirror();
-  for (uint32_t i = 0; i < m_levels.size() && i < 32; ++i) {
+  std::vector<MTLD3D9Surface *> pending;
+  for (size_t i = 0; i < m_levels.size() && i < 32; ++i) {
     if (m_mirror_stale_mask & (1u << i))
-      m_device->readbackSurfaceMirror(m_levels[i].ptr());
+      pending.push_back(m_levels[i].ptr());
   }
+  if (!m_device->readbackSurfaceMirrors(pending.data(), pending.size()))
+    return;
   m_mirror_stale_mask = 0;
   ++m_mirror_download_count;
 }
@@ -428,8 +547,11 @@ MTLD3D9Texture::stageMirrorLevel(uint32_t level, LONG l, LONG t, LONG r, LONG b)
   size.height = static_cast<uint32_t>(b - t);
   size.depth = 1;
   const uint8_t *src = static_cast<const uint8_t *>(m_mirrorBacking) + mirrorOffset(level) + row_off + col_off;
+  // Only this rect's own row length lives after its last row (see
+  // stageTextureUpload); the stride stays the level's.
   m_device->stageTextureUpload(
-      metalTexture(), m_dxmtTexture, level, /*slice=*/0, origin, size, src, src_pitch, compressed
+      metalTexture(), m_dxmtTexture, level, /*slice=*/0, origin, size, src, src_pitch, compressed,
+      /*src_slice_pitch=*/0, D3DFormatRowPitch(m_format, size.width)
   );
 }
 
@@ -502,6 +624,8 @@ MTLD3D9Texture::evictManagedMirror() {
 }
 
 MTLD3D9Texture::~MTLD3D9Texture() {
+  if (m_retainedMirrorBytes)
+    retainedMirrorBytes.fetch_sub(m_retainedMirrorBytes, std::memory_order_relaxed);
   // Tear down per-level surfaces first so the GPU stops sampling
   // before we drop the underlying allocations.
   m_levels.clear();
@@ -536,6 +660,7 @@ MTLD3D9Texture::markLosable() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9Texture::AddRef() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_AddRef);
   ULONG ref = ComObject::AddRef();
   if (ref == 1)
     m_device->AddRef();
@@ -544,6 +669,7 @@ MTLD3D9Texture::AddRef() {
 
 ULONG STDMETHODCALLTYPE
 MTLD3D9Texture::Release() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_Release);
   // D3D9 clamps Release-at-0 (a quirk apps rely on; com/com_object.hpp
   // ComObjectClamp). This class multiply-inherits (ComObject +
   // MTLD3D9CommonTexture) so ComObjectClamp cannot wrap it; fold the guard by
@@ -578,6 +704,7 @@ MTLD3D9Texture::Release() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::QueryInterface(REFIID riid, void **ppvObject) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_QueryInterface);
   if (!ppvObject)
     return E_POINTER;
   *ppvObject = nullptr;
@@ -593,6 +720,7 @@ MTLD3D9Texture::QueryInterface(REFIID riid, void **ppvObject) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::GetDevice(IDirect3DDevice9 **ppDevice) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetDevice);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppDevice)
     return D3DERR_INVALIDCALL;
@@ -602,48 +730,56 @@ MTLD3D9Texture::GetDevice(IDirect3DDevice9 **ppDevice) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::SetPrivateData(REFGUID refguid, const void *pData, DWORD SizeOfData, DWORD Flags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_SetPrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9SetPrivateData(m_privateData, refguid, pData, SizeOfData, Flags);
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::GetPrivateData(REFGUID refguid, void *pData, DWORD *pSizeOfData) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetPrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9GetPrivateData(m_privateData, refguid, pData, pSizeOfData);
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::FreePrivateData(REFGUID refguid) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_FreePrivateData);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9FreePrivateData(m_privateData, refguid);
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Texture::SetPriority(DWORD PriorityNew) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_SetPriority);
   D9DeviceLock lock = m_device->LockDevice();
   return D3D9SetResourcePriority(m_pool, m_priority, PriorityNew);
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Texture::GetPriority() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetPriority);
   D9DeviceLock lock = m_device->LockDevice();
   return m_priority;
 }
 
 void STDMETHODCALLTYPE
 MTLD3D9Texture::PreLoad() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_PreLoad);
   D9DeviceLock lock = m_device->LockDevice();
   // Apple Silicon's unified memory makes residency hints a no-op.
 }
 
 D3DRESOURCETYPE STDMETHODCALLTYPE
 MTLD3D9Texture::GetType() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetType);
   D9DeviceLock lock = m_device->LockDevice();
   return D3DRTYPE_TEXTURE;
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Texture::SetLOD(DWORD LODNew) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_SetLOD);
   D9DeviceLock lock = m_device->LockDevice();
   // Per D3D9: SetLOD only meaningful for D3DPOOL_MANAGED. For other
   // pools the runtime returns 0 and ignores the new value. wined3d
@@ -661,18 +797,21 @@ MTLD3D9Texture::SetLOD(DWORD LODNew) {
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Texture::GetLOD() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetLOD);
   D9DeviceLock lock = m_device->LockDevice();
   return m_lod.load(std::memory_order_relaxed);
 }
 
 DWORD STDMETHODCALLTYPE
 MTLD3D9Texture::GetLevelCount() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetLevelCount);
   D9DeviceLock lock = m_device->LockDevice();
   return static_cast<DWORD>(m_levels.size());
 }
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::SetAutoGenFilterType(D3DTEXTUREFILTERTYPE FilterType) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_SetAutoGenFilterType);
   D9DeviceLock lock = m_device->LockDevice();
   // wined3d texture.c d3d9_texture_2d_SetAutoGenFilterType: reject
   // D3DTEXF_NONE: the runtime requires a valid auto-gen filter, and
@@ -686,12 +825,14 @@ MTLD3D9Texture::SetAutoGenFilterType(D3DTEXTUREFILTERTYPE FilterType) {
 
 D3DTEXTUREFILTERTYPE STDMETHODCALLTYPE
 MTLD3D9Texture::GetAutoGenFilterType() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetAutoGenFilterType);
   D9DeviceLock lock = m_device->LockDevice();
   return m_autoGenFilter;
 }
 
 void STDMETHODCALLTYPE
 MTLD3D9Texture::GenerateMipSubLevels() {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GenerateMipSubLevels);
   D9DeviceLock lock = m_device->LockDevice();
   // Only AUTOGENMIPMAP textures auto-regenerate: an explicit-mip texture fills
   // its levels by Lock/Unlock and must not have them overwritten by a downsample
@@ -715,6 +856,7 @@ MTLD3D9Texture::GenerateMipSubLevels() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::GetLevelDesc(UINT Level, D3DSURFACE_DESC *pDesc) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetLevelDesc);
   D9DeviceLock lock = m_device->LockDevice();
   if (!pDesc)
     return D3DERR_INVALIDCALL;
@@ -725,6 +867,7 @@ MTLD3D9Texture::GetLevelDesc(UINT Level, D3DSURFACE_DESC *pDesc) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::GetSurfaceLevel(UINT Level, IDirect3DSurface9 **ppSurfaceLevel) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_GetSurfaceLevel);
   D9DeviceLock lock = m_device->LockDevice();
   if (!ppSurfaceLevel)
     return D3DERR_INVALIDCALL;
@@ -740,6 +883,7 @@ MTLD3D9Texture::GetSurfaceLevel(UINT Level, IDirect3DSurface9 **ppSurfaceLevel) 
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::LockRect(UINT Level, D3DLOCKED_RECT *pLockedRect, const RECT *pRect, DWORD Flags) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_LockRect);
   D9DeviceLock lock = m_device->LockDevice();
   if (Level >= m_levels.size())
     return D3DERR_INVALIDCALL;
@@ -750,6 +894,7 @@ MTLD3D9Texture::LockRect(UINT Level, D3DLOCKED_RECT *pLockedRect, const RECT *pR
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::UnlockRect(UINT Level) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_UnlockRect);
   D9DeviceLock lock = m_device->LockDevice();
   if (Level >= m_levels.size())
     return D3DERR_INVALIDCALL;
@@ -764,6 +909,7 @@ MTLD3D9Texture::UnlockRect(UINT Level) {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D9Texture::AddDirtyRect(const RECT *pDirtyRect) {
+  D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Texture_AddDirtyRect);
   D9DeviceLock lock = m_device->LockDevice();
   // wined3d wined3d_texture_add_dirty_region: rect==NULL marks the
   // whole sub-resource set dirty; otherwise it validates the region against the
