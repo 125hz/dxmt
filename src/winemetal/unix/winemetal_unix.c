@@ -39,6 +39,9 @@ extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name,
 #include <bootstrap.h>
 #endif
 #include <mach/mach_port.h>
+/* ml1050: mach_absolute_time / mach_timebase_info / mach_wait_until for the
+ * present limiter and the frame timers. */
+#include <mach/mach_time.h>
 #define WINEMETAL_API
 #include "../winemetal_thunks.h"
 #include "../airconv_thunks.h"
@@ -48,6 +51,34 @@ extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name,
  * (above the definition site in source order) can increment them. */
 static _Atomic uint64_t g_madeira_draw_calls;
 static _Atomic uint64_t g_madeira_draw_calls_at_last_log;
+
+/* iOS-Madeira ml1050: the [frame] critical-path breakdown.
+ *
+ * The storage, the accumulators and the reporter all live in
+ * build/ntdll-unix/server_ios.c (see build/ntdll-unix/shims/ios_frame_stats.h
+ * for the whole design); this file is one of the two producers.  Declared
+ * extern here rather than by including that header because this translation
+ * unit is compiled by build/dxmt-ios/build.sh, which does not carry the ntdll
+ * shims include path -- exactly the way madeira_log_present_cadence() already
+ * reaches ios_srv_wait_us further down.  Both halves are statically linked
+ * into the one Madeira image, so these are ordinary intra-image symbols.
+ *
+ * Everything here is a no-op when the instrument is off; the `on` flag is
+ * read through the accumulators, so this file never branches on it. */
+extern void ios_frame_game_tick(void);
+extern void ios_frame_encode_present(int skipped);
+extern void ios_frame_drawable_wait(unsigned long long ns);
+extern void ios_frame_gpu(unsigned long long gpu_ns, unsigned long long inflight);
+extern void ios_frame_note_display(int panel_hz, int intent_hz, int mode);
+extern void ios_frame_limiter(unsigned long long ns);
+
+/* Command buffers committed minus command buffers retired: the honest GPU
+ * queue depth, which is the number the `[frame]` line reports as qdepth.  Both
+ * ends are visible from this file and from nowhere else -- DXMT's own
+ * chunk_ongoing counter is PE-side emulated state. */
+static _Atomic uint64_t g_madeira_cmdbuf_inflight;
+extern int ios_frame_stats_on;
+extern void ios_frame_pass(unsigned kind, unsigned loads, unsigned stores, unsigned clears);
 
 typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
@@ -405,6 +436,17 @@ _MTLCommandBuffer_commit(void *obj) {
     struct rm_arg_handle a = { params->handle };
     wmtr_call(RM_OP_COMMIT, &a, sizeof a, 0, 0, 0);
     return STATUS_SUCCESS;
+  }
+  /* ml1140: retirement belongs to the GPU completion, not waitUntilCompleted.
+   * The finish thread skips that wait for buffers already completed, so the
+   * old subtraction counted them as queued forever and omitted their GPU time. */
+  if (ios_frame_stats_on) {
+    atomic_fetch_add_explicit(&g_madeira_cmdbuf_inflight, 1, memory_order_relaxed);
+    [(id<MTLCommandBuffer>)params->handle addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+      uint64_t depth = atomic_fetch_sub_explicit(&g_madeira_cmdbuf_inflight, 1, memory_order_relaxed);
+      double span = buffer.GPUEndTime - buffer.GPUStartTime;
+      ios_frame_gpu(buffer.GPUStartTime > 0.0 && span > 0.0 ? (unsigned long long)(span * 1e9) : 0, depth);
+    }];
   }
   [(id<MTLCommandBuffer>)params->handle commit];
   return STATUS_SUCCESS;
@@ -1175,6 +1217,7 @@ _MTLCommandBuffer_blitCommandEncoder(void *obj) {
     return STATUS_SUCCESS;
   }
   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle blitCommandEncoder];
+  if (params->ret) ios_frame_pass(1, 0, 0, 0);
   return STATUS_SUCCESS;
 }
 
@@ -1193,6 +1236,7 @@ _MTLCommandBuffer_computeCommandEncoder(void *obj) {
   }
   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle
       computeCommandEncoderWithDispatchType:params->arg ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial];
+  if (params->ret) ios_frame_pass(2, 0, 0, 0);
   return STATUS_SUCCESS;
 }
 
@@ -1261,6 +1305,28 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
   descriptor.visibilityResultBuffer = (id<MTLBuffer>)info->visibility_buffer;
 
   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor];
+
+  /* Count realized native passes, including clears and the final present.
+   * No new PE ABI or emulated hot-path counters are needed. */
+  if (params->ret && ios_frame_stats_on) {
+    unsigned loads = 0, stores = 0, clears = 0;
+    for (unsigned i = 0; i < 8; ++i) if (info->colors[i].texture) {
+      loads += info->colors[i].load_action == WMTLoadActionLoad;
+      clears += info->colors[i].load_action == WMTLoadActionClear;
+      stores += info->colors[i].store_action != WMTStoreActionDontCare;
+    }
+    if (info->depth.texture) {
+      loads += info->depth.load_action == WMTLoadActionLoad;
+      clears += info->depth.load_action == WMTLoadActionClear;
+      stores += info->depth.store_action != WMTStoreActionDontCare;
+    }
+    if (info->stencil.texture) {
+      loads += info->stencil.load_action == WMTLoadActionLoad;
+      clears += info->stencil.load_action == WMTLoadActionClear;
+      stores += info->stencil.store_action != WMTStoreActionDontCare;
+    }
+    ios_frame_pass(0, loads, stores, clears);
+  }
 
   [descriptor release];
   return STATUS_SUCCESS;
@@ -2675,13 +2741,94 @@ uint64_t madeira_get_present_count(void) {
  *       release their drawable unpresented so the pool never blocks.
  *       Measures raw stack throughput independent of the panel; the
  *       present COUNTER counts every game present (incl. skipped) so
- *       the FPS overlay reads true game rate. */
+ *       the FPS overlay reads true game rate.
+ *   3 = LOCKED30 (2026-09-15, device feedback): same mechanism as mode 1,
+ *       afterMinimumDuration(1/30) — exact 30. A real cap on THIS present
+ *       path, not merely a CADisplayLink hint: the drawable is genuinely
+ *       held until the next 1/30s boundary, same as mode 1 is at 1/60s. */
 static volatile int g_madeira_vsync_mode = 1;
+
+/* ml1050: what the PANEL can do, published from Swift (only UIKit knows it).
+ * Nothing branches on these -- they are printed by the [frame] line, because
+ * the panel's refresh IS the grid every presentation snaps to and a log that
+ * does not state it cannot tell "the pipeline is slow" from "the pipeline
+ * missed a vblank by 3 ms". */
+static volatile int g_madeira_panel_hz = 0;
+static volatile int g_madeira_intent_hz = 0;
+void madeira_set_display_max_fps(int panel_hz, int intent_hz) {
+  g_madeira_panel_hz = panel_hz;
+  g_madeira_intent_hz = intent_hz;
+  ios_frame_note_display(panel_hz, intent_hz, g_madeira_vsync_mode);
+  dprintf(STDERR_FILENO, "[iOS DXMT] panel_max=%dHz display_intent=%dHz vsync_mode=%d\n",
+          panel_hz, intent_hz, g_madeira_vsync_mode);
+}
+
 void madeira_set_vsync_locked(int mode) {
   g_madeira_vsync_mode = mode;
-  dprintf(STDERR_FILENO, "[iOS DXMT] vsync_mode=%d (1=locked60 0=max 2=raw)\n", mode);
+  ios_frame_note_display(g_madeira_panel_hz, g_madeira_intent_hz, mode);
+  dprintf(STDERR_FILENO, "[iOS DXMT] vsync_mode=%d (1=locked60 0=max 2=raw 3=locked30)\n", mode);
 }
 int madeira_get_vsync_locked(void) { return g_madeira_vsync_mode; }
+
+/* ml1050: THE PRESENT LIMITER, AND WHY IT IS NOT A SLEEP LADDER.
+ *
+ * Until now the 60 and 30 caps were expressed ONLY as
+ * presentDrawable:afterMinimumDuration:, which is a constraint on when the
+ * DISPLAY may show the frame -- it never holds the producer, and it snaps to
+ * the panel's vblank grid. That is the right primitive for a cap and the
+ * wrong one for pacing, and it is why the 60 cap quantises a 17-25 ms frame
+ * to 33.3 ms on a 60 Hz grid (see FPSOverlay.swift's ProMotionIntent).
+ *
+ * MADEIRA_PRESENT_LIMITER=1 adds the other half, opt-in, for A/B against the
+ * min-duration behaviour: hold the PRODUCER to an exact deadline with
+ * mach_wait_until and present with no minimum duration at all. mach_wait_until
+ * sleeps to an absolute deadline on the same timebase the scheduler uses, so
+ * it does not accumulate the per-iteration error a relative nanosleep ladder
+ * does and it does not quantise to a timer tick -- the failure mode the brief
+ * calls out, where a limiter sleeping in 16.6 ms quanta turns 45 fps into 30.
+ * The deadline is advanced from the PREVIOUS deadline rather than from "now",
+ * so a frame that ran long is not paid for twice, and it is re-based whenever
+ * it falls more than one period behind so a stall cannot bank credit.
+ *
+ * Default OFF: the min-duration path is what every previous measurement was
+ * taken against, and the [frame] line has to show the limiter's own sleep
+ * (`limiter=`) before it becomes the default. */
+static int madeira_present_limiter_enabled(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("MADEIRA_PRESENT_LIMITER");
+    on = (e && *e && *e != '0') ? 1 : 0;
+    dprintf(STDERR_FILENO, "[iOS DXMT] ml1050 present limiter %s "
+            "(MADEIRA_PRESENT_LIMITER=1 paces the producer with mach_wait_until "
+            "instead of afterMinimumDuration)\n", on ? "ON" : "OFF");
+  }
+  return on;
+}
+
+/* Returns the nanoseconds actually slept. */
+static unsigned long long madeira_present_limit_to(double period_s) {
+  static mach_timebase_info_data_t tb;
+  static uint64_t deadline_abs;      /* encode thread only -- one writer */
+  uint64_t now_abs, period_abs, slept_abs;
+
+  if (!tb.denom) mach_timebase_info(&tb);
+  period_abs = (uint64_t)(period_s * 1e9 * (double)tb.denom / (double)tb.numer);
+  now_abs = mach_absolute_time();
+  if (!deadline_abs || now_abs > deadline_abs + period_abs) {
+    /* First frame, or we fell more than a whole period behind: re-base rather
+     * than fire a burst of catch-up presents. */
+    deadline_abs = now_abs + period_abs;
+    return 0;
+  }
+  if (now_abs >= deadline_abs) {
+    deadline_abs += period_abs;      /* late: no sleep, no accumulated debt */
+    return 0;
+  }
+  slept_abs = deadline_abs - now_abs;
+  mach_wait_until(deadline_abs);
+  deadline_abs += period_abs;
+  return (unsigned long long)slept_abs * tb.numer / tb.denom;
+}
 
 static NTSTATUS
 _MTLCommandBuffer_presentDrawable(void *obj) {
@@ -2694,10 +2841,27 @@ _MTLCommandBuffer_presentDrawable(void *obj) {
     return STATUS_SUCCESS;
   }
   int mode = g_madeira_vsync_mode;
-  if (mode == 1) {
+  /* ml1050: this call IS the frame boundary on the encode thread. */
+  ios_frame_encode_present(0);
+  if ((mode == 1 || mode == 3) && madeira_present_limiter_enabled()) {
+    /* Opt-in precise pacing: hold the producer to the deadline and then ask
+     * for the next vblank with no minimum duration, so the cap is the
+     * limiter's and the only quantisation left is the panel's own. */
+    ios_frame_limiter(madeira_present_limit_to(mode == 3 ? (1.0 / 30.0) : (1.0 / 60.0)));
+    madeira_log_present_cadence(mode == 3 ? "presentLimited30" : "presentLimited60", 0.0);
+    [(id<MTLCommandBuffer>)params->handle presentDrawable:(id<MTLDrawable>)params->arg];
+  } else if (mode == 1) {
     madeira_log_present_cadence("presentDrawable60", 0.0);
     [(id<MTLCommandBuffer>)params->handle presentDrawable:(id<MTLDrawable>)params->arg
                                      afterMinimumDuration:(1.0 / 60.0)];
+  } else if (mode == 3) {
+    /* Device feedback (2026-09-15): a real 30fps cap, exact same mechanism
+     * as the mode-1 60fps cap just above -- afterMinimumDuration holds the
+     * drawable on THIS present path, so this is a genuine cap independent
+     * of whatever CADisplayLink/ProMotionIntent is doing on the Swift side. */
+    madeira_log_present_cadence("presentDrawable30", 0.0);
+    [(id<MTLCommandBuffer>)params->handle presentDrawable:(id<MTLDrawable>)params->arg
+                                     afterMinimumDuration:(1.0 / 30.0)];
   } else if (mode == 2) {
     /* Frame-skip gating lives in _MetalLayer_nextDrawable (nil return);
      * only real, ≥18ms-spaced frames reach here. */
@@ -3042,6 +3206,7 @@ _MetalLayer_nextDrawable(void *obj) {
     since = (now.tv_sec - last_acquire.tv_sec) + (now.tv_nsec - last_acquire.tv_nsec) / 1e9;
     if (since < 0.018) {
       params->ret = 0;
+      ios_frame_encode_present(1);   /* ml1050: a frame that reaches no glass */
       madeira_log_present_cadence("presentSkipped", 0.0);
       return STATUS_SUCCESS;
     }
@@ -3056,6 +3221,12 @@ _MetalLayer_nextDrawable(void *obj) {
   params->ret = (obj_handle_t)[(CAMetalLayer *)params->handle nextDrawable];
   clock_gettime(CLOCK_MONOTONIC, &t1);
   double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+  /* ml1050: THE number that separates "the pipeline is slow" from "the display
+   * is holding the producer". A drawable pool that is never exhausted reports
+   * near zero here; a producer parked waiting for the compositor to hand a
+   * drawable back reports the remainder of a refresh interval, every frame. */
+  ios_frame_drawable_wait((unsigned long long)((t1.tv_sec - t0.tv_sec) * 1000000000ll
+                                               + (t1.tv_nsec - t0.tv_nsec)));
   static _Atomic uint64_t nd_total = 0, nd_slow = 0;
   uint64_t n = atomic_fetch_add_explicit(&nd_total, 1, memory_order_relaxed) + 1;
   if (ms > 50.0) {
@@ -3131,6 +3302,19 @@ _MetalLayer_getProps(void *obj) {
   props->framebuffer_only = layer.framebufferOnly;
   props->contents_scale = layer.contentsScale;
 #if TARGET_OS_IOS
+  /* ml1140: WSI window extents are Windows pixels, not UIKit points. Applying
+   * the phone's 3x scale again made a 720p present render into a 4K drawable.
+   * Core Animation already maps that drawable onto the host view in points.
+   * Keep the correction at the iOS boundary so macOS Retina is unchanged. */
+  {
+    const char *e = getenv("MADEIRA_PRESENT_PIXELS");
+    int enabled = !e || strcmp(e, "0");
+    static _Atomic int announced;
+    if (!atomic_exchange_explicit(&announced, 1, memory_order_relaxed))
+      fprintf(stderr, "[present-size] ml1140 guest-pixels=%d host-scale=%.1f (MADEIRA_PRESENT_PIXELS=0 reverts)\n",
+              enabled, (double)layer.contentsScale);
+    if (enabled) props->contents_scale = 1.0;
+  }
   props->display_sync_enabled = true; /* iOS always syncs to display refresh. */
 #else
   props->display_sync_enabled = layer.displaySyncEnabled;
@@ -4085,6 +4269,17 @@ _WMTQueryDisplaySettingForLayer(void *obj) {
   struct unixcall_query_display_setting_for_layer *params = obj;
   CAMetalLayer *layer = (CAMetalLayer *)params->layer;
   struct WMTHDRMetadata *hdr_metadata_out = params->hdr_metadata.ptr;
+
+  /* ml1050: THE FRAME BOUNDARY ON THE PRESENTING THREAD.
+   *
+   * Presenter::synchronizeLayerProperties() issues this call exactly once per
+   * Present, on the CALLING thread (dxmt_presenter.cpp:119, reached from the
+   * d3d9 swapchain's Present before it commits the present chunk), and it is
+   * the only per-frame native call that thread makes.  So it is both free and
+   * exact as a frame boundary, and it is what claims IOS_FRAME_ROLE_GAME --
+   * no heuristic, no thread-name matching, no guessing which of fifty threads
+   * is "the game".  Placed before the early return so the iOS path counts. */
+  ios_frame_game_tick();
 
   params->version = 0;
 #if TARGET_OS_IOS
