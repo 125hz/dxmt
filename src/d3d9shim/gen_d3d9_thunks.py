@@ -1162,10 +1162,10 @@ extern "C" {
     o.append("""
 /* Called once, from _d3d9_init, after the hash handshake passes. */
 extern int d3d9_native_init(void);
-/* Called from ios_wow_reclaim_dead_windows() BEFORE the PROT_NONE replace
- * and before ios_jit_purge_window() -- native objects hold host pointers
- * INTO the arena (8.9-5). */
-extern void d3d9_native_process_teardown(void *peb);
+/* Called from ios_wow_reclaim_dead_windows() with the dead window's base B,
+ * BEFORE the PROT_NONE replace and before ios_jit_purge_window() -- native
+ * objects hold host pointers INTO the arena (8.9-5). */
+extern void d3d9_native_window_teardown(unsigned long window_base);
 
 /* One hook per vtable slot.  The glue implements these against MTLD3D9* in
  * step 4; `local` slots are listed too, so the table below is total and a

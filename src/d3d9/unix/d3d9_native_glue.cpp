@@ -11,7 +11,7 @@
  *     a wild dereference.  It is also the IDENTITY map: one handle per
  *     native object, find-before-create, which is what makes
  *     GetSurfaceLevel(n) twice return the same guest pointer;
- *   - the per-guest-process root and d3d9_native_process_teardown(), which
+ *   - the per-guest-process root and d3d9_native_window_teardown(), which
  *     section 8.9-5 calls the MOST IMPORTANT risk in the whole plan -- native
  *     objects hold host pointers INTO the arena, i.e. into the 4 GB range
  *     ios_wow_reclaim_dead_windows() is about to replace with PROT_NONE;
@@ -68,11 +68,6 @@
 #include <vector>
 
 #include <unistd.h>
-
-/* B for an explicit pseudo-process, 0 when that process has no window.
- * Resolved at app link time from build/ntdll-unix/virtual_ios.c, the same way
- * ios_wow_base() is (see d3d9_unix_glue.h). */
-extern "C" unsigned long ios_wow_base_for_peb(void *peb_id);
 
 /* Defined at the bottom of this file, beside the [d3d9-native-census]
  * summary; called from d3d9_native_init(), which is far above it. */
@@ -213,6 +208,23 @@ free_list_insert(ArenaChunk &chunk, uint64_t offset, uint64_t size) {
 }
 
 } // namespace
+
+/* The guest-window base B of the pseudo-process a call is made for: the
+ * calling thread's, or the pinned arena root on a DXMT worker pthread, which
+ * has none (the same rule the handle table uses).  Per-window records are
+ * tagged with it so that d3d9_native_window_teardown() drops exactly the dead
+ * process's records and leaves a second live 32-bit process's alone.  Never
+ * called with the arena lock held. */
+static unsigned long
+caller_window_base() {
+  unsigned long base = ios_wow_base();
+  if (!base) {
+    Arena &a = arena();
+    std::lock_guard<std::mutex> guard(a.mutex);
+    base = a.root;
+  }
+  return base;
+}
 
 /* ======================================================================
  * The arena's public face
@@ -529,7 +541,7 @@ guest_page_size() {
  * fault its SEH can never see (section 8.9-4).
  *
  * Every entry records the window base of the pseudo-process that created it,
- * which is what makes the per-process sweep in d3d9_native_process_teardown
+ * which is what makes the per-process sweep in d3d9_native_window_teardown
  * possible at all.
  * ====================================================================== */
 
@@ -778,20 +790,37 @@ d3d9_native_init(void) {
   return 1;
 }
 
-/* Called from ios_wow_reclaim_dead_windows() BEFORE the PROT_NONE replace and
- * before ios_jit_purge_window().  The order below IS the contract of section
- * 8.9-5, and it is asserted by construction rather than by comment:
+namespace {
+void forget_window_states_of(unsigned long base);
+}
+
+/* Called from ios_wow_reclaim_dead_windows() with the dead window's base B,
+ * BEFORE the PROT_NONE replace and before ios_jit_purge_window().  The order
+ * below IS the contract of section 8.9-5, and it is asserted by construction
+ * rather than by comment:
  *
  *   1. drop every native object this pseudo-process created -- that is what
  *      releases the Metal objects, and their destructors are the last thing
  *      that may touch arena memory;
  *   2. drop the arena chunks, so no host pointer into the window survives;
- *   3. drop the window's entry in the client-size cache;
+ *   3. drop this process's per-window records (client sizes, window states);
  *
- * and only then does the caller remap the range. */
+ * and only then does the caller remap the range.
+ *
+ * Keyed by the window base, not by the PEB.  The first version took the dead
+ * PEB and looked its base up through ios_wow_base_for_peb(), but by the time
+ * the reclaim runs the window registry has already marked the slot dead
+ * (ios_wow_window_mark_released clears its PEB and the reclaim sets dead=2),
+ * and that lookup skips dead slots by design -- so it always answered 0 and
+ * this function returned before doing anything: every native object, every
+ * Metal object behind it and every arena record of an exited 32-bit process
+ * leaked, still pointing into a range that was then remapped PROT_NONE and
+ * handed to the next process.  The caller already holds B; it passes it.
+ *
+ * Idempotent: a second call for the same B (a reclaim that had to retry the
+ * remap) finds nothing left to drop. */
 void
-d3d9_native_process_teardown(void *peb) {
-  unsigned long base = ios_wow_base_for_peb(peb);
+d3d9_native_window_teardown(unsigned long base) {
   if (!base)
     return;
 
@@ -869,8 +898,9 @@ d3d9_native_process_teardown(void *peb) {
     }
   }
 
-  /* 3. window sizes */
-  dxmt::wsi::madeira_forget_all_windows();
+  /* 3. this process's per-window records */
+  forget_window_states_of(base);
+  dxmt::wsi::madeira_forget_windows_of(base);
 }
 
 /* ======================================================================
@@ -967,7 +997,7 @@ void
 madeira_window_enter_fullscreen(HWND window, uint32_t width, uint32_t height) {
   /* Record the size the frontend believes the window has, so a later
    * getWindowSize() agrees with the swapchain it just built. */
-  wsi::madeira_set_client_size(window, width, height);
+  wsi::madeira_set_client_size(window, width, height, caller_window_base());
   log_once("window seam: enter_fullscreen is a no-op until the shim lands (8.2(d))");
 }
 
@@ -999,7 +1029,7 @@ madeira_window_minimize(HWND window) {
 
 void
 madeira_window_reposition(HWND window, uint32_t width, uint32_t height) {
-  wsi::madeira_set_client_size(window, width, height);
+  wsi::madeira_set_client_size(window, width, height, caller_window_base());
   log_once("window seam: reposition is a no-op until the shim lands (8.2(d))");
 }
 
@@ -1099,6 +1129,7 @@ struct WindowState {
   uint32_t width;
   uint32_t height;
   uint32_t flags;
+  unsigned long owner = 0; /* guest-window base of the process that reported it */
 };
 
 std::mutex &
@@ -1111,6 +1142,14 @@ std::unordered_map<HWND, WindowState> &
 window_states() {
   static std::unordered_map<HWND, WindowState> map;
   return map;
+}
+
+/* d3d9_native_window_teardown step 3: a dead process's HWNDs may be reused by
+ * the next process, so their records must not outlive it. */
+void
+forget_window_states_of(unsigned long base) {
+  std::lock_guard<std::mutex> guard(window_mutex());
+  std::erase_if(window_states(), [base](const auto &entry) { return entry.second.owner == base; });
 }
 
 /* The BehaviorFlags the application passed, as opposed to the ones the native
@@ -1290,11 +1329,13 @@ d3d9_native_window_state(HWND hwnd, uint32_t width, uint32_t height, uint32_t fl
 
     /* A NULL hwnd sets the default every window with no entry of its own
      * falls back to, which is what madeira_set_client_size already means. */
+    const unsigned long owner = caller_window_base();
     if (width && height)
-      dxmt::wsi::madeira_set_client_size(hwnd, width, height);
+      dxmt::wsi::madeira_set_client_size(hwnd, width, height, owner);
     if (hwnd) {
       std::lock_guard<std::mutex> guard(window_mutex());
       WindowState &state = window_states()[hwnd];
+      state.owner = owner;
       if (width && height) {
         state.width = width;
         state.height = height;
@@ -1356,13 +1397,14 @@ static void
 seed_window_size(HWND window, const D3DPRESENT_PARAMETERS *parameters) {
   if (!window || !parameters || !parameters->BackBufferWidth || !parameters->BackBufferHeight)
     return;
+  const unsigned long owner = caller_window_base();
   std::lock_guard<std::mutex> guard(window_mutex());
   if (window_states().count(window))
     return; /* the shim has already said what this window really is */
   window_states()[window] =
-      WindowState{parameters->BackBufferWidth, parameters->BackBufferHeight, 0u};
+      WindowState{parameters->BackBufferWidth, parameters->BackBufferHeight, 0u, owner};
   dxmt::wsi::madeira_set_client_size(window, parameters->BackBufferWidth,
-                                     parameters->BackBufferHeight);
+                                     parameters->BackBufferHeight, owner);
 }
 
 static void
