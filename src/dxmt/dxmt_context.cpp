@@ -9,6 +9,9 @@
 #include <cfloat>
 #include "dxmt_mem_census.hpp"
 #include "config/config.hpp"   /* ml754 */
+#include "util_madeira_switch.hpp"
+#include <algorithm>
+#include <atomic>
 
 namespace dxmt {
 
@@ -692,6 +695,12 @@ ArgumentEncodingContext::$$setEncodingContext(uint64_t seq_id, uint64_t frame_id
 
 constexpr unsigned kEncoderOptimizerThreshold = 64;
 
+static bool
+settleEmptyQueries() {
+  static const bool enabled = madeiraSwitch("DXMT_QUERY_SETTLE_EMPTY");
+  return enabled;
+}
+
 std::unique_ptr<VisibilityResultReadback>
 ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId, uint64_t event_seq_id) {
   assert(!encoder_current);
@@ -742,6 +751,33 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
     visibility_readback = std::make_unique<VisibilityResultReadback>(
         device_, seqId, count, pending_queries_
     );
+  } else if (settleEmptyQueries() &&
+             std::any_of(pending_queries_.begin(), pending_queries_.end(),
+                         [=](auto &query) { return query->queryEndAt() == seqId; })) {
+    /* MADEIRA (ml998): A QUERY THAT ENDS IN AN EMPTY SUBMISSION WAS LOST.
+     *
+     * VisibilityResultQuery only reports a value once seq_id_issued reaches
+     * seq_id_end, and the only thing that advances seq_id_issued is
+     * ~VisibilityResultReadback. When vro_state_.reset() returns 0 -- this
+     * submission counted no visibility samples, e.g. a flush with no render
+     * encoder -- no readback object was built, so nothing would ever issue
+     * for seqId. The erase_if below then dropped every query whose END landed
+     * here out of pending_queries_, and a query that BEGAN in an earlier
+     * submission and ended in this empty one could never complete: a caller
+     * polling GetData waited forever.
+     *
+     * The fix is an empty readback: no buffer, and a destructor that calls
+     * issueEmpty() for the captured queries. It lives on this submission's
+     * chunk exactly like a real one, so the finish thread destroys it in
+     * submission order -- after the readback of every earlier submission,
+     * whose samples the query still has to add. Settling the query here, on
+     * the encode thread, would publish it as complete while those earlier
+     * readbacks were still outstanding (an early, wrong result) and would race
+     * the finish thread's issue() on the same query.
+     *
+     * DXMT_QUERY_SETTLE_EMPTY is a Madeira switch (util_madeira_switch.hpp):
+     * on by default only in the i386 build. */
+    visibility_readback = std::make_unique<VisibilityResultReadback>(device_, seqId, 0, pending_queries_);
   }
   std::erase_if(pending_queries_, [=](auto &query) -> bool { return query->queryEndAt() == seqId; });
 
@@ -1125,6 +1161,33 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
     if (latter->type == EncoderType::Clear && former->type == EncoderType::Render) {
       auto render = reinterpret_cast<RenderEncoderData *>(former);
       auto clear = reinterpret_cast<ClearEncoderData *>(latter);
+
+      // MADEIRA (ml1190): DXMT_CLEAR_DISCARD_STORE is a Madeira switch
+      // (util_madeira_switch.hpp), on by default only in the i386 build.
+      static const bool discardColor = [] {
+        const bool enabled = madeiraSwitch("DXMT_CLEAR_DISCARD_STORE");
+        if (enabled)
+          Logger::info("[clear-store] ml1190 enabled (DXMT_CLEAR_DISCARD_STORE=0 disables)");
+        return enabled;
+      }();
+      // A full clear makes the preceding color store dead. Keep dependency
+      // tracking intact, and only match the exact view and covered subresource.
+      // Resolve stores and partial clears must retain their original behavior.
+      if (discardColor && !clear->clear_dsv && clear->attachment &&
+          clear->array_length == render->render_target_array_length &&
+          clear->width == render->render_target_width && clear->height == render->render_target_height) {
+        for (unsigned i = 0; i < render->render_target_count; ++i) {
+          auto &color = render->colors[i];
+          if (color.attachment == clear->attachment && !color.level && !color.slice && !color.depth_plane &&
+              !color.resolve_attachment && color.store_action == WMTStoreActionStore) {
+            color.store_action = WMTStoreActionDontCare;
+            static std::atomic<uint64_t> saved{0};
+            const auto total = saved.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (total <= 4 || !(total % 4096))
+              Logger::warn(str::format("[clear-store] ml1190 overwritten color stores skipped=", total));
+          }
+        }
+      }
 
       // DontCare can be used because it's going to be cleared anyway
       // just keep in mind DontCare != DontStore
