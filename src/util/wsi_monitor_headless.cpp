@@ -16,6 +16,11 @@
 
 #include "wsi_monitor.hpp"
 
+#include "util_env.hpp"
+#include "util_madeira_switch.hpp"
+#include "log/log.hpp"
+#include "util_string.hpp"
+
 namespace dxmt::wsi {
 
 /* Synthetic singleton monitor handle. Non-NULL so EnumOutputs sees a
@@ -37,7 +42,28 @@ static void getScreenSize(uint32_t *w, uint32_t *h) {
   *h = (sh > 0) ? (uint32_t)sh : 768;
 }
 
+/* MADEIRA (ml1190): DXMT_WSI_MONITOR_IDENTITY, opt-in. With it set,
+ * DXGI_OUTPUT_DESC::Monitor carries user32's primary monitor handle instead of
+ * the private sentinel, so an application can match the output against
+ * user32. Every HMONITOR this backend hands out or accepts goes through this
+ * function -- including wsi::getWindowMonitor() in wsi_window_headless.cpp,
+ * which the swapchain's fullscreen transition compares against
+ * DXGI_OUTPUT_DESC::Monitor -- so both sides always agree. Unset, this is the
+ * upstream sentinel exactly. */
 HMONITOR getDefaultMonitor() {
+  static const bool useIdentity = madeiraSwitch("DXMT_WSI_MONITOR_IDENTITY");
+  if (useIdentity) {
+    HMONITOR monitor = ::MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    if (monitor) {
+      static const bool announced = [monitor] {
+        Logger::info(str::format("[monitor-identity] ml1190 using user32 primary=", monitor,
+            " (DXMT_WSI_MONITOR_IDENTITY)"));
+        return true;
+      }();
+      (void)announced;
+      return monitor;
+    }
+  }
   return kSyntheticMonitor;
 }
 
@@ -45,11 +71,11 @@ HMONITOR enumMonitors(uint32_t index) {
   /* Only one synthetic monitor exists. */
   if (index != 0)
     return nullptr;
-  return kSyntheticMonitor;
+  return getDefaultMonitor();
 }
 
 bool getDisplayName(HMONITOR hMonitor, WCHAR (&Name)[32]) {
-  if (hMonitor != kSyntheticMonitor)
+  if (hMonitor != getDefaultMonitor())
     return false;
   /* Standard Windows display device name "\\.\DISPLAY1". */
   static const WCHAR kName[] = {'\\','\\','.','\\','D','I','S','P','L','A','Y','1', 0};
@@ -59,7 +85,7 @@ bool getDisplayName(HMONITOR hMonitor, WCHAR (&Name)[32]) {
 }
 
 bool getDesktopCoordinates(HMONITOR hMonitor, RECT *pRect) {
-  if (hMonitor != kSyntheticMonitor || !pRect)
+  if (hMonitor != getDefaultMonitor() || !pRect)
     return false;
   /* Real screen size from user32 — MUST agree with what win32u's virtual
    * monitor reports (sysparams_ios.c now serves the same values through
@@ -86,9 +112,7 @@ static inline void fillMode(WsiMode *pMode, uint32_t w, uint32_t h) {
  * all @ 60Hz 32bpp. Mirrors the win32u NtUserEnumDisplaySettings synth so
  * user32 and DXGI tell games the same story. Nothing larger than the
  * desktop — bigger modes crop on the virtual desktop surface. */
-bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode *pMode) {
-  if (hMonitor != kSyntheticMonitor || !pMode)
-    return false;
+static bool getSyntheticDisplayMode(uint32_t modeNumber, WsiMode *pMode) {
   uint32_t sw, sh;
   getScreenSize(&sw, &sh);
   uint32_t widths[3]  = {640, 800, sw};
@@ -100,8 +124,45 @@ bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode *pMode) {
   return true;
 }
 
+/* MADEIRA (2026-09-16): DXMT_WSI_MODE_TABLE, opt-in. The list above is
+ * "640x480, 800x600 and whatever you are already running" -- three entries
+ * at most -- while the iOS win32u virtual monitor offers a full mode table
+ * through EnumDisplaySettings, so user32 listed 14+ modes and DXGI listed 3.
+ * An application that saved 1024x768, or that walks the adapter modes
+ * looking for the one it wants, found nothing. With the switch set the list
+ * is EnumDisplaySettingsExW's, which IS the win32u table, verbatim -- no
+ * second copy to drift. */
+static bool getUser32DisplayMode(uint32_t modeNumber, WsiMode *pMode) {
+  DEVMODEW dm = {};
+  dm.dmSize = sizeof(dm);
+  /* NULL device = the primary display. win32u answers every name with the
+   * single virtual display, so the name never has to be resolved first. */
+  if (!::EnumDisplaySettingsExW(nullptr, (DWORD)modeNumber, &dm, 0))
+    return false;
+  if (!dm.dmPelsWidth || !dm.dmPelsHeight)
+    return false;
+
+  pMode->width = dm.dmPelsWidth;
+  pMode->height = dm.dmPelsHeight;
+  /* dmDisplayFrequency is 0 or 1 on a driver that does not track a rate;
+   * both mean "unspecified", and a 0/1 Hz mode is not something an
+   * application can select. */
+  pMode->refreshRate.numerator = (dm.dmDisplayFrequency > 1) ? dm.dmDisplayFrequency : 60;
+  pMode->refreshRate.denominator = 1;
+  pMode->bitsPerPixel = dm.dmBitsPerPel ? dm.dmBitsPerPel : 32;
+  pMode->interlaced = (dm.dmDisplayFlags & DM_INTERLACED) != 0;
+  return true;
+}
+
+bool getDisplayMode(HMONITOR hMonitor, uint32_t modeNumber, WsiMode *pMode) {
+  if (hMonitor != getDefaultMonitor() || !pMode)
+    return false;
+  static const bool useUser32Modes = madeiraSwitch("DXMT_WSI_MODE_TABLE");
+  return useUser32Modes ? getUser32DisplayMode(modeNumber, pMode) : getSyntheticDisplayMode(modeNumber, pMode);
+}
+
 bool getCurrentDisplayMode(HMONITOR hMonitor, WsiMode *pMode) {
-  if (hMonitor != kSyntheticMonitor || !pMode)
+  if (hMonitor != getDefaultMonitor() || !pMode)
     return false;
   uint32_t sw, sh;
   getScreenSize(&sw, &sh);
