@@ -9,6 +9,7 @@ is unchanged and continues to apply to all upstream code.** See `LICENSE`.
 |---|---|
 | All upstream DXMT code | as in `LICENSE` (MIT) — unchanged |
 | Modifications and new files authored for **Madeira** by Will Faust | **GPL-3.0-or-later** |
+| Modifications and new files contributed for **Madeira** by 125hz | **GPL-3.0-or-later**, with the Madeira Converter Exception below |
 
 Where a file contains both, the file as a whole may only be distributed under
 terms compatible with GPL-3.0-or-later, because the GPL-covered contributions
@@ -45,6 +46,15 @@ self-contained. Upstream code keeps its own licence and notices and needs
 no exception. Prepared 2026-09-16; the copyright holder adopted it on
 2026-09-24, as recorded in the adoption line of the top-level Madeira
 repository's LICENSE-EXCEPTION.md, before any public push.
+
+The modifications and new files contributed by 125hz (the commits signed off
+by 125hz) are offered on the same terms: GPL-3.0-or-later with the
+additional permission below. New files written by 125hz say
+`Copyright 2026 125hz` in their headers. One value in those commits was
+taken from elsewhere: the 8 MB i386 staging block size in
+`src/dxmt/dxmt_ring_bump_allocator.hpp` is the value the `v0.4-d3d9` tree
+of `https://github.com/dacevedo12/dxmt` (David Acevedo, LGPL-2.1-or-later)
+uses for its i386 build; the code around it is 125hz's.
 
 ### Madeira Converter Exception, version 1 (of 2026-09-16; in effect from the adoption recorded in the top-level LICENSE-EXCEPTION.md)
 
