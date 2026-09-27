@@ -976,7 +976,7 @@ void
 MTLD3D9Device::commitCurrentChunkTimed(unsigned reason) {
   // Device lock serializes callers. Report causes, not just GPU totals: an
   // upload queue can also submit buffers independently of these chunks.
-  static const bool stats = env::getEnvVar("DXMT_D9_SUBMIT_STATS") != "0";
+  static const bool stats = [] { const auto v = env::getEnvVar("DXMT_D9_SUBMIT_STATS"); return !v.empty() && v != "0"; }();
   if (stats) {
     ++m_submitReasons[std::min(reason, 4u)];
     if (++m_submitCount == 1 || !(m_submitCount % 512))
@@ -1609,7 +1609,7 @@ MTLD3D9Device::waitForGpuOrDeviceError(uint64_t value) {
 
 void
 MTLD3D9Device::noteReadback(unsigned kind, const D3DSURFACE_DESC &desc) {
-  static const bool enabled = env::getEnvVar("DXMT_D9_READBACK_STATS") != "0";
+  static const bool enabled = [] { const auto v = env::getEnvVar("DXMT_D9_READBACK_STATS"); return !v.empty() && v != "0"; }();
   if (!enabled)
     return;
   ++m_readbackKinds[std::min(kind, 3u)];
@@ -10776,7 +10776,7 @@ MTLD3D9Device::FlushDrawBatch() {
             pso_ready = res.resolved_pso_task->GetDone();
           }
           if (!pso_ready) {
-            static const bool wait_stats = env::getEnvVar("DXMT_D9_PIPELINE_STATS") != "0";
+            static const bool wait_stats = [] { const auto v = env::getEnvVar("DXMT_D9_PIPELINE_STATS"); return !v.empty() && v != "0"; }();
             const auto start = wait_stats ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             res.resolved_pso_task->Wait();
             if (wait_stats) {
