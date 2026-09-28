@@ -8,7 +8,7 @@
  * silently sends every later call to the wrong function.  d3d9_api.py is the
  * only place any of this may be changed.
  *
- * Copyright 2026 Will Faust
+ * Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free

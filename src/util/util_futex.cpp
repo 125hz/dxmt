@@ -2,10 +2,10 @@
  * util_futex.cpp -- backend selection and the platform address-wait calls.
  *
  * MADEIRA (WOW64_DESIGN.md, ml1070).  New file, GPL-3.0-or-later; see
- * research/dxmt/LICENSE-MADEIRA.md and the long comment in util_futex.hpp for
- * why DXMT does not use std::atomic<T>::wait on a PE target.
+ * LICENSE-MADEIRA.md and the long comment in util_futex.hpp for why DXMT does
+ * not use std::atomic<T>::wait on a PE target.
  *
- * Copyright 2026 Will Faust
+ * Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free

@@ -17,7 +17,7 @@
  * an unimplemented seam should be greppable in the archive's symbol table,
  * not compiled away.
  *
- * Copyright 2026 Will Faust
+ * Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free

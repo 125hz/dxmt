@@ -9,7 +9,7 @@
  * exactly one native release at zero, and identity is answered LOCALLY -- the
  * ~45 `**` getters that just hand back an object the shim already knows.
  *
- * Copyright 2026 Will Faust
+ * Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free

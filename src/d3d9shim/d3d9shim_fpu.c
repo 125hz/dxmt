@@ -8,12 +8,16 @@
  *
  * PROVENANCE: the body of d3d9shim_setup_fpu() below is moved VERBATIM from
  * research/dxmt/src/d3d9/d3d9_device.cpp (static setupFpu(), the block the
- * design calls `d3d9_device.cpp:512-521`), which is DXMT code under
- * LGPL-2.1-or-later, distributed here under GPL-3.0-or-later through
- * LGPL-2.1 section 3.  See research/dxmt/LICENSE-MADEIRA.md.
+ * design calls `d3d9_device.cpp:512-521`), which was imported from
+ * dacevedo12/dxmt v0.4-d3d9 under LGPL-2.1-or-later (COPYING.LIB); that
+ * tree's own comment says the routine was ported from Wine's wined3d
+ * setup_fpu and DXVK's SetupFPU.  The moved block keeps its licence; the
+ * rest of this file is GPL-3.0-or-later.  See research/dxmt/LICENSE-MADEIRA.md.
  *
- * Copyright 2023-2026 Feifan He for CodeWeavers (the moved block)
- * Copyright 2026 Will Faust
+ * Moved block: written by David Acevedo for the Direct3D 9 frontend of
+ * https://github.com/dacevedo12/dxmt (tag v0.4-d3d9, commit e8dd4c65), a DXMT
+ * fork distributed under LGPL-2.1-or-later (COPYING.LIB).
+ * Everything else: Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -28,7 +32,7 @@
  * You should have received a copy of the GNU General Public License along
  * with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: GPL-3.0-or-later AND LGPL-2.1-or-later
  */
 
 #include "d3d9shim_object.h"

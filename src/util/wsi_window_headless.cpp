@@ -72,8 +72,13 @@ bool restoreDisplayMode(HMONITOR hMonitor) {
 }
 
 HMONITOR getWindowMonitor(HWND hWindow) {
-  /* Return the same synthetic monitor everything else uses. */
-  return kSyntheticMonitor;
+  /* Return the same monitor everything else uses. MADEIRA (ml2011): through
+   * getDefaultMonitor(), so that with DXMT_WSI_MONITOR_IDENTITY on (the fork
+   * default) this is the same user32 handle DXGI_OUTPUT_DESC::Monitor carries
+   * -- the swapchain's GetOutputFromMonitor compares the two, and a mismatch
+   * failed every fullscreen transition. With the identity off it is
+   * kSyntheticMonitor as before. */
+  return getDefaultMonitor();
 }
 
 bool isWindow(HWND hWindow) { return true; }

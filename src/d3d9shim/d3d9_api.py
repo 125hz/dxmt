@@ -3,7 +3,7 @@
 # d3d9_api.py -- the single description of the Direct3D 9 interface ABI that
 # the Madeira i386 shim and the native ARM64 D3D9 frontend share.
 #
-# Copyright 2026 Will Faust
+# Copyright 2026 125hz
 #
 # This program is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by the Free

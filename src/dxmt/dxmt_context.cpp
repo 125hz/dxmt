@@ -10,6 +10,7 @@
 #include "dxmt_mem_census.hpp"
 #include "config/config.hpp"   /* ml754 */
 #include "util_env.hpp"
+#include <algorithm>
 #include <atomic>
 
 namespace dxmt {
@@ -814,6 +815,14 @@ ArgumentEncodingContext::$$setEncodingContext(uint64_t seq_id, uint64_t frame_id
 
 constexpr unsigned kEncoderOptimizerThreshold = 64;
 
+/* MADEIRA (ml2011): on by default in the fork; DXMT_QUERY_SETTLE_EMPTY=0 falls
+ * back to the ml998 encode-thread settlement. */
+static bool
+settleEmptyQueriesInOrder() {
+  static const bool enabled = env::getEnvVar("DXMT_QUERY_SETTLE_EMPTY") != "0";
+  return enabled;
+}
+
 std::unique_ptr<VisibilityResultReadback>
 ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId, uint64_t event_seq_id) {
   assert(!encoder_current);
@@ -864,7 +873,21 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
     visibility_readback = std::make_unique<VisibilityResultReadback>(
         device_, seqId, count, pending_queries_
     );
-  } else {
+  } else if (settleEmptyQueriesInOrder() &&
+             std::any_of(pending_queries_.begin(), pending_queries_.end(),
+                         [=](auto &query) { return query->queryEndAt() == seqId; })) {
+    /* MADEIRA (ml2011): settle a query that ends in an empty submission IN
+     * SUBMISSION ORDER. The ml998 version below settled it here, on the encode
+     * thread, at flush time: that could publish the query as complete before
+     * an earlier, still running submission's readback had added its samples
+     * (an early, wrong result), and it raced the finish thread's issue() on
+     * the same query. Instead build an empty readback (no buffer) whose
+     * destructor calls issueEmpty() for the captured queries. It lives on this
+     * submission's chunk exactly like a real one, so the finish thread
+     * destroys it after the readback of every earlier submission.
+     * DXMT_QUERY_SETTLE_EMPTY=0 restores the ml998 encode-thread settlement. */
+    visibility_readback = std::make_unique<VisibilityResultReadback>(device_, seqId, 0, pending_queries_);
+  } else if (!settleEmptyQueriesInOrder()) {
     /* iOS-Madeira ml998: A QUERY THAT ENDS IN AN EMPTY SUBMISSION WAS LOST.
      *
      * VisibilityResultQuery only reports a value once seq_id_issued reaches

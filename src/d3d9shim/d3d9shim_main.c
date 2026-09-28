@@ -10,13 +10,16 @@
  *
  * PROVENANCE: the D3DPERF_* bodies and the Direct3DShaderValidatorCreate9
  * state machine are moved VERBATIM from research/dxmt/src/d3d9/d3d9.cpp (the
- * blocks the design calls `d3d9.cpp:44-67` and `d3d9.cpp:85-316`), which is
- * DXMT code under LGPL-2.1-or-later, distributed here under GPL-3.0-or-later
- * through LGPL-2.1 section 3, and rewritten from C++ into C without changing
- * any observable behaviour.  See research/dxmt/LICENSE-MADEIRA.md.
+ * blocks the design calls `d3d9.cpp:44-67` and `d3d9.cpp:85-316`), which was
+ * imported from dacevedo12/dxmt v0.4-d3d9 under LGPL-2.1-or-later
+ * (COPYING.LIB), and rewritten from C++ into C without changing any
+ * observable behaviour.  The moved blocks keep that licence; the rest of this
+ * file is GPL-3.0-or-later.  See research/dxmt/LICENSE-MADEIRA.md.
  *
- * Copyright 2023-2026 Feifan He for CodeWeavers (the moved blocks)
- * Copyright 2026 Will Faust
+ * Moved blocks: written by David Acevedo for the Direct3D 9 frontend of
+ * https://github.com/dacevedo12/dxmt (tag v0.4-d3d9, commit e8dd4c65), a DXMT
+ * fork distributed under LGPL-2.1-or-later (COPYING.LIB).
+ * Everything else: Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -31,7 +34,7 @@
  * You should have received a copy of the GNU General Public License along
  * with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: GPL-3.0-or-later AND LGPL-2.1-or-later
  */
 
 #define CINTERFACE

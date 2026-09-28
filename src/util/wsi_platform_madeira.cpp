@@ -12,7 +12,7 @@
  * src/d3d9/d3d9_guest_alloc.hpp.  The split is the whole point of section
  * 8.2(c): a host pointer is above 4 GB and a 32-bit guest cannot name it.
  *
- * Copyright 2026 Will Faust
+ * Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free

@@ -17,7 +17,7 @@
  * (WOW64_DESIGN.md section 7.8), and it keeps this submodule free of a build
  * dependency on the Wine tree.
  *
- * Copyright 2026 Will Faust
+ * Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free

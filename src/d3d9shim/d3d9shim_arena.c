@@ -14,7 +14,7 @@
  * Alignment is 16384, the real iOS page size: DXMT_PAGE_SIZE is 4096
  * unconditionally (research/dxmt/meson.build:155), which is wrong here.
  *
- * Copyright 2026 Will Faust
+ * Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free

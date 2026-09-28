@@ -11,7 +11,7 @@
  * Everything that is not window work still crosses through the generated
  * parameter block for the slot, so the wire format stays the generated one.
  *
- * Copyright 2026 Will Faust
+ * Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free

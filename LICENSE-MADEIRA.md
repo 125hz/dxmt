@@ -8,33 +8,48 @@ is unchanged and continues to apply to all upstream code.** See `LICENSE`.
 | Code | Licence |
 |---|---|
 | All upstream DXMT code | as in `LICENSE` (MIT) — unchanged |
-| Code imported from the `v0.4-d3d9` tag of `dacevedo12/dxmt` (see below) | upstream **LGPL-2.1-or-later**, distributed here under **GPL-3.0-or-later** via LGPL-2.1 §3 |
+| Code imported from the `v0.4-d3d9` tag of `dacevedo12/dxmt` (see below) | **LGPL-2.1-or-later**, as received (`COPYING.LIB`) |
 | Modifications and new files authored for **Madeira** by Will Faust | **GPL-3.0-or-later** |
+| Modifications and new files contributed for **Madeira** by 125hz | **GPL-3.0-or-later**, with the Madeira Converter Exception below |
 
-## The Direct3D 9 / DXSO import (LGPL-2.1-or-later → GPL-3.0-or-later)
+## The Direct3D 9 / DXSO import (LGPL-2.1-or-later)
 
 The Direct3D 9 frontend and its DXSO/fixed-function shader translator were
 imported from a different fork of the same upstream:
 
 - **Origin:** `https://github.com/dacevedo12/dxmt.git`
 - **Tag:** `v0.4-d3d9`, commit `e8dd4c656dcb74a6d970a30a397d1558b0e3fb2b`
-- **Upstream licence at that tag:** **LGPL-2.1-or-later**
-  ("Copyright (c) 2023-2026 Feifan He for CodeWeavers"), full text in
-  `COPYING.LIB`. That repository's `LICENSE.OLD` records that releases up to
-  v0.80 were MIT; this fork branched in the MIT era, which is why the `LICENSE`
-  here is still the MIT one and why it stays that way — it states the terms of
-  the code this fork actually took from upstream.
+- **Author:** **David Acevedo.** Every imported file and every spliced block
+  listed below was added to that tree by his commit `fe69cd3`
+  ("feat(d3d9): add a Direct3D 9 frontend", 2026-08-18); the tag's one later
+  commit (`e8dd4c6`, also his) only adds tests, which are not imported. The
+  import was compared file by file against the tag: it is identical except
+  for comment wording in three places, which named a title and two products.
+  None of it was written by Will Faust or by 125hz, and the DXMT code it
+  builds on is Feifan He's (see `LICENSE`).
+- **Licence at that tag:** **LGPL-2.1-or-later**. The tree's `LICENSE` is the
+  DXMT project notice ("Copyright (c) 2023-2026 Feifan He for CodeWeavers",
+  LGPL-2.1-or-later) and the full text is in `COPYING.LIB`; the imported files
+  carry no per-file notices of their own. That repository's `LICENSE.OLD`
+  records that DXMT releases up to v0.80 were MIT; this fork branched in the
+  MIT era, which is why the `LICENSE` here is still the MIT one and why it
+  stays that way — it states the terms of the code this fork actually took
+  from upstream.
+- **What the imported code says about its own sources:** its comments state
+  that the x87 set-up (`setupFpu`) was ported from Wine's wined3d `setup_fpu`
+  and DXVK's `SetupFPU`, that the CPU vertex transform behind
+  `ProcessVertices` (`d3d9_process_vertices.hpp`) was ported from wined3d's
+  `process_vertices_strided`, and that the render-state defaults follow DXVK.
+  Wine is LGPL-2.1-or-later and DXVK is zlib-licensed; the tag carries no
+  further notices for these, and none are invented here.
 
-LGPL-2.1 **§3** expressly permits a recipient to distribute a copy of the
-library under the terms of the ordinary GNU GPL instead. That option is
-exercised here, to GPL-3.0-or-later (`COPYING.GPL-3.0`), which is the licence
-Madeira's own modifications already carry and which the combined application is
-distributed under. Nothing is withdrawn from anyone: the same code remains
-available from its own upstream under LGPL-2.1-or-later, and this conversion
-applies only to the copy distributed as part of Madeira. This is exactly what
-the main repository already did for its Wine fork (see `wine/LICENSE-MADEIRA.md`
-and the root `README.md`). Every upstream copyright and licence notice in the
-imported files is kept intact.
+The imported code is kept under **LGPL-2.1-or-later**, exactly as received.
+LGPL-2.1 **§3** would let a recipient distribute a copy under the ordinary GNU
+GPL instead (the main repository did that for its Wine fork), but that option
+is **not** exercised here: whether to convert the imported code, or to keep it
+as a separately licensed LGPL-2.1-or-later part of this repository, is left to
+the maintainer. Nothing in this repository changes its licence, and every
+upstream copyright and licence notice is kept intact.
 
 ### Files imported from that tag
 
@@ -45,9 +60,8 @@ Whole files, unmodified except where a compile fix is noted in the source:
 | `src/d3d9/**` | 71 (the whole directory, including `meson.build`, `d3d9.def`, `version.rc`) |
 | `src/airconv/dxso_header.hpp`, `dxso_decoder.hpp`, `dxso_compile.{hpp,cpp}`, `ffp_compile.{hpp,cpp}` | 6 |
 
-Blocks spliced into files this fork already had (the surrounding files stay
-under their existing terms; the imported blocks are LGPL-2.1-or-later,
-distributed under GPL-3.0-or-later as above):
+Blocks spliced into files this fork already had (the imported blocks remain
+LGPL-2.1-or-later; the surrounding code stays under its existing terms):
 
 | Path | What was taken |
 |---|---|
@@ -59,7 +73,7 @@ distributed under GPL-3.0-or-later as above):
 | `src/dxmt/dxmt_command.metal` | the shader-resolve and stretch-blit shaders and their metadata structs: `resolve_data`, `DXMTResolveMetadata`, `vs_resolve_msaa`, `fs_resolve_msaa_average`, `resolve_depth_output`, `fs_resolve_msaa_depth`, `blit_data`, `DXMTStretchBlitMetadata`, `vs_blit_quad`, `fs_blit_quad` |
 | `src/dxmt/dxmt_command.{hpp,cpp}` | `ResolveTextureMode`, `ResolveTextureContext` and `StretchBlitContext` (declarations and definitions, including their PSO/sampler caches) |
 | `src/dxmt/dxmt_context.{hpp,cpp}` | `ArgumentEncodingContext::resolveDepthTexture`, `stretchBlit`, `copyTexture`, `optimizeTextureForGPUAccess`, `signalEventByHandle`, the `Rc<BufferAllocation>` overload of `access`, `StretchBlitEncoderData`, the extra `ResolveEncoderData` fields, and the `EncoderType::Resolve` depth/shader branches and `EncoderType::StretchBlit` encode body |
-| `src/dxmt/dxmt_command_queue.{hpp,cpp}` | `GpuCompletionStatus`, `GpuCompletionTarget`, `CommandChunk::addCompletionTarget` and the finish-thread completion dispatch, `CommandQueue::HasDeviceError`/`MarkDeviceError`/`FrameLatencySignaled`/`WaitFrameLatency`, `CommandQueue::WaitCPUFenceBounded` |
+| `src/dxmt/dxmt_command_queue.{hpp,cpp}` | `GpuCompletionStatus`, `GpuCompletionTarget`, `CommandChunk::addCompletionTarget` and the finish-thread completion dispatch, `CommandQueue::HasDeviceError`/`MarkDeviceError`/`FrameLatencySignaled`/`WaitFrameLatency` (`CommandQueue::WaitCPUFenceBounded` is not from the tag; see the poll fix below) |
 | `src/dxmt/dxmt_ring_bump_allocator.hpp` | `RingBumpState::preallocate`, `seal_latest`, the `single_writer` constructor argument and its `note_single_writer` assertion, and the `__i386__` `kStagingBlockSize` |
 | `src/dxmt/dxmt_format.hpp` | `Recall_sRGB_ForRenderTarget` |
 | `src/dxmt/dxmt_shader_cache.{hpp,cpp}` | `GetDXMTShaderCacheDirectory` |
@@ -71,11 +85,11 @@ distributed under GPL-3.0-or-later as above):
 | `src/winemetal/winemetal.h` | `wmtcmd_render_setsamplerstate`, `wmtcmd_blit_optimize_contents`, and the appended `WMTRenderCommandSetBlendFactor` / `SetFragmentSamplerState` / `SetVertexTexture` / `SetVertexSamplerState` and `WMTBlitCommandOptimizeContentsForGPUAccess` enumerators |
 
 The guest-window fix in `src/dxmt/dxmt_buffer.cpp` (`Buffer::allocate`'s
-`#ifdef __i386__` `CpuPlaced`) is Madeira's own work: the reference has no
+`#ifdef __i386__` `CpuPlaced`) is 125hz's own work (for Madeira): the reference has no
 equivalent, because it does not have a shifted guest window to satisfy.
 
-The `[d3d9-census]` instrumentation (WOW64_DESIGN.md §8.4) is Madeira's own
-work under GPL-3.0-or-later, and the reference has no equivalent. New files:
+The `[d3d9-census]` instrumentation (WOW64_DESIGN.md §8.4) is 125hz's own
+work (for Madeira) under GPL-3.0-or-later, and the reference has no equivalent. New files:
 `src/d3d9/gen_d3d9_census.py`, `src/d3d9/d3d9_census.{hpp,cpp}` and the
 generated `src/d3d9/d3d9_census_names.h`. Added to files imported from the tag:
 
@@ -86,17 +100,17 @@ generated `src/d3d9/d3d9_census_names.h`. Added to files imported from the tag:
 
 The empty unix-call slot the §8.4 benchmark times (`_d3d9_nop` at slot 150,
 `WMTNop`, `struct unixcall_d3d9_nop`, and the `gen_remote_guard.py` `LOCAL_OK`
-entry, in `src/winemetal/`) is likewise Madeira's own work; it exists only to
+entry, in `src/winemetal/`) is likewise 125hz's own work (for Madeira); it exists only to
 be measured and has no upstream counterpart.
 
 The `Reserved*` enumerators alongside those appended command types, the
 `_MTLRenderCommandEncoder_encodeCommands` / `_MTLBlitCommandEncoder_encodeCommands`
 cases that decode them, and `Texture::fullView`'s mapping onto this fork's view-0
-model are Madeira's own work: the reference expresses them differently (a wider
+model are 125hz's own work (for Madeira): the reference expresses them differently (a wider
 command set, and a `TextureViewKey` carrying a descriptor rather than an index).
 
 Everything else in the D3D9 path — the guest-window pointer conversions, the
-32-bit dispatch-table variants, the iOS build stages — is Madeira's own work
+32-bit dispatch-table variants, the iOS build stages — is 125hz's own work (for Madeira)
 under GPL-3.0-or-later.
 
 Where a file contains both, the file as a whole may only be distributed under
@@ -106,7 +120,7 @@ under MIT **from upstream**, and nothing here withdraws that.
 
 ### The native ARM64 D3D9 frontend (`DXMT_MADEIRA`, WOW64_DESIGN.md §8)
 
-Madeira's own work under **GPL-3.0-or-later**; the reference has no
+125hz's own work (for Madeira) under **GPL-3.0-or-later**; the reference has no
 equivalent, because it has no shim, no guest window and no arena. New files:
 
 | Path | What it is |
@@ -148,7 +162,7 @@ The shim is a second, separate module: `d3d9.dll` on the i386 farm is now the
 shim, and the emulated frontend above ships beside it as `d3d9-emulated.dll`.
 One file name, two provenances, so they are recorded separately.
 
-Madeira's own work under **GPL-3.0-or-later**. New files:
+125hz's own work (for Madeira) under **GPL-3.0-or-later**. New files:
 
 | Path | What it is |
 |---|---|
@@ -163,8 +177,8 @@ Madeira's own work under **GPL-3.0-or-later**. New files:
 | `src/d3d9shim/d3d9.def`, `meson.build` | the export list (names **and** ordinals, matching `src/d3d9/d3d9.def`) and the i386-only build |
 
 **Three blocks were moved VERBATIM out of the imported frontend** and keep
-their LGPL-2.1-or-later provenance (distributed here under GPL-3.0-or-later
-through LGPL-2.1 §3, exactly as above). They are the same code, relocated
+their LGPL-2.1-or-later licence and David Acevedo's authorship, exactly as
+above. They are the same code, relocated
 because it has to run on the guest's own thread; each carries the note in its
 file header:
 
@@ -199,7 +213,7 @@ Those files carry the same provenance note.
 
 ### The `IDirect3DQuery9::GetData` poll fix (WOW64_DESIGN.md §7, §8.4)
 
-Madeira's own work under GPL-3.0-or-later; the reference has no equivalent
+125hz's own work (for Madeira) under GPL-3.0-or-later; the reference has no equivalent
 (it spins). The `[d3d9-census]` measurement of a 32-bit title showed
 `GetData` as the single busiest vtable slot in the frontend at ~85.7k calls
 per frame, the application using an `EVENT` query as a GPU fence and
@@ -242,6 +256,15 @@ self-contained. Upstream code keeps its own licence and notices and needs
 no exception. Prepared 2026-09-16; the copyright holder adopted it on
 2026-09-24, as recorded in the adoption line of the top-level Madeira
 repository's LICENSE-EXCEPTION.md, before any public push.
+
+The modifications and new files contributed by 125hz (the commits signed off
+by 125hz) are offered on the same terms: GPL-3.0-or-later with the
+additional permission below. New files written by 125hz say
+`Copyright 2026 125hz` in their headers. One value in those commits was
+taken from elsewhere: the 8 MB i386 staging block size in
+`src/dxmt/dxmt_ring_bump_allocator.hpp` is the value the `v0.4-d3d9` tree
+of `https://github.com/dacevedo12/dxmt` (David Acevedo, LGPL-2.1-or-later)
+uses for its i386 build; the code around it is 125hz's.
 
 ### Madeira Converter Exception, version 1 (of 2026-09-16; in effect from the adoption recorded in the top-level LICENSE-EXCEPTION.md)
 

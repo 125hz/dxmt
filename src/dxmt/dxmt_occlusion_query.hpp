@@ -134,7 +134,11 @@ public:
    * With nothing counted in this submission there is nothing to accumulate, so
    * the running total is already the answer.  See the caller in
    * ArgumentEncodingContext::flushCommands for why a query can end in such a
-   * submission and what it cost when it was simply dropped. */
+   * submission and what it cost when it was simply dropped.
+   *
+   * ml2011: by default only called from ~VisibilityResultReadback, i.e. on
+   * the finish thread and in submission order, after every earlier
+   * submission's readback has issued. */
   void
   issueEmpty(uint64_t seqId) {
     assert(seqId >= seq_id_begin);
@@ -181,6 +185,12 @@ public:
       queries(queries) {
         visibility_result_heap_info.options = WMTResourceHazardTrackingModeUntracked;
         visibility_result_heap_info.memory.set(nullptr);
+        /* MADEIRA (ml2011): num_results == 0 is a submission that counted no
+         * samples but ends a query (see flushCommands). It needs no buffer,
+         * only the in-order issueEmpty() in the destructor. */
+        visibility_result_heap_info.length = 0;
+        if (!num_results)
+          return;
 #ifdef __i386__
         visibility_result_heap_info.memory.set(wsi::aligned_malloc(num_results * sizeof(uint64_t), DXMT_PAGE_SIZE));
 #endif
@@ -189,10 +199,14 @@ public:
       }
   ~VisibilityResultReadback() {
     for (auto query : queries) {
-      query->issue(seq_id, (uint64_t *)visibility_result_heap_info.memory.get(), num_results);
+      if (num_results)
+        query->issue(seq_id, (uint64_t *)visibility_result_heap_info.memory.get(), num_results);
+      else
+        query->issueEmpty(seq_id);
     }
 #ifdef __i386__
-    wsi::aligned_free(visibility_result_heap_info.memory.get());
+    if (num_results)
+      wsi::aligned_free(visibility_result_heap_info.memory.get());
 #endif
   }
 

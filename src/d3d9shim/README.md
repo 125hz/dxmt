@@ -1,5 +1,5 @@
 <!--
-Copyright 2026 Will Faust
+Copyright 2026 125hz
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
@@ -333,10 +333,12 @@ window-check as it walks and return 0 for anything it cannot follow):
 `d3d9_up_index_bytes`.
 
 Lifecycle: `int d3d9_native_init(void)` (called from `_d3d9_init` after the
-hash check) and `void d3d9_native_process_teardown(void *peb)` — called from
-`ios_wow_reclaim_dead_windows()` **before** the `PROT_NONE` replace and before
-`ios_jit_purge_window()`, because native objects hold host pointers *into* the
-arena (§8.9-5).
+hash check) and `void d3d9_native_window_teardown(unsigned long window_base)`
+— called from `ios_wow_reclaim_dead_windows()` with the dead window's base,
+**before** the `PROT_NONE` replace and before `ios_jit_purge_window()`, because
+native objects hold host pointers *into* the arena (§8.9-5). It is keyed by the
+base, not the PEB: by the time the reclaim runs the registry no longer resolves
+a dead PEB to its window.
 
 Per-method: `d3d9_native_<Iface>_<Method>(...)`, one per slot including the
 `local` ones, so a later reclassification is a one-line change in

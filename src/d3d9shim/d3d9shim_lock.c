@@ -11,7 +11,7 @@
  * promised single-threaded use, which is what the native runtime and DXVK
  * assume too.
  *
- * Copyright 2026 Will Faust
+ * Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free

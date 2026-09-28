@@ -16,7 +16,7 @@
 ; shipping beside it as d3d9-emulated.dll exports the name "D3D9.DLL", which
 ; a lower-case strstr(match, "d3d9shim") cannot hit.
 ;
-; Copyright 2026 Will Faust
+; Copyright 2026 125hz
 ; SPDX-License-Identifier: GPL-3.0-or-later
 
 LIBRARY d3d9shim.dll

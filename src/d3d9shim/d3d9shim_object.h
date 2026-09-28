@@ -8,7 +8,7 @@
  * d3d9shim_lock.c, d3d9shim_window.c, d3d9shim_fpu.c, d3d9shim_custom.c,
  * d3d9shim_main.c) need from each other.
  *
- * Copyright 2026 Will Faust
+ * Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free

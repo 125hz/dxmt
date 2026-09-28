@@ -10,7 +10,7 @@
  * across at CreateDevice / Reset / Present; the unix glue forwards it here.
  * getWindowSize() then answers from the cache instead of guessing.
  *
- * Copyright 2026 Will Faust
+ * Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -38,13 +38,16 @@ namespace dxmt::wsi {
 
 /* Called by the unix glue whenever the shim reports a window's client size.
  * A width or height of 0 is rejected: a zero-sized swapchain is never what
- * the caller meant, and the last good size is a better answer than one. */
-void madeira_set_client_size(HWND window, uint32_t width, uint32_t height);
+ * the caller meant, and the last good size is a better answer than one.
+ * `owner` is the guest-window base of the reporting process, so a process
+ * teardown can drop exactly its own entries. */
+void madeira_set_client_size(HWND window, uint32_t width, uint32_t height, unsigned long owner = 0);
 
-/* Drop one window's entry (device teardown), or every entry belonging to a
- * dead guest process (d3d9_native_process_teardown). */
+/* Drop one window's entry (device teardown), or every entry reported by the
+ * dead guest process whose window base is `owner`
+ * (d3d9_native_window_teardown). */
 void madeira_forget_window(HWND window);
-void madeira_forget_all_windows();
+void madeira_forget_windows_of(unsigned long owner);
 
 /* The fallback used when a window has no cached size yet -- the virtual
  * desktop the app is presented into.  Set once at init from the same place

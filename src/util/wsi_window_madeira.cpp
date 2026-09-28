@@ -10,7 +10,7 @@
  * neither exists below the Win32 boundary.  The client size comes from a
  * per-HWND cache the shim fills instead (wsi_window_madeira.hpp).
  *
- * Copyright 2026 Will Faust
+ * Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -45,6 +45,7 @@ namespace {
 struct ClientSize {
   uint32_t width;
   uint32_t height;
+  unsigned long owner; /* guest-window base of the reporting process */
 };
 
 /* A plain std::mutex, not dxmt::mutex: the map is touched once per
@@ -63,20 +64,20 @@ cache() {
   return map;
 }
 
-ClientSize g_default = {1024, 768};
+ClientSize g_default = {1024, 768, 0};
 
 } // namespace
 
 void
-madeira_set_client_size(HWND window, uint32_t width, uint32_t height) {
+madeira_set_client_size(HWND window, uint32_t width, uint32_t height, unsigned long owner) {
   if (!width || !height)
     return;
   std::lock_guard<std::mutex> guard(cache_mutex());
   if (!window) {
-    g_default = {width, height};
+    g_default = {width, height, 0};
     return;
   }
-  cache()[window] = {width, height};
+  cache()[window] = {width, height, owner};
 }
 
 void
@@ -84,7 +85,7 @@ madeira_set_default_client_size(uint32_t width, uint32_t height) {
   if (!width || !height)
     return;
   std::lock_guard<std::mutex> guard(cache_mutex());
-  g_default = {width, height};
+  g_default = {width, height, 0};
 }
 
 void
@@ -94,9 +95,9 @@ madeira_forget_window(HWND window) {
 }
 
 void
-madeira_forget_all_windows() {
+madeira_forget_windows_of(unsigned long owner) {
   std::lock_guard<std::mutex> guard(cache_mutex());
-  cache().clear();
+  std::erase_if(cache(), [owner](const auto &entry) { return entry.second.owner == owner; });
 }
 
 void

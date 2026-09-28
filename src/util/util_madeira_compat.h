@@ -15,7 +15,7 @@
  * (thread id, yield, priority, process id), and explicit sentinels where it
  * does not, so that a caller cannot mistake a stub's return for a handle.
  *
- * Copyright 2026 Will Faust
+ * Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free

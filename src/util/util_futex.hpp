@@ -80,7 +80,7 @@
  * re-reads the value with a proper atomic load before it believes anything.
  * build/dxmt-tests/futex-host-test.cpp is the producer/consumer model.
  *
- * Copyright 2026 Will Faust
+ * Copyright 2026 125hz
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
