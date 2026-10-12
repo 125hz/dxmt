@@ -1447,6 +1447,16 @@ _MTLCommandBuffer_computeCommandEncoder(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* madeira-bcd: rp-lean (tools/patch-winemetal-rp-lean.py). A render pass fills
+ * only the colour attachments it uses: a slot with no texture and no resolve
+ * texture is not part of the pass in Metal, and a fresh descriptor's slot has
+ * none. madeira.cfg rp-lean = 0 fills all eight as before. */
+static int madeira_rp_lean_on(void) {
+  static int on = -1;
+  if (on < 0) on = madeira_cfg_int("rp-lean", 1) ? 1 : 0;
+  return on;
+}
+
 static NTSTATUS
 _MTLCommandBuffer_renderCommandEncoder(void *obj) {
   struct unixcall_generic_obj_uint64_obj_ret *params = obj;
@@ -1468,7 +1478,28 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
     return STATUS_SUCCESS;
   }
   MTLRenderPassDescriptor *descriptor = [[MTLRenderPassDescriptor alloc] init];
+  const int madeira_lean = madeira_rp_lean_on();   /* madeira-bcd: rp-lean */
   for (unsigned i = 0; i < 8; i++) {
+    if (madeira_lean) {   /* madeira-bcd: rp-lean -- the slots the pass uses, one lookup each */
+      if (!info->colors[i].texture && !info->colors[i].resolve_texture)
+        continue;
+      MTLRenderPassColorAttachmentDescriptor *madeira_att = descriptor.colorAttachments[i];
+      madeira_att.clearColor = MTLClearColorMake(
+          info->colors[i].clear_color.r, info->colors[i].clear_color.g, info->colors[i].clear_color.b,
+          info->colors[i].clear_color.a
+      );
+      madeira_att.level = info->colors[i].level;
+      madeira_att.slice = info->colors[i].slice;
+      madeira_att.depthPlane = info->colors[i].depth_plane;
+      madeira_att.texture = (id<MTLTexture>)info->colors[i].texture;
+      madeira_att.loadAction = (MTLLoadAction)info->colors[i].load_action;
+      madeira_att.storeAction = (MTLStoreAction)info->colors[i].store_action;
+      madeira_att.resolveTexture = (id<MTLTexture>)info->colors[i].resolve_texture;
+      madeira_att.resolveLevel = info->colors[i].resolve_level;
+      madeira_att.resolveSlice = info->colors[i].resolve_slice;
+      madeira_att.resolveDepthPlane = info->colors[i].resolve_depth_plane;
+      continue;
+    }
     descriptor.colorAttachments[i].clearColor = MTLClearColorMake(
         info->colors[i].clear_color.r, info->colors[i].clear_color.g, info->colors[i].clear_color.b,
         info->colors[i].clear_color.a
