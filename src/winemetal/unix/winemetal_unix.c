@@ -848,6 +848,21 @@ _MTLDevice_newSamplerState(void *obj) {
   sampler_desc.lodAverage = info->lod_average;
   sampler_desc.normalizedCoordinates = info->normalized_coords;
   sampler_desc.supportArgumentBuffers = info->support_argument_buffers;
+  { /* madeira-bcd: native sampler reduction (tools/patch-winemetal-sampler-reduction.py) */
+    static int on = -1, said;
+    uint8_t tag = ((const uint8_t *)info)[__builtin_offsetof(struct WMTSamplerInfo, support_argument_buffers) + 1];
+    if (on < 0) on = madeira_cfg_int("sampler-reduction", 0) == 3;
+    if (on && (tag == 0xA1 || tag == 0xA2)) {
+      SEL sel = sel_registerName("setReductionMode:");
+      int ok = [device supportsFamily:(MTLGPUFamily)1010] && [sampler_desc respondsToSelector:sel];
+      if (ok) ((void (*)(id, SEL, NSUInteger))objc_msgSend)(sampler_desc, sel, (NSUInteger)(tag & 3));
+      if (said++ < 6)
+        fprintf(stderr, "[sampler-reduction] madeira-bcd %s sampler: %s (min %lu mag %lu mip %lu)\n",
+                tag == 0xA1 ? "MINIMUM" : "MAXIMUM",
+                ok ? "Metal reductionMode set" : "this device has no Metal reduction (needs an Apple10 GPU and iOS 26) -- averaging",
+                (unsigned long)info->min_filter, (unsigned long)info->mag_filter, (unsigned long)info->mip_filter);
+    }
+  }
 
   id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:sampler_desc];
   info->gpu_resource_id = info->support_argument_buffers ? [sampler gpuResourceID]._impl : 0;
