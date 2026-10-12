@@ -3485,6 +3485,12 @@ _MTLCommandBuffer_presentDrawable(void *obj) {
     return STATUS_SUCCESS;
   }
   int mode = g_madeira_vsync_mode;
+  {   /* madeira-bcd fps-gov (tools/patch-winemetal-fps-cap.py): the governor's frame cap, opt-in */
+    extern unsigned long long ios_fps_cap_dxmt_pace(void);
+    unsigned long long fps_cap_ns = ios_fps_cap_dxmt_pace();
+    if (fps_cap_ns)
+      ios_frame_limiter(fps_cap_ns);
+  }
   /* ml1050: this call IS the frame boundary on the encode thread. */
   if (madeira_frame_hooks_on())
     ios_frame_encode_present(0);
