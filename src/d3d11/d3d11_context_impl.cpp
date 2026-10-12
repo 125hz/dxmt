@@ -3591,6 +3591,25 @@ public:
     for (unsigned slot = StartSlot; slot < StartSlot + NumBuffers; slot++) {
       auto pVertexBuffer = ppVertexBuffers[slot - StartSlot];
       if (pVertexBuffer) {
+#if defined(__i386__)  /* madeira-bcd: 32-bit (i386) builds only, as the fork shipped it */
+        /* madeira-bcd: byte-aligned vertex fetch -- census of bindings the GPU
+         * cannot fetch 32-bit elements from at their natural alignment. */
+        {
+          static unsigned madeira_vb_total, madeira_vb_odd_off, madeira_vb_odd_stride;
+          UINT o = pOffsets ? pOffsets[slot - StartSlot] : 0, st = pStrides ? pStrides[slot - StartSlot] : 0;
+          madeira_vb_total++;
+          if (o & 3) {
+            if (++madeira_vb_odd_off <= 6 || (madeira_vb_odd_off & 0xffff) == 0)
+              WARN("[vb-align] madeira-bcd slot ", slot, " offset ", o, " (not 4-aligned) stride ", st,
+                   " -- #", madeira_vb_odd_off, " of ", madeira_vb_total, " bindings");
+          }
+          if (st & 3) {
+            if (++madeira_vb_odd_stride <= 6 || (madeira_vb_odd_stride & 0xffff) == 0)
+              WARN("[vb-align] madeira-bcd slot ", slot, " stride ", st, " (not 4-aligned) offset ", o,
+                   " -- #", madeira_vb_odd_stride, " of ", madeira_vb_total, " bindings");
+          }
+        }
+#endif
         bool replaced = false;
         auto &entry = VertexBuffers.bind(slot, {pVertexBuffer}, replaced);
         if (!replaced) {
