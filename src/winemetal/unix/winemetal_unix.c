@@ -6470,6 +6470,65 @@ static NTSTATUS _madeira_ctl(void *args) {
     a->ret = 1;
     break;
   }
+  case 8: {   /* madeira-bcd: GPU fault attribution (tools/patch-dxmt-gpu-fault-info.py) */
+    MTLCommandBufferDescriptor *desc;
+    id<MTLCommandBuffer> cb;
+    if (wmtr_enabled() || !a->ptr) break;
+    desc = [MTLCommandBufferDescriptor new];
+    desc.errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
+    cb = [(id<MTLCommandQueue>)(uintptr_t)a->ptr commandBufferWithDescriptor:desc];
+    [desc release];
+    a->len = (uint64_t)(uintptr_t)cb;
+    a->ret = cb ? 1u : 0u;
+    break;
+  }
+  case 9: {   /* madeira-bcd: which encoders of a failed command buffer faulted */
+    struct { uint64_t cb, buf, size; } *t = (void *)(uintptr_t)a->ptr;
+    char *out; size_t cap, n = 0;
+    unsigned completed = 0, pending = 0;
+    if (wmtr_enabled() || !t || !t->cb || !t->buf || t->size < 64) break;
+    out = (char *)(uintptr_t)t->buf; cap = (size_t)t->size; out[0] = 0;
+    @autoreleasepool {
+      NSError *err = [(id<MTLCommandBuffer>)(uintptr_t)t->cb error];
+      NSArray *infos = err ? err.userInfo[MTLCommandBufferEncoderInfoErrorKey] : nil;
+      if (err) {   /* the MTLCommandBufferError code: 3 timeout, 4 page fault, ... */
+        int w0 = snprintf(out, cap, "code %ld (%s): ", (long)err.code, err.domain.UTF8String ? err.domain.UTF8String : "?");
+        if (w0 > 0 && (size_t)w0 < cap) n = (size_t)w0;
+      }
+      for (int pass = 0; pass < 2; pass++) {
+        for (id<MTLCommandBufferEncoderInfo> info in infos) {
+          MTLCommandEncoderErrorState st = info.errorState;
+          const char *sn;
+          int w;
+          if (pass == 0) {
+            if (st == MTLCommandEncoderErrorStateCompleted) completed++;
+            if (st == MTLCommandEncoderErrorStatePending) pending++;
+            if (st != MTLCommandEncoderErrorStateFaulted) continue;
+            sn = "FAULTED";
+          } else {
+            if (st == MTLCommandEncoderErrorStateAffected) sn = "affected";
+            else if (st == MTLCommandEncoderErrorStateUnknown) sn = "unknown";
+            else continue;
+          }
+          if (n + 32 >= cap) break;
+          w = snprintf(out + n, cap - n, "%s[%s] %s", (n && out[n - 2] != ':') ? "; " : "", sn,
+                       info.label.length ? info.label.UTF8String : "(no label)");
+          if (w < 0 || (size_t)w >= cap - n) { n = cap - 1; break; }
+          n += (size_t)w;
+          for (NSString *sp in info.debugSignposts) {
+            w = snprintf(out + n, cap - n, " {%s}", sp.UTF8String);
+            if (w < 0 || (size_t)w >= cap - n) { n = cap - 1; break; }
+            n += (size_t)w;
+          }
+        }
+      }
+      if (n + 48 < cap)
+        snprintf(out + n, cap - n, "%s(%u completed, %u pending, %u encoders)", n ? "; " : "",
+                 completed, pending, (unsigned)infos.count);
+    }
+    a->ret = 1;
+    break;
+  }
   case 2: {
     char v[512];
     if (madeira_cfg_get(a->name, v, sizeof v)) {
