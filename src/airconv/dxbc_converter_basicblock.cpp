@@ -30,6 +30,10 @@
 
 char dxmt::UnsupportedFeature::ID;
 
+namespace dxmt::air {
+extern thread_local int madeira_vfetch_align1; /* madeira-bcd: byte-aligned vertex fetch */
+}
+
 namespace dxmt::dxbc {
 
 template <typename T = std::monostate>
@@ -512,9 +516,20 @@ IREffect pull_vertex_input(
         llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(base_addr->getType()))
       );
     }
+    static int madeira_align_mode = -1;
+    if (madeira_align_mode < 0) {
+      const char *e = getenv("MADEIRA_VFETCH_ALIGN1");
+      madeira_align_mode = (e && e[0] == '0') ? 0 : (e && e[0] == '1') ? 1 : 2;
+      fprintf(stderr, "[vfetch-align] madeira-bcd byte-aligned vertex fetch %s\n",
+              madeira_align_mode == 0 ? "off (MADEIRA_VFETCH_ALIGN1=0)"
+              : madeira_align_mode == 1 ? "on for every shader (MADEIRA_VFETCH_ALIGN1=1)"
+                                        : "on for SM 4.x vertex shaders");
+    }
+    air::madeira_vfetch_align1 = madeira_align_mode == 1 || (madeira_align_mode == 2 && madeira_sm4);
     auto vec4 = co_yield air::pull_vec4_from_addr(
       (air::MTLAttributeFormat)element_info.format, base_addr, byte_offset
     );
+    air::madeira_vfetch_align1 = 0;
     if (vec4->getType() == types._float4) {
       co_yield store_at_vec4_array_masked(
         ctx.resource.input.ptr_float4, builder.getInt32(element_info.reg), vec4,
