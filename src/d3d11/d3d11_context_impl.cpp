@@ -2047,7 +2047,44 @@ public:
   void
   STDMETHODCALLTYPE
   SwapDeviceContextState(ID3DDeviceContextState *pState, ID3DDeviceContextState **ppPreviousState) override {
-    IMPLEMENT_ME
+    /* madeira-bcd: context state swap (tools/patch-dxmt-context-state-swap.py) */
+    std::lock_guard<mutex_t> lock(mutex);
+    static bool s_swapNoted = false;
+    if (!std::exchange(s_swapNoted, true))
+      Logger::info("[d3d11] madeira-bcd: SwapDeviceContextState in use (context state swap)");
+
+    if (ppPreviousState)
+      *ppPreviousState = nullptr;
+    if (!pState)
+      return;
+
+    Com<MTLD3D11DeviceContextState> next = static_cast<MTLD3D11DeviceContextState *>(pState);
+    Com<MTLD3D11DeviceContextState> previous = std::move(current_state_object_);
+    if (previous == nullptr)
+      previous = new MTLD3D11DeviceContextState(device);
+    if (ppPreviousState)
+      *ppPreviousState = previous.ref();
+    if (previous.ptr() == next.ptr()) {
+      current_state_object_ = std::move(next);
+      return;
+    }
+
+    previous->state = std::move(state_);
+    ResetEncodingContextState();
+    state_ = std::move(next->state);
+    next->state = {};
+    current_state_object_ = std::move(next);
+
+    if (state_.InputAssembler.IndexBuffer) {
+      EmitST([buffer = state_.InputAssembler.IndexBuffer->buffer()](ArgumentEncodingContext &enc) mutable {
+        enc.bindIndexBuffer(forward_rc(buffer));
+      });
+    }
+    dirty_state.set(DirtyState::DepthStencilState);
+    dirty_state.set(DirtyState::RasterizerState);
+    dirty_state.set(DirtyState::BlendFactorAndStencilRef);
+    dirty_state.set(DirtyState::Viewport);
+    dirty_state.set(DirtyState::Scissors);
   }
 
   void
@@ -5449,6 +5486,8 @@ public:
 
 protected:
   D3D11ContextState state_;
+  /* madeira-bcd: context state swap -- the object swapped in last */
+  Com<MTLD3D11DeviceContextState> current_state_object_;
   D3D11UserDefinedAnnotation annotation_;
   MTLD3D11ContextExt<ContextInternalState> ext_;
   uint64_t max_object_threadgroups_;
