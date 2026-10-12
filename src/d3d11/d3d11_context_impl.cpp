@@ -1492,6 +1492,35 @@ public:
     });
   }
 
+#if defined(__i386__)  /* madeira-bcd: 32-bit (i386) builds only, as the fork shipped it */
+
+  /* madeira-bcd: short constant buffers -- [idx-align] census: 16-bit index
+   * buffer offsets that are not a multiple of 4 (log only). */
+  static void
+  madeira_idx_align_census(WMTIndexType type, uint64_t offset) {
+    if (type != WMTIndexTypeUInt16 || !(offset & 3))
+      return;
+    static unsigned n;
+    if (++n <= 8 || (n & 0xfff) == 0)
+      WARN("[idx-align] madeira-bcd #", n, " 16-bit index buffer offset ", offset, " is not a multiple of 4");
+  }
+
+  /* madeira-bcd: realigned 16-bit indices -- reserve argument-buffer room for a
+   * 16-bit draw whose index offset is not 4-byte aligned; 0 = not needed. */
+  uint64_t
+  madeira_idx_realign_reserve(WMTIndexType type, uint64_t offset, uint32_t count) {
+    static int enabled = -1;
+    if (enabled < 0) {
+      const char *e = getenv("MADEIRA_IDX_REALIGN");
+      enabled = !(e && e[0] == '0');
+      WARN("[idx-align] madeira-bcd realign ", enabled ? "on" : "off (MADEIRA_IDX_REALIGN=0)");
+    }
+    if (!enabled || type != WMTIndexTypeUInt16 || !(offset & 3) || !count)
+      return 0;
+    return PreAllocateArgumentBuffer(uint64_t(count) * 2, 16) + 1;
+  }
+
+#endif
   void
   STDMETHODCALLTYPE
   DrawIndexed(UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation) override {
@@ -1517,7 +1546,14 @@ public:
     auto IndexBufferOffset =
         state_.InputAssembler.IndexBufferOffset +
         StartIndexLocation * (state_.InputAssembler.IndexBufferFormat == DXGI_FORMAT_R32_UINT ? 4 : 2);
+#if defined(__i386__)  /* madeira-bcd: 32-bit (i386) builds only, as the fork shipped it */
+    madeira_idx_align_census(IndexType, IndexBufferOffset);
+    uint64_t RealignOffset = madeira_idx_realign_reserve(IndexType, IndexBufferOffset, IndexCount);
+    EmitOP([IndexType, IndexBufferOffset, Primitive, IndexCount, BaseVertexLocation,
+            RealignOffset](ArgumentEncodingContext &enc) {
+#else
     EmitOP([IndexType, IndexBufferOffset, Primitive, IndexCount, BaseVertexLocation](ArgumentEncodingContext &enc) {
+#endif
       enc.bumpVisibilityResultOffset();
       auto [index_buffer, index_sub_offset] = enc.currentIndexBuffer();
       auto &cmd = enc.encodeRenderCommand<wmtcmd_render_draw_indexed>();
@@ -1527,6 +1563,16 @@ public:
       cmd.index_type = IndexType;
       cmd.index_buffer = index_buffer;
       cmd.index_buffer_offset = IndexBufferOffset + index_sub_offset;
+#if defined(__i386__)  /* madeira-bcd: 32-bit (i386) builds only, as the fork shipped it */
+      if (RealignOffset) {
+        WMT::Buffer b = index_buffer;
+        uint64_t o = IndexBufferOffset + index_sub_offset;
+        if (enc.realignIndexRange(b, o, RealignOffset - 1, uint64_t(IndexCount) * 2)) {
+          cmd.index_buffer = b;
+          cmd.index_buffer_offset = o;
+        }
+      }
+#endif
       cmd.base_vertex = BaseVertexLocation;
       cmd.base_instance = 0;
       cmd.instance_count = 1;
@@ -1600,8 +1646,15 @@ public:
     auto IndexBufferOffset =
         state_.InputAssembler.IndexBufferOffset +
         StartIndexLocation * (state_.InputAssembler.IndexBufferFormat == DXGI_FORMAT_R32_UINT ? 4 : 2);
+#if defined(__i386__)  /* madeira-bcd: 32-bit (i386) builds only, as the fork shipped it */
+    madeira_idx_align_census(IndexType, IndexBufferOffset);
+    uint64_t RealignOffset = madeira_idx_realign_reserve(IndexType, IndexBufferOffset, IndexCountPerInstance);
+    EmitOP([IndexType, IndexBufferOffset, Primitive, InstanceCount, BaseVertexLocation, StartInstanceLocation,
+          IndexCountPerInstance, RealignOffset](ArgumentEncodingContext &enc) {
+#else
     EmitOP([IndexType, IndexBufferOffset, Primitive, InstanceCount, BaseVertexLocation, StartInstanceLocation,
           IndexCountPerInstance](ArgumentEncodingContext &enc) {
+#endif
       enc.bumpVisibilityResultOffset();
       auto [index_buffer, index_sub_offset] = enc.currentIndexBuffer();
       auto &cmd = enc.encodeRenderCommand<wmtcmd_render_draw_indexed>();
@@ -1611,6 +1664,16 @@ public:
       cmd.index_type = IndexType;
       cmd.index_buffer = index_buffer;
       cmd.index_buffer_offset = IndexBufferOffset + index_sub_offset;
+#if defined(__i386__)  /* madeira-bcd: 32-bit (i386) builds only, as the fork shipped it */
+      if (RealignOffset) {
+        WMT::Buffer b = index_buffer;
+        uint64_t o = IndexBufferOffset + index_sub_offset;
+        if (enc.realignIndexRange(b, o, RealignOffset - 1, uint64_t(IndexCountPerInstance) * 2)) {
+          cmd.index_buffer = b;
+          cmd.index_buffer_offset = o;
+        }
+      }
+#endif
       cmd.base_vertex = BaseVertexLocation;
       cmd.base_instance = StartInstanceLocation;
       cmd.instance_count = InstanceCount;
@@ -3186,10 +3249,47 @@ public:
     if (reflection->NumConstantBuffers && dirty_cbuffer) {
       auto ConstantBufferCount = reflection->NumConstantBuffers;
       auto offset = PreAllocateArgumentBuffer(ConstantBufferCount << 3, 32);
+#if defined(__i386__)  /* madeira-bcd: 32-bit (i386) builds only, as the fork shipped it */
+      /* madeira-bcd: short constant buffers -- a bound buffer shorter than the
+       * shader's dcl_constantbuffer gets a zero-padded copy in the argument
+       * buffer (see tools/patch-dxmt-cb-short.py). */
+      std::array<uint32_t, 28> short_cb{};
+      uint32_t short_mask = 0;
+      {
+        auto cbinfo = managed_shader->constant_buffers_info();
+        const uint16_t *decl = managed_shader->cb_declared_vec4();
+        for (unsigned i = 0; i < ConstantBufferCount; i++) {
+          unsigned slot = cbinfo[i].SM50BindingSlot;
+          if (slot >= 14 || !decl[slot] || !ShaderStage.ConstantBuffers.test_bound(slot))
+            continue;
+          auto &entry = ShaderStage.ConstantBuffers.at(slot);
+          if (entry.NumConstants >= decl[slot])
+            continue;
+          uint32_t bytes = uint32_t(decl[slot]) << 4;
+          short_cb[2 * slot] = uint32_t(PreAllocateArgumentBuffer(bytes, 256)) + 1;
+          short_cb[2 * slot + 1] = bytes;
+          short_mask |= 1u << slot;
+          static unsigned madeira_cb_short_n;
+          if (++madeira_cb_short_n <= 24 || (madeira_cb_short_n & 0xffff) == 0)
+            WARN("[cb-short] madeira-bcd #", madeira_cb_short_n, " stage=", unsigned(stage), " cb", slot,
+                 " declared=", decl[slot], " vec4 bound=", entry.NumConstants, " vec4 shader=",
+                 managed_shader->sha1().string().substr(0, 16), " -> zero-padded copy");
+        }
+      }
+      EmitST([=, cb = managed_shader->constant_buffers_info()](ArgumentEncodingContext &enc) {
+        enc.encodeConstantBuffers<stage, kind>(reflection, cb, offset, short_mask ? short_cb.data() : nullptr);
+      });
+      ShaderStage.ConstantBuffers.clear_dirty();
+      /* the copy is a snapshot: take a fresh one for every draw */
+      for (unsigned slot = 0; slot < 14; slot++)
+        if (short_mask & (1u << slot))
+          ShaderStage.ConstantBuffers.set_dirty(slot);
+#else
       EmitST([=, cb = managed_shader->constant_buffers_info()](ArgumentEncodingContext &enc) {
         enc.encodeConstantBuffers<stage, kind>(reflection, cb, offset);
       });
       ShaderStage.ConstantBuffers.clear_dirty();
+#endif
     }
 
     if (reflection->NumArguments && (dirty_sampler || dirty_srv || dirty_uav)) {
