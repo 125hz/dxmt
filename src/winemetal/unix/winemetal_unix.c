@@ -6678,6 +6678,23 @@ static uint32_t madeira_scn_ctl(struct madeira_ctl_args *a) {
   }
 }
 
+/* madeira-bcd: late render-pass store actions (tools/patch-winemetal-rp-store.py).
+ * MadeiraCtl op 24 from madeira-d3d12 (rp-discard = 1): the store actions of an
+ * open render encoder whose pass said MTLStoreActionUnknown, set before
+ * endEncoding; 0xff leaves one alone, encoder 0 is a probe. */
+struct madeira_rp_store_req { uint64_t enc; uint8_t color[8], depth, stencil, pad[6]; };
+static uint32_t madeira_rp_store(const struct madeira_rp_store_req *r) {
+  id<MTLRenderCommandEncoder> enc;
+  unsigned i;
+  if (!r->enc) return 1;
+  enc = (id<MTLRenderCommandEncoder>)(uintptr_t)r->enc;
+  for (i = 0; i < 8; i++)
+    if (r->color[i] != 0xff) [enc setColorStoreAction:(MTLStoreAction)r->color[i] atIndex:i];
+  if (r->depth != 0xff) [enc setDepthStoreAction:(MTLStoreAction)r->depth];
+  if (r->stencil != 0xff) [enc setStencilStoreAction:(MTLStoreAction)r->stencil];
+  return 1;
+}
+
 static NTSTATUS _madeira_ctl(void *args) {
   struct madeira_ctl_args *a = args;
   if (!a) return STATUS_SUCCESS;
@@ -6770,6 +6787,10 @@ static NTSTATUS _madeira_ctl(void *args) {
   case 20: case 21: case 22:   /* madeira-bcd: native file access for the D3D12 shader cache
                                 * (tools/patch-winemetal-sc-native.py): open, get, put */
     a->ret = madeira_scn_ctl(a);
+    break;
+  case 24:    /* madeira-bcd: late render-pass store actions (tools/patch-winemetal-rp-store.py) */
+    if (!a->ptr || a->len < sizeof(struct madeira_rp_store_req) || wmtr_enabled()) break;
+    a->ret = madeira_rp_store((const struct madeira_rp_store_req *)(uintptr_t)a->ptr);
     break;
   default: break;
   }
