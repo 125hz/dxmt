@@ -1751,6 +1751,52 @@ _MTLDevice_newRenderPipelineStateVD(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* madeira-bcd: empty fragment function (tools/patch-winemetal-null-fragment.py).
+ * Metal ABORTS on a mesh pipeline with rasterization on and no fragment
+ * function; D3D allows a pipeline with no pixel shader (Horizon Zero Dawn's
+ * VS + GS pipelines killed its pipeline thread, build 469). Such a pipeline
+ * gets an empty fragment function and no colour writes; gs-null-fragment = 0
+ * refuses it instead. Returns 0 when the pipeline must be refused. */
+static id<MTLLibrary> madeira_null_fs_lib;   /* kept for the process, like the function */
+static id<MTLFunction> madeira_null_fs_fn;
+static id<MTLDevice> madeira_null_fs_dev;
+
+static id<MTLFunction> madeira_null_fs_get(id<MTLDevice> dev) {
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    NSError *e = nil;
+    madeira_null_fs_lib = [dev newLibraryWithSource:@"fragment void madeira_null_fragment() {}" options:nil error:&e];
+    madeira_null_fs_fn = madeira_null_fs_lib ? [madeira_null_fs_lib newFunctionWithName:@"madeira_null_fragment"] : nil;
+    madeira_null_fs_dev = dev;
+    if (!madeira_null_fs_fn)
+      fprintf(stderr, "[null-fs] madeira-bcd empty fragment function could not be compiled: %s\n",
+              e ? [[e localizedDescription] UTF8String] : "?");
+  });
+  return madeira_null_fs_dev == dev ? madeira_null_fs_fn : nil;
+}
+
+static int madeira_null_fs_fix(id<MTLDevice> dev, MTLMeshRenderPipelineDescriptor *d, const char *who) {
+  static long long on = -1;
+  static unsigned said;
+  id<MTLFunction> f;
+  if (d.fragmentFunction || !d.rasterizationEnabled) return 1;
+  if (on < 0) on = madeira_cfg_int("gs-null-fragment", 1) ? 1 : 0;
+  f = on ? madeira_null_fs_get(dev) : nil;
+  if (!f) {
+    if (said++ < 8)
+      fprintf(stderr, "[null-fs] madeira-bcd %s pipeline with no pixel shader REFUSED (%s)\n", who,
+              on ? "no empty fragment function" : "gs-null-fragment = 0");
+    return 0;
+  }
+  d.fragmentFunction = f;
+  for (unsigned c = 0; c < 8; c++) d.colorAttachments[c].writeMask = MTLColorWriteMaskNone;
+  d.alphaToCoverageEnabled = NO;
+  if (said++ < 8)
+    fprintf(stderr, "[null-fs] madeira-bcd %s pipeline with no pixel shader: empty fragment function, "
+                    "no colour writes (gs-null-fragment = 0 refuses it)\n", who);
+  return 1;
+}
+
 static NTSTATUS
 _MTLDevice_newMeshRenderPipelineState(void *obj) {
   struct unixcall_mtldevice_newmeshrenderpso *params = obj;
@@ -1823,6 +1869,12 @@ _MTLDevice_newMeshRenderPipelineState(void *obj) {
     options = info->fail_on_binary_archive_miss ? MTLPipelineOptionFailOnBinaryArchiveMiss : MTLPipelineOptionNone;
   }
 #endif
+  if (!madeira_null_fs_fix((id<MTLDevice>)params->device, descriptor, "mesh")) {   /* madeira-bcd */
+    params->ret_pso = 0;
+    params->ret_error = 0;
+    [descriptor release];
+    return STATUS_SUCCESS;
+  }
   NSError *err = NULL;
   params->ret_pso = (obj_handle_t)[(id<MTLDevice>)params->device newRenderPipelineStateWithMeshDescriptor:descriptor
                                                                                                   options:options
@@ -6783,6 +6835,8 @@ _MTLDevice_newGeometryEmulationPipelineState(void *obj) {
       d.objectFunction = fo;
       d.meshFunction = tm;
       d.fragmentFunction = ff;
+      if (!madeira_null_fs_fix((id<MTLDevice>)params->device, d, "DXIL tessellation"))   /* madeira-bcd */
+        return STATUS_SUCCESS;
       {
         MTLLinkedFunctions *ol = [MTLLinkedFunctions linkedFunctions], *ml = [MTLLinkedFunctions linkedFunctions];
         ol.functions = @[ fsi, th ];
@@ -6830,6 +6884,8 @@ _MTLDevice_newGeometryEmulationPipelineState(void *obj) {
     d.objectFunction = fo;
     d.meshFunction = fm;
     d.fragmentFunction = ff;
+    if (!madeira_null_fs_fix((id<MTLDevice>)params->device, d, "geometry-emulation"))   /* madeira-bcd */
+      return STATUS_SUCCESS;
     {
       MTLLinkedFunctions *lf = [MTLLinkedFunctions linkedFunctions];
       lf.functions = @[ fsi ];
