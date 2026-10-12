@@ -2636,6 +2636,9 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     case WMTRenderCommandDrawMeshThreadgroupsIndirect: {
       struct wmtcmd_render_draw_meshthreadgroups_indirect *body =
           (struct wmtcmd_render_draw_meshthreadgroups_indirect *)next;
+      /* madeira-bcd: DXIL tessellation, indirect (same marker as the direct draw) */
+      if (body->reserved[1] == 0x7e55 && body->reserved[0])
+        [encoder setObjectThreadgroupMemoryLength:body->reserved[0] atIndex:0];
       [encoder drawMeshThreadgroupsWithIndirectBuffer:(id<MTLBuffer>)body->indirect_args_buffer
                                  indirectBufferOffset:body->indirect_args_offset
                           threadsPerObjectThreadgroup:MTLSizeMake(
