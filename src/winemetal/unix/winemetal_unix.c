@@ -6412,6 +6412,304 @@ void madeira_set_fence_mode(int mode) {
   g_madeira_fence_req = mode;
   fprintf(stderr, "[fence-mode] ml1136 UI requested fence-chain %d\n", mode);
 }
+/* madeira-bcd: pipeline cache warm-up (tools/patch-winemetal-pso-warm.py).
+ * MadeiraCtl op 10 from madeira-d3d12 (pso-warm = N): compile one lazy pipeline
+ * on a utility-QoS queue with DXMT's own builder, release it at once, keep
+ * only Metal's cached compile. See the script for the numbers. */
+static dispatch_queue_t madeira_pso_warm_q[4];
+static unsigned madeira_pso_warm_nq;
+static _Atomic unsigned madeira_pso_warm_rr;
+static _Atomic long madeira_pso_warm_sent, madeira_pso_warm_done, madeira_pso_warm_hits, madeira_pso_warm_failed;
+static _Atomic uint64_t madeira_pso_warm_ns_compiled, madeira_pso_warm_ns_hits, madeira_pso_warm_said_ns;
+
+static int madeira_pso_warm_setup(void) {
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    long long n = madeira_cfg_int("pso-warm", 0);
+    if (n <= 0) return;
+    if (n > 4) n = 4;
+    dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
+    for (long long i = 0; i < n; i++) madeira_pso_warm_q[i] = dispatch_queue_create("madeira.pso-warm", attr);
+    madeira_pso_warm_nq = (unsigned)n;
+    fprintf(stderr, "[pso-warm] madeira-bcd pipeline cache warm-up on: %lld utility queue(s) (madeira.cfg pso-warm)\n", n);
+  });
+  return madeira_pso_warm_nq > 0;
+}
+
+/* One finished warm-up: tally it, and report every 500 and whenever the
+ * backlog empties (at most every 10 s). A build under 3 ms was a cache hit. */
+static void madeira_pso_warm_note(uint64_t ns, int ok) {
+  long done = atomic_fetch_add_explicit(&madeira_pso_warm_done, 1, memory_order_relaxed) + 1;
+  long sent = atomic_load_explicit(&madeira_pso_warm_sent, memory_order_relaxed);
+  uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  if (!ok)
+    atomic_fetch_add_explicit(&madeira_pso_warm_failed, 1, memory_order_relaxed);
+  else if (ns < 3000000) {
+    atomic_fetch_add_explicit(&madeira_pso_warm_hits, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&madeira_pso_warm_ns_hits, ns, memory_order_relaxed);
+  } else
+    atomic_fetch_add_explicit(&madeira_pso_warm_ns_compiled, ns, memory_order_relaxed);
+  if ((done % 500) == 0 ||
+      (done >= sent && now - atomic_load_explicit(&madeira_pso_warm_said_ns, memory_order_relaxed) > 10000000000ull)) {
+    long hits = atomic_load_explicit(&madeira_pso_warm_hits, memory_order_relaxed);
+    long failed = atomic_load_explicit(&madeira_pso_warm_failed, memory_order_relaxed);
+    long compiled = done - hits - failed;
+    double msc = (double)atomic_load_explicit(&madeira_pso_warm_ns_compiled, memory_order_relaxed) / 1e6;
+    double msh = (double)atomic_load_explicit(&madeira_pso_warm_ns_hits, memory_order_relaxed) / 1e6;
+    atomic_store_explicit(&madeira_pso_warm_said_ns, now, memory_order_relaxed);
+    fprintf(stderr, "[pso-warm] madeira-bcd %ld of %ld pipelines warmed: %ld compiled (avg %.1f ms), "
+                    "%ld already in Metal's cache (avg %.2f ms), %ld failed; %ld waiting\n",
+            done, sent, compiled, compiled > 0 ? msc / compiled : 0.0, hits, hits ? msh / hits : 0.0, failed,
+            sent > done ? sent - done : 0);
+  }
+}
+
+/* kind 0: render pipeline, 1: render pipeline + vertex descriptor, 2: compute. */
+static uint32_t madeira_pso_warm_submit(obj_handle_t device, const void *info, const void *vd, unsigned kind) {
+  size_t isz = kind == 2 ? sizeof(struct WMTComputePipelineInfo) : sizeof(struct WMTRenderPipelineInfo);
+  size_t vsz = kind == 1 ? sizeof(struct WMTVertexDescriptorInfo) : 0;
+  unsigned char *copy;
+  uintptr_t f0, f1 = 0;
+  if (!device || !info || kind > 2 || (kind == 1 && !vd)) return 0;
+  copy = malloc(isz + vsz);
+  if (!copy) return 0;
+  memcpy(copy, info, isz);
+  if (vsz) memcpy(copy + isz, vd, vsz);
+  if (kind == 2)
+    f0 = (uintptr_t)((const struct WMTComputePipelineInfo *)copy)->compute_function;
+  else {
+    f0 = (uintptr_t)((const struct WMTRenderPipelineInfo *)copy)->vertex_function;
+    f1 = (uintptr_t)((const struct WMTRenderPipelineInfo *)copy)->fragment_function;
+  }
+  /* The game may release the pipeline (and its functions) before the queue
+   * gets to it. */
+  if (f0) [(id)f0 retain];
+  if (f1) [(id)f1 retain];
+  [(id)device retain];
+  atomic_fetch_add_explicit(&madeira_pso_warm_sent, 1, memory_order_relaxed);
+  dispatch_async(madeira_pso_warm_q[atomic_fetch_add_explicit(&madeira_pso_warm_rr, 1, memory_order_relaxed) %
+                                    madeira_pso_warm_nq], ^{
+    @autoreleasepool {
+      uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+      obj_handle_t pso = 0;
+      if (kind == 2) {
+        struct unixcall_mtldevice_newcomputepso p;
+        memset(&p, 0, sizeof p);
+        p.device = device; p.info.ptr = copy;
+        _MTLDevice_newComputePipelineState(&p);
+        pso = p.ret_pso;
+      } else if (kind == 1) {
+        struct unixcall_mtldevice_newrenderpso_vd p;
+        memset(&p, 0, sizeof p);
+        p.device = device; p.info.ptr = copy; p.vd.ptr = copy + isz;
+        _MTLDevice_newRenderPipelineStateVD(&p);
+        pso = p.ret_pso;
+      } else {
+        struct unixcall_mtldevice_newrenderpso p;
+        memset(&p, 0, sizeof p);
+        p.device = device; p.info.ptr = copy;
+        _MTLDevice_newRenderPipelineState(&p);
+        pso = p.ret_pso;
+      }
+      madeira_pso_warm_note(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0, pso != 0);
+      if (pso) [(id)pso release];
+      if (f0) [(id)f0 release];
+      if (f1) [(id)f1 release];
+      [(id)device release];
+      free(copy);
+    }
+  });
+  return 1;
+}
+
+/* madeira-bcd: native file access for the D3D12 shader cache (tools/patch-winemetal-sc-native.py).
+ * madeira-d3d12's cache entries, %LOCALAPPDATA%\Madeira\ShaderCache\<build>\<bb>\<key>.msc,
+ * read and written here relative to an open descriptor of the build directory
+ * instead of through Wine's file API (three wineserver requests and a server
+ * realpath() per entry). The same files, names and contents. MadeiraCtl ops
+ * 20 (open), 21 (get) and 22 (put); see the script. */
+#include <pthread.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <time.h>
+
+/* One get or put; madeira_d3d12.c (struct mad_scn_io) has the same layout. */
+struct madeira_scn_io {
+  uint64_t key[2];   /* the entry's key: file <key[0] >> 56 as %02x>/<key[0]><key[1] as %016llx>.msc */
+  uint64_t data;     /* get: where the entry goes; put: the entry */
+  uint64_t cap;      /* get: room at data (0: only whether the entry is there) */
+  uint64_t len;      /* get: the entry's length (out); put: its length */
+  uint32_t handle;   /* from op 20 */
+  uint32_t flags;    /* 0 */
+};
+#define MADEIRA_SCN_MAX 8
+#define MADEIRA_SCN_MAX_LEN (256ull << 20)   /* madeira_d3d12.c mad_sc_read_file's limit */
+
+static struct { char dir[1024]; int fd; } madeira_scn_tab[MADEIRA_SCN_MAX];
+static unsigned madeira_scn_n;
+static pthread_mutex_t madeira_scn_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t madeira_scn_nonce;   /* set at the first open, under the lock: this run's temporary names */
+static _Atomic uint64_t madeira_scn_seq, madeira_scn_again;
+static _Atomic uint32_t madeira_scn_errors;
+
+static uint32_t madeira_scn_open(const char *dir) {
+  uint32_t h = 0;
+  unsigned i;
+  if (!dir || !*dir || strlen(dir) >= sizeof madeira_scn_tab[0].dir) return 0;
+  pthread_mutex_lock(&madeira_scn_mu);
+  if (!madeira_scn_nonce) madeira_scn_nonce = (uint32_t)time(NULL) | 1u;   /* differs from an earlier run's leftovers */
+  for (i = 0; i < madeira_scn_n && !h; i++)
+    if (!strcmp(madeira_scn_tab[i].dir, dir)) h = i + 1;
+  if (!h && madeira_scn_n < MADEIRA_SCN_MAX) {
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd >= 0) {
+      snprintf(madeira_scn_tab[madeira_scn_n].dir, sizeof madeira_scn_tab[0].dir, "%s", dir);
+      madeira_scn_tab[madeira_scn_n].fd = fd;
+      h = ++madeira_scn_n;
+    } else
+      fprintf(stderr, "[sc-native] madeira-bcd cannot open the shader cache directory (errno %d); "
+                      "madeira-d3d12 keeps Wine's file calls\n", errno);
+  }
+  pthread_mutex_unlock(&madeira_scn_mu);
+  return h;
+}
+
+/* A handle's directory descriptor, -1 for none; entries never change once made. */
+static int madeira_scn_dirfd(uint32_t h) {
+  int fd = -1;
+  pthread_mutex_lock(&madeira_scn_mu);
+  if (h >= 1 && h <= madeira_scn_n) fd = madeira_scn_tab[h - 1].fd;
+  pthread_mutex_unlock(&madeira_scn_mu);
+  return fd;
+}
+
+/* "<bb>/<key[0]><key[1]>.msc", as madeira_d3d12.c mad_sc_path names it. */
+static void madeira_scn_name(const uint64_t key[2], char out[64]) {
+  snprintf(out, 64, "%02x/%016llx%016llx.msc", (unsigned)(key[0] >> 56),
+           (unsigned long long)key[0], (unsigned long long)key[1]);
+}
+
+static void madeira_scn_error(const char *what, int e) {
+  uint32_t n = atomic_fetch_add_explicit(&madeira_scn_errors, 1, memory_order_relaxed) + 1;
+  if (n <= 8)
+    fprintf(stderr, "[sc-native] madeira-bcd shader cache %s failed natively (errno %d); "
+                    "that entry goes through Wine's file calls\n", what, e);
+}
+
+static uint32_t madeira_scn_get(struct madeira_scn_io *io) {
+  char name[64];
+  struct stat st;
+  unsigned char *b = (unsigned char *)(uintptr_t)io->data;
+  uint64_t off = 0;
+  int dfd = madeira_scn_dirfd(io->handle), fd;
+  if (dfd < 0) return 3;
+  madeira_scn_name(io->key, name);
+  if (!io->cap) {   /* is it there? (as GetFileAttributesW answers: anything by that name) */
+    if (fstatat(dfd, name, &st, 0) != 0) {
+      if (errno == ENOENT || errno == ENOTDIR) return 0;
+      madeira_scn_error("lookup", errno);
+      return 3;
+    }
+    io->len = (uint64_t)st.st_size;
+    return 2;
+  }
+  fd = openat(dfd, name, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    if (errno == ENOENT || errno == ENOTDIR) return 0;
+    madeira_scn_error("read", errno);
+    return 3;
+  }
+  /* Not a regular file, or past the reader's limit: the caller's Wine path decides, as before. */
+  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 || (uint64_t)st.st_size > MADEIRA_SCN_MAX_LEN) {
+    close(fd);
+    return 3;
+  }
+  io->len = (uint64_t)st.st_size;
+  if (io->len > io->cap || !b) { close(fd); return 2; }
+  while (off < io->len) {
+    ssize_t r = pread(fd, b + off, (size_t)(io->len - off), (off_t)off);
+    if (r < 0 && errno == EINTR) continue;
+    if (r <= 0) break;
+    off += (uint64_t)r;
+  }
+  close(fd);
+  return off == io->len ? 1u : 3u;
+}
+
+static uint32_t madeira_scn_put(const struct madeira_scn_io *io) {
+  char name[64], tmp[96], bucket[4];
+  const unsigned char *b = (const unsigned char *)(uintptr_t)io->data;
+  uint64_t off = 0;
+  int dfd = madeira_scn_dirfd(io->handle), fd = -1, tries, ok = 1;
+  if (dfd < 0 || !b || !io->len || io->len > MADEIRA_SCN_MAX_LEN) return 0;
+  madeira_scn_name(io->key, name);
+  for (tries = 0; fd < 0 && tries < 4; tries++) {
+    snprintf(tmp, sizeof tmp, "%s.%08x%llx.tmp", name, madeira_scn_nonce,
+             (unsigned long long)atomic_fetch_add_explicit(&madeira_scn_seq, 1, memory_order_relaxed));
+    fd = openat(dfd, tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+    if (fd < 0 && errno == ENOENT) {   /* no bucket directory yet: made as Wine's CreateDirectoryW makes it */
+      snprintf(bucket, sizeof bucket, "%02x", (unsigned)(io->key[0] >> 56));
+      if (mkdirat(dfd, bucket, 0777) == 0 || errno == EEXIST)
+        fd = openat(dfd, tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+    }
+    if (fd < 0 && errno != EEXIST) break;
+  }
+  if (fd < 0) { madeira_scn_error("write", errno); return 0; }
+  while (off < io->len) {
+    ssize_t w = pwrite(fd, b + off, (size_t)(io->len - off), (off_t)off);
+    if (w < 0 && errno == EINTR) continue;
+    if (w <= 0) { ok = 0; break; }
+    off += (uint64_t)w;
+  }
+  if (close(fd) != 0) ok = 0;
+  if (ok) {
+    /* A count only: an entry already there was converted twice, by two threads
+     * that missed the same key at once (or an earlier run's file is replaced). */
+    struct stat st;
+    int again = fstatat(dfd, name, &st, 0) == 0;
+    if (renameat(dfd, tmp, dfd, name) == 0) {
+      if (again) {
+        uint64_t n = atomic_fetch_add_explicit(&madeira_scn_again, 1, memory_order_relaxed) + 1;
+        if (n == 1 || n == 10 || n == 100 || n % 1000 == 0)
+          fprintf(stderr, "[sc-native] madeira-bcd %llu shader-cache entries were already there when stored "
+                          "(converted twice, e.g. by two threads at once)\n", (unsigned long long)n);
+      }
+      return 1;
+    }
+  }
+  madeira_scn_error("write", errno);
+  unlinkat(dfd, tmp, 0);
+  return 0;
+}
+
+static uint32_t madeira_scn_ctl(struct madeira_ctl_args *a) {
+  struct madeira_scn_io *io = (struct madeira_scn_io *)(uintptr_t)a->ptr;
+  switch (a->op) {
+  case 20: return madeira_scn_open((const char *)(uintptr_t)a->ptr);
+  case 21: return io ? madeira_scn_get(io) : 3;
+  case 22: return io ? madeira_scn_put(io) : 0;
+  default: return 0;
+  }
+}
+
+/* madeira-bcd: late render-pass store actions (tools/patch-winemetal-rp-store.py).
+ * MadeiraCtl op 24 from madeira-d3d12 (rp-discard = 1): the store actions of an
+ * open render encoder whose pass said MTLStoreActionUnknown, set before
+ * endEncoding; 0xff leaves one alone, encoder 0 is a probe. */
+struct madeira_rp_store_req { uint64_t enc; uint8_t color[8], depth, stencil, pad[6]; };
+static uint32_t madeira_rp_store(const struct madeira_rp_store_req *r) {
+  id<MTLRenderCommandEncoder> enc;
+  unsigned i;
+  if (!r->enc) return 1;
+  enc = (id<MTLRenderCommandEncoder>)(uintptr_t)r->enc;
+  for (i = 0; i < 8; i++)
+    if (r->color[i] != 0xff) [enc setColorStoreAction:(MTLStoreAction)r->color[i] atIndex:i];
+  if (r->depth != 0xff) [enc setDepthStoreAction:(MTLStoreAction)r->depth];
+  if (r->stencil != 0xff) [enc setStencilStoreAction:(MTLStoreAction)r->stencil];
+  return 1;
+}
+
 static NTSTATUS _madeira_ctl(void *args) {
   struct madeira_ctl_args *a = args;
   if (!a) return STATUS_SUCCESS;
@@ -6459,6 +6757,14 @@ static NTSTATUS _madeira_ctl(void *args) {
   case 6:     /* ml1136: requested fence-chain mode (0 = none) */
     a->ret = (uint32_t)g_madeira_fence_req;
     break;
+  case 10: {  /* madeira-bcd: pipeline cache warm-up (tools/patch-winemetal-pso-warm.py); len = kind
+               * (0 render, 1 render + vertex descriptor, 2 compute), ptr = { device, info, vd } */
+    const uint64_t *r = (const uint64_t *)(uintptr_t)a->ptr;
+    if (!r || wmtr_enabled() || !madeira_pso_warm_setup()) break;
+    a->ret = madeira_pso_warm_submit((obj_handle_t)r[0], (const void *)(uintptr_t)r[1],
+                                     (const void *)(uintptr_t)r[2], (unsigned)a->len);
+    break;
+  }
   case 5: {   /* ml1128: the PE counter block the probe samples */
     extern volatile uint64_t ios_xp_pe_block, ios_xp_pe_len;
     ios_xp_pe_len = a->len; ios_xp_pe_block = a->ptr;
@@ -6552,6 +6858,14 @@ static NTSTATUS _madeira_ctl(void *args) {
     }
     break;
   }
+  case 20: case 21: case 22:   /* madeira-bcd: native file access for the D3D12 shader cache
+                                * (tools/patch-winemetal-sc-native.py): open, get, put */
+    a->ret = madeira_scn_ctl(a);
+    break;
+  case 24:    /* madeira-bcd: late render-pass store actions (tools/patch-winemetal-rp-store.py) */
+    if (!a->ptr || a->len < sizeof(struct madeira_rp_store_req) || wmtr_enabled()) break;
+    a->ret = madeira_rp_store((const struct madeira_rp_store_req *)(uintptr_t)a->ptr);
+    break;
   default: break;
   }
   return STATUS_SUCCESS;
