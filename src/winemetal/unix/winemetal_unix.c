@@ -6562,21 +6562,37 @@ static uint32_t madeira_pso_warm_submit(obj_handle_t device, const void *info, c
   size_t vsz = kind == 1 ? sizeof(struct WMTVertexDescriptorInfo) : 0;
   unsigned char *copy;
   uintptr_t f0, f1 = 0;
+  struct WMTConstMemoryPointer *lookup;
+  obj_handle_t *archives, ser;
+  unsigned narch, i;
   if (!device || !info || kind > 2 || (kind == 1 && !vd)) return 0;
-  copy = malloc(isz + vsz);
+  copy = malloc(isz + vsz + 255 * sizeof(obj_handle_t));
   if (!copy) return 0;
   memcpy(copy, info, isz);
   if (vsz) memcpy(copy + isz, vd, vsz);
-  if (kind == 2)
-    f0 = (uintptr_t)((const struct WMTComputePipelineInfo *)copy)->compute_function;
-  else {
-    f0 = (uintptr_t)((const struct WMTRenderPipelineInfo *)copy)->vertex_function;
-    f1 = (uintptr_t)((const struct WMTRenderPipelineInfo *)copy)->fragment_function;
+  archives = (obj_handle_t *)(copy + isz + vsz);
+  if (kind == 2) {
+    struct WMTComputePipelineInfo *c = (struct WMTComputePipelineInfo *)copy;
+    f0 = (uintptr_t)c->compute_function;
+    lookup = &c->binary_archives_for_lookup; narch = c->num_binary_archives_for_lookup; ser = c->binary_archive_for_serialization;
+  } else {
+    struct WMTRenderPipelineInfo *r = (struct WMTRenderPipelineInfo *)copy;
+    f0 = (uintptr_t)r->vertex_function;
+    f1 = (uintptr_t)r->fragment_function;
+    lookup = &r->binary_archives_for_lookup; narch = r->num_binary_archives_for_lookup; ser = r->binary_archive_for_serialization;
   }
   /* The game may release the pipeline (and its functions) before the queue
-   * gets to it. */
+   * gets to it. The same goes for its binary archives, and the lookup list is
+   * in the caller's memory: the copy gets a list of its own. */
   if (f0) [(id)f0 retain];
   if (f1) [(id)f1 retain];
+  if (!lookup->ptr) narch = 0;
+  for (i = 0; i < narch; i++) {
+    archives[i] = ((const obj_handle_t *)lookup->ptr)[i];
+    if (archives[i]) [(id)archives[i] retain];
+  }
+  if (narch) lookup->ptr = archives;
+  if (ser) [(id)ser retain];
   [(id)device retain];
   atomic_fetch_add_explicit(&madeira_pso_warm_sent, 1, memory_order_relaxed);
   dispatch_async(madeira_pso_warm_q[atomic_fetch_add_explicit(&madeira_pso_warm_rr, 1, memory_order_relaxed) %
@@ -6607,6 +6623,9 @@ static uint32_t madeira_pso_warm_submit(obj_handle_t device, const void *info, c
       if (pso) [(id)pso release];
       if (f0) [(id)f0 release];
       if (f1) [(id)f1 release];
+      for (unsigned k = 0; k < narch; k++)
+        if (archives[k]) [(id)archives[k] release];
+      if (ser) [(id)ser release];
       [(id)device release];
       free(copy);
     }
