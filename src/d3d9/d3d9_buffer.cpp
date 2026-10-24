@@ -60,12 +60,24 @@ directMapEnabled() {
 
 // DEFAULT + DYNAMIC is the pool and usage whose locks carry DISCARD and
 // NOOVERWRITE, which is what makes handing out the read allocation safe; a
-// software-VP-only device strips both (sanitize_buffer_lock_flags). The
-// allocation must also have a CPU address this process can use.
+// software-VP-only device strips both (sanitize_buffer_lock_flags).
 bool
-wantsDirectMap(MTLD3D9Device *device, D3DPOOL pool, DWORD usage, DynamicBuffer *dynamic) {
-  return directMapEnabled() && pool == D3DPOOL_DEFAULT && (usage & D3DUSAGE_DYNAMIC) && !device->canOnlySWVP() &&
-         dynamic->immediateMappedMemory() != nullptr;
+wantsDirectMap(MTLD3D9Device *device, D3DPOOL pool, DWORD usage) {
+  return directMapEnabled() && pool == D3DPOOL_DEFAULT && (usage & D3DUSAGE_DYNAMIC) && !device->canOnlySWVP();
+}
+
+// A direct-mapped buffer's allocations keep the default CPU cache mode rather
+// than write-combined: the application may read what it locked, and
+// ProcessVertices and the strip and fan index scans read it too
+// (hostPointer), where the mirror used to serve those reads from cached
+// memory. Replaces the create-time write-combined allocation, which nothing
+// has used yet, and returns the flags the DynamicBuffer mints with.
+Flags<BufferAllocationFlag>
+useCachedAllocation(dxmt::Buffer *buffer) {
+  auto cached = buffer->allocate(Flags<BufferAllocationFlag>(), "d3d9 direct-mapped buffer");
+  if (cached.ptr() && cached->buffer().handle != 0 && cached->mappedMemory(0))
+    buffer->rename(std::move(cached));
+  return Flags<BufferAllocationFlag>();
 }
 
 // Lock of a direct-mapped buffer. DISCARD takes a GPU-idle allocation and
@@ -115,10 +127,15 @@ MTLD3D9VertexBuffer::MTLD3D9VertexBuffer(
   // draw reads (d3d9_buffer_map.hpp). A Lock(DISCARD) recycles a GPU-idle one.
   // Every generation must carry this class, including the create-time one, or a
   // store into an allocation that cannot be written is silently dropped.
-  m_dynamic = new dxmt::DynamicBuffer(m_dxmtBuffer.ptr(), BufferAllocationFlag::CpuWriteCombined);
-  // A direct-mapped buffer has no mirror: free it rather than carry an unused
+  const bool direct = wantsDirectMap(device, pool, usage);
+  m_dynamic = new dxmt::DynamicBuffer(
+      m_dxmtBuffer.ptr(),
+      direct ? useCachedAllocation(m_dxmtBuffer.ptr()) : Flags<BufferAllocationFlag>(BufferAllocationFlag::CpuWriteCombined)
+  );
+  // Direct mapping also needs a CPU address this process can use. A
+  // direct-mapped buffer has no mirror: free it rather than carry an unused
   // copy of every dynamic buffer.
-  m_direct = wantsDirectMap(device, pool, usage, m_dynamic.ptr());
+  m_direct = direct && m_dynamic->immediateMappedMemory() != nullptr;
   if (m_direct && m_hostPtr) {
     guest_free(m_hostPtr);
     m_hostPtr = nullptr;
@@ -428,9 +445,13 @@ MTLD3D9IndexBuffer::MTLD3D9IndexBuffer(
   // See MTLD3D9VertexBuffer's ctor: wrap the underlying Buffer in the
   // DynamicBuffer recycling wrapper over a CPU-writable, Metal-owned
   // allocation.
-  m_dynamic = new dxmt::DynamicBuffer(m_dxmtBuffer.ptr(), BufferAllocationFlag::CpuWriteCombined);
+  const bool direct = wantsDirectMap(device, pool, usage);
+  m_dynamic = new dxmt::DynamicBuffer(
+      m_dxmtBuffer.ptr(),
+      direct ? useCachedAllocation(m_dxmtBuffer.ptr()) : Flags<BufferAllocationFlag>(BufferAllocationFlag::CpuWriteCombined)
+  );
   // See MTLD3D9VertexBuffer's ctor: a direct-mapped buffer has no mirror.
-  m_direct = wantsDirectMap(device, pool, usage, m_dynamic.ptr());
+  m_direct = direct && m_dynamic->immediateMappedMemory() != nullptr;
   if (m_direct && m_hostPtr) {
     guest_free(m_hostPtr);
     m_hostPtr = nullptr;
