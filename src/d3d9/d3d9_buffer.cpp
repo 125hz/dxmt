@@ -8,6 +8,9 @@
 #include "wsi_platform.hpp"
 
 #include "d3d9_census.hpp"
+#include "util_env.hpp"
+
+#include <cstring>
 
 namespace dxmt {
 
@@ -40,6 +43,56 @@ renameDynamicBuffer(MTLD3D9Device *device, DynamicBuffer *dynamic, uint64_t curr
   return D3D_OK;
 }
 
+// Direct mapping (d3d9_buffer_map.hpp): a 64-bit guest can address Metal's own
+// allocation, so both premises of the mirror are gone for it. The native ARM64
+// frontend also builds without __i386__ but serves 32-bit guests
+// (DXMT_MADEIRA), so it keeps the mirror. MADEIRA_D3D9_DIRECT_MAP=0 keeps the
+// mirror here too. Read once.
+bool
+directMapEnabled() {
+#if defined(__x86_64__) && !defined(DXMT_MADEIRA)
+  static const bool enabled = env::getEnvVar("MADEIRA_D3D9_DIRECT_MAP") != "0";
+  return enabled;
+#else
+  return false;
+#endif
+}
+
+// DEFAULT + DYNAMIC is the pool and usage whose locks carry DISCARD and
+// NOOVERWRITE, which is what makes handing out the read allocation safe; a
+// software-VP-only device strips both (sanitize_buffer_lock_flags). The
+// allocation must also have a CPU address this process can use.
+bool
+wantsDirectMap(MTLD3D9Device *device, D3DPOOL pool, DWORD usage, DynamicBuffer *dynamic) {
+  return directMapEnabled() && pool == D3DPOOL_DEFAULT && (usage & D3DUSAGE_DYNAMIC) && !device->canOnlySWVP() &&
+         dynamic->immediateMappedMemory() != nullptr;
+}
+
+// Lock of a direct-mapped buffer. DISCARD takes a GPU-idle allocation and
+// leaves the old one to the draws already recorded against it. NOOVERWRITE
+// keeps the current one: the application promises not to touch what those
+// draws read, as on Windows. A plain lock must neither wait nor hand back
+// memory a queued draw reads, so it renames too and carries the contents over.
+// The sequence numbers are renameDynamicBuffer's.
+HRESULT
+lockDirect(
+    MTLD3D9Device *device, DynamicBuffer *dynamic, UINT size, DWORD flags, uint64_t current_seq,
+    uint64_t coherent_seq, void **out
+) {
+  if (!(flags & D3DLOCK_NOOVERWRITE)) {
+    const bool keep = !(flags & D3DLOCK_DISCARD);
+    Rc<BufferAllocation> old = dynamic->immediateName();
+    const void *old_ptr = dynamic->immediateMappedMemory();
+    HRESULT hr = renameDynamicBuffer(device, dynamic, current_seq, coherent_seq);
+    if (FAILED(hr))
+      return hr;
+    if (keep && old_ptr && dynamic->immediateMappedMemory())
+      std::memcpy(dynamic->immediateMappedMemory(), old_ptr, size);
+  }
+  *out = dynamic->immediateMappedMemory();
+  return *out ? D3D_OK : D3DERR_INVALIDCALL;
+}
+
 } // namespace
 
 MTLD3D9VertexBuffer::MTLD3D9VertexBuffer(
@@ -63,6 +116,13 @@ MTLD3D9VertexBuffer::MTLD3D9VertexBuffer(
   // Every generation must carry this class, including the create-time one, or a
   // store into an allocation that cannot be written is silently dropped.
   m_dynamic = new dxmt::DynamicBuffer(m_dxmtBuffer.ptr(), BufferAllocationFlag::CpuWriteCombined);
+  // A direct-mapped buffer has no mirror: free it rather than carry an unused
+  // copy of every dynamic buffer.
+  m_direct = wantsDirectMap(device, pool, usage, m_dynamic.ptr());
+  if (m_direct && m_hostPtr) {
+    guest_free(m_hostPtr);
+    m_hostPtr = nullptr;
+  }
   // A non-DEFAULT buffer is dirty over its whole extent from creation so its
   // first bind or Unlock uploads the mirror; DEFAULT contents are undefined
   // until the app writes them (DXVK d3d9_common_buffer.cpp).
@@ -94,7 +154,8 @@ MTLD3D9VertexBuffer::~MTLD3D9VertexBuffer() {
 
 void
 MTLD3D9VertexBuffer::refreshWholeMirror() {
-  if (!m_dirty)
+  // A direct-mapped buffer is never dirty: draws read what the application wrote.
+  if (!m_dirty || m_direct)
     return;
   // Rename before storing. An earlier draw in this chunk may already be
   // recorded against the current allocation, and overwriting it in place would
@@ -293,7 +354,20 @@ MTLD3D9VertexBuffer::Lock(UINT OffsetToLock, UINT SizeToLock, void **ppbData, DW
   // hand back fresh storage rather than stall, and neither half applies: the
   // application never touches the allocation, and the refresh that carries the
   // mirror across renames unconditionally, so a name installed here would be
-  // retired by that rename without a single draw ever reading it.
+  // retired by that rename without a single draw ever reading it. That is the
+  // mirror; a direct-mapped buffer hands out the allocation instead.
+  if (m_direct) {
+    void *base = nullptr;
+    HRESULT hr = lockDirect(
+        m_device, m_dynamic.ptr(), m_size, Flags, m_device->m_currentCmdSeq,
+        m_device->m_cachedSignaled.load(std::memory_order_acquire), &base
+    );
+    if (FAILED(hr))
+      return hr;
+    m_lockCount.increment();
+    *ppbData = static_cast<char *>(base) + OffsetToLock;
+    return D3D_OK;
+  }
   if (!m_hostPtr)
     return D3DERR_INVALIDCALL;
   // A write lock stales the cache and nothing finer is recorded: the
@@ -355,6 +429,12 @@ MTLD3D9IndexBuffer::MTLD3D9IndexBuffer(
   // DynamicBuffer recycling wrapper over a CPU-writable, Metal-owned
   // allocation.
   m_dynamic = new dxmt::DynamicBuffer(m_dxmtBuffer.ptr(), BufferAllocationFlag::CpuWriteCombined);
+  // See MTLD3D9VertexBuffer's ctor: a direct-mapped buffer has no mirror.
+  m_direct = wantsDirectMap(device, pool, usage, m_dynamic.ptr());
+  if (m_direct && m_hostPtr) {
+    guest_free(m_hostPtr);
+    m_hostPtr = nullptr;
+  }
   // See MTLD3D9VertexBuffer's ctor: a non-DEFAULT buffer starts wholly dirty.
   if (m_pool != D3DPOOL_DEFAULT)
     m_dirty = true;
@@ -373,7 +453,7 @@ MTLD3D9IndexBuffer::~MTLD3D9IndexBuffer() {
 
 void
 MTLD3D9IndexBuffer::refreshWholeMirror() {
-  if (!m_dirty)
+  if (!m_dirty || m_direct)
     return;
   // See MTLD3D9VertexBuffer::refreshWholeMirror: rename first, then the whole
   // mirror rather than a span the application described.
@@ -530,7 +610,20 @@ MTLD3D9IndexBuffer::Lock(UINT OffsetToLock, UINT SizeToLock, void **ppbData, DWO
     return D3DERR_INVALIDCALL;
   *ppbData = nullptr;
   Flags = sanitize_buffer_lock_flags(Flags, m_pool, m_usage, m_device->canOnlySWVP());
-  // See MTLD3D9VertexBuffer::Lock for why DISCARD needs nothing done here.
+  // See MTLD3D9VertexBuffer::Lock for why DISCARD needs nothing done here, and
+  // for the direct-mapped case.
+  if (m_direct) {
+    void *base = nullptr;
+    HRESULT hr = lockDirect(
+        m_device, m_dynamic.ptr(), m_size, Flags, m_device->m_currentCmdSeq,
+        m_device->m_cachedSignaled.load(std::memory_order_acquire), &base
+    );
+    if (FAILED(hr))
+      return hr;
+    m_lockCount.increment();
+    *ppbData = static_cast<char *>(base) + OffsetToLock;
+    return D3D_OK;
+  }
   if (!m_hostPtr)
     return D3DERR_INVALIDCALL;
   // A write lock stales the cache and nothing finer is recorded: the
