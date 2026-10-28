@@ -374,16 +374,18 @@ static uint64_t madeira_ml1042_video_budget(uint64_t metal_recommended);
  * our footprint or under the process limit, but it is the device's RAM all the
  * same. Log 96 (an 8 GB phone, 4088 MB donated, footprint 4.4 -> 5.9 GB, host free
  * ~120 MB, sub-1 FPS for seconds at a time): the trim below saw only the footprint
- * and kept the budget at 2.8-4 GB the whole run. madeira.cfg vram-count-donor = 0
- * leaves the donor out (the trim then judges the footprint alone, as before). */
+ * and kept the budget at 2.8-4 GB the whole run. Log 95 had the same full pool and
+ * the same trims and played at 26-53 FPS, so the budget was not shown to be the
+ * cause: madeira.cfg vram-count-donor = 1 counts the donated pages too (an A/B,
+ * off by default; the trim then judges the footprint alone, as before). */
 extern void madeira_swap_overlay_stats(unsigned long long *file_mb, unsigned long long *donor_mb,
                                        unsigned long long *donor_pool_mb, unsigned long long *donor_guarded) __attribute__((weak));
 static uint64_t madeira_donor_in_use(void) {
   static int on = -1;
   unsigned long long mb = 0;
   if (on < 0) {
-    on = madeira_cfg_int("vram-count-donor", 1) != 0;
-    fprintf(stderr, "[wmt] video budget trim %s donated RAM (madeira.cfg vram-count-donor; 0 = the footprint alone)\n",
+    on = madeira_cfg_int("vram-count-donor", 0) != 0;
+    fprintf(stderr, "[wmt] video budget trim %s donated RAM (madeira.cfg vram-count-donor; 1 = counts it, default the footprint alone)\n",
             on ? "counts" : "leaves out");
   }
   if (!on || !madeira_swap_overlay_stats) return 0;
