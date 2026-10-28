@@ -370,6 +370,26 @@ static uint64_t madeira_mem_limit(uint64_t foot) {
   return limit;
 }
 static uint64_t madeira_ml1042_video_budget(uint64_t metal_recommended);
+/* The swap tier's donor pool (ntdll): memory another task owns, so it is not in
+ * our footprint or under the process limit, but it is the device's RAM all the
+ * same. Log 96 (an 8 GB phone, 4088 MB donated, footprint 4.4 -> 5.9 GB, host free
+ * ~120 MB, sub-1 FPS for seconds at a time): the trim below saw only the footprint
+ * and kept the budget at 2.8-4 GB the whole run. madeira.cfg vram-count-donor = 0
+ * leaves the donor out (the trim then judges the footprint alone, as before). */
+extern void madeira_swap_overlay_stats(unsigned long long *file_mb, unsigned long long *donor_mb,
+                                       unsigned long long *donor_pool_mb, unsigned long long *donor_guarded) __attribute__((weak));
+static uint64_t madeira_donor_in_use(void) {
+  static int on = -1;
+  unsigned long long mb = 0;
+  if (on < 0) {
+    on = madeira_cfg_int("vram-count-donor", 1) != 0;
+    fprintf(stderr, "[wmt] video budget trim %s donated RAM (madeira.cfg vram-count-donor; 0 = the footprint alone)\n",
+            on ? "counts" : "leaves out");
+  }
+  if (!on || !madeira_swap_overlay_stats) return 0;
+  madeira_swap_overlay_stats(NULL, &mb, NULL, NULL);
+  return (uint64_t)mb << 20;
+}
 /* ml1075: DYNAMIC BUDGET. The number above is a one-off: the game read it once
  * and then grew its heap through a cutscene until jetsam (ph-rdr42: guest heap
  * 2.3 -> 4.0 GB, footprint 4.7 -> 7.9 GB, killed at 8.19). On Windows, DXGI's
@@ -388,7 +408,7 @@ static uint64_t madeira_ml1075_dynamic_budget(uint64_t base) {
   last_ns = now;
   {
     task_vm_info_data_t vmi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
-    uint64_t foot = 0, limit, high, budget = base;
+    uint64_t foot = 0, limit, high, budget = base, donor = 0, over = 0;
     if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &cnt) == KERN_SUCCESS) foot = vmi.phys_footprint;
     limit = madeira_mem_limit(foot);
     /* ml1103: madeira.cfg vram-trim-mb = distance below the kill line where the
@@ -398,14 +418,21 @@ static uint64_t madeira_ml1075_dynamic_budget(uint64_t base) {
      * game went back to evicting and re-streaming (the pop-in). */
     { static long long trim_mb = -1; if (trim_mb < 0) { trim_mb = madeira_cfg_int("vram-trim-mb", 1536); if (trim_mb < 0) trim_mb = 1536;
         fprintf(stderr, "[wmt] ml1103 video budget trim starts %lld MB below the kill line (madeira.cfg vram-trim-mb; 0 = never)\n", trim_mb); }
-      high = trim_mb ? (limit > ((uint64_t)trim_mb << 20) ? limit - ((uint64_t)trim_mb << 20) : 0) : ~0ull; }
-    if (foot > high) budget = base > foot - high ? base - (foot - high) : 0;
+      high = trim_mb ? (limit > ((uint64_t)trim_mb << 20) ? limit - ((uint64_t)trim_mb << 20) : 0) : ~0ull;
+      if (foot > high) over = foot - high;
+      /* The same distance below the RAM cap, for the footprint and the donated pages together. */
+      donor = madeira_donor_in_use();
+      if (donor && trim_mb) {
+        uint64_t cap = madeira_ram_cap(), room = cap > ((uint64_t)trim_mb << 20) ? cap - ((uint64_t)trim_mb << 20) : 0;
+        if (cap && foot + donor > room && foot + donor - room > over) over = foot + donor - room;
+      } }
+    if (over) budget = base > over ? base - over : 0;
     if (budget < (768ull << 20)) budget = 768ull << 20;
     if (budget > base) budget = base;
     if (!last_logged || (last_logged > budget ? last_logged - budget : budget - last_logged) >= (64ull << 20) || (calls % 5000) == 0) {
-      fprintf(stderr, "[wmt] ml1075 video budget now %llu MB (base %llu, footprint %llu of %llu MB; %lu queries so far)\n",
+      fprintf(stderr, "[wmt] ml1075 video budget now %llu MB (base %llu, footprint %llu of %llu MB, donated %llu MB; %lu queries so far)\n",
               (unsigned long long)(budget >> 20), (unsigned long long)(base >> 20), (unsigned long long)(foot >> 20),
-              (unsigned long long)(limit >> 20), calls);
+              (unsigned long long)(limit >> 20), (unsigned long long)(donor >> 20), calls);
       last_logged = budget;
     }
     last_budget = budget;
