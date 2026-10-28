@@ -3493,6 +3493,15 @@ static inline void madeira_log_present_cadence(const char *path, double after) {
   }
 }
 
+/* The performance overlay's frame times (Madeira's Winios.m, owner 2026-10-28):
+ * each present is marked with its drawable's layer, after any frame cap's wait,
+ * so the intervals are the ones the player sees. Weak: a winemetal linked
+ * without the app has no marks. */
+extern void madeira_frame_mark(const void *layer) __attribute__((weak));
+static inline void madeira_frame_mark_drawable(id drawable) {
+  if (madeira_frame_mark && drawable) madeira_frame_mark((const void *)[(id<CAMetalDrawable>)drawable layer]);
+}
+
 /* iOS-Madeira 2026-05-18: exposed for SwiftUI FPS overlay. Reads the
  * atomic counter on the calling thread (typically a 100ms Swift Timer). */
 uint64_t madeira_get_present_count(void) {
@@ -3931,6 +3940,7 @@ _MTLCommandBuffer_presentDrawable(void *obj) {
   /* ml1050: this call IS the frame boundary on the encode thread. */
   if (madeira_frame_hooks_on())
     ios_frame_encode_present(0);
+  madeira_frame_mark_drawable((id)params->arg);
   /* Frame generation presents both frames itself (madeira_fg_present). */
   if (mode != 2 && madeira_fg_enabled() &&
       madeira_fg_present((id<MTLCommandBuffer>)params->handle, (id<CAMetalDrawable>)params->arg)) {
@@ -3978,6 +3988,7 @@ static NTSTATUS
 _MTLCommandBuffer_presentDrawableAfterMinimumDuration(void *obj) {
   struct unixcall_generic_obj_obj_double_noret *params = obj;
   madeira_log_present_cadence("presentDrawableAfterMinDuration", params->arg1);
+  madeira_frame_mark_drawable((id)params->arg0);
   [(id<MTLCommandBuffer>)params->handle presentDrawable:(id<MTLDrawable>)params->arg0
                                    afterMinimumDuration:params->arg1];
   return STATUS_SUCCESS;
@@ -4309,6 +4320,7 @@ _MetalLayer_nextDrawable(void *obj) {
       if (madeira_frame_hooks_on())
         ios_frame_encode_present(1);   /* ml1050: a frame that reaches no glass */
       madeira_log_present_cadence("presentSkipped", 0.0);
+      if (madeira_frame_mark) madeira_frame_mark((const void *)params->handle);
       return STATUS_SUCCESS;
     }
     last_acquire = now;
