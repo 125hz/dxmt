@@ -3943,9 +3943,62 @@ static int madeira_fg_present_inner(id<MTLCommandBuffer> cb, id<CAMetalDrawable>
             g_fg.generated, g_fg.frames, g_fg.no_drawable, g_fg.dt * 1000.0);
   return 1;
 }
+/* One layer at a time: the largest one presenting. Every Wine process presents
+ * through this call, so a launcher's or a browser helper's windows alternated
+ * with the game's on the one shared state, from several threads, and rebuilt
+ * the interpolator nearly every frame; a helper killed with its process inside
+ * that rebuild left an encoder open and Metal aborted the app. Other layers
+ * present as usual; a layer that has not presented for 2 s gives the binding
+ * up. MADEIRA_FRAMEGEN_ONE_LAYER=0 follows every layer again (the lock stays). */
+static void *g_fg_layer;                 /* compared, never dereferenced */
+static uint64_t g_fg_layer_abs, g_fg_layer_area;
+static pthread_mutex_t g_fg_mu = PTHREAD_MUTEX_INITIALIZER;
+static int g_fg_one_layer = -1;
+static unsigned long long g_fg_busy;
+
+static int madeira_fg_other_layer(void *layer, uint64_t area, uint64_t now) {
+  static mach_timebase_info_data_t tb;
+  void *bound = __atomic_load_n(&g_fg_layer, __ATOMIC_ACQUIRE);
+  uint64_t seen = __atomic_load_n(&g_fg_layer_abs, __ATOMIC_RELAXED);
+  if (!bound || layer == bound) return 0;
+  if (!tb.denom) mach_timebase_info(&tb);
+  if (now > seen && (now - seen) * tb.numer / tb.denom > 2000000000ull) return 0;
+  return area <= __atomic_load_n(&g_fg_layer_area, __ATOMIC_RELAXED);
+}
+
 static int madeira_fg_present(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawable) {
+  void *layer = (void *)drawable.layer;
+  id<MTLTexture> t = drawable.texture;
+  uint64_t area = t ? (uint64_t)t.width * t.height : 0, now = mach_absolute_time();
   int r;
+  if (g_fg_one_layer < 0) {
+    const char *e = getenv("MADEIRA_FRAMEGEN_ONE_LAYER");
+    g_fg_one_layer = !(e && *e == '0');
+  }
+  if (g_fg_one_layer && madeira_fg_other_layer(layer, area, now)) return 0;
+  /* Never wait: a thread killed with its process can leave the lock held. */
+  if (pthread_mutex_trylock(&g_fg_mu)) {
+    if (!(g_fg_busy++ % 600))
+      dprintf(STDERR_FILENO, "[framegen] busy on another thread: this frame presents as usual (%llu)\n", g_fg_busy);
+    return 0;
+  }
+  if (g_fg_one_layer) {
+    if (madeira_fg_other_layer(layer, area, now)) {
+      pthread_mutex_unlock(&g_fg_mu);
+      return 0;
+    }
+    if (layer != g_fg_layer) {
+      if (g_fg_layer)
+        dprintf(STDERR_FILENO, "[framegen] follows layer %p (%llu px) instead of %p (%llu px)\n", layer,
+                (unsigned long long)area, g_fg_layer, (unsigned long long)g_fg_layer_area);
+      g_fg.have_prev = 0;
+      __atomic_store_n(&g_fg_layer, layer, __ATOMIC_RELEASE);
+    }
+    __atomic_store_n(&g_fg_layer_abs, now, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_fg_layer_area, area, __ATOMIC_RELAXED);
+  }
   @autoreleasepool { r = madeira_fg_present_inner(cb, drawable); }
+  pthread_mutex_unlock(&g_fg_mu);
   return r;
 }
 
